@@ -1,7 +1,7 @@
 import importlib
-import scvt._settings as settings
+import UniVI._settings as settings
 
-from scvt import datasets, plotting, models, utilities
+from UniVI import datasets, plotting, models, utilities
 
 __all__ = [
     settings,

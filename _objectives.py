@@ -1,9 +1,9 @@
 import torch
 from torch.distributions import Normal
-from scvt.utilities._utils import log_mean_exp, kl_divergence, get_device, df_to_tensor
+from UniVI.utilities._utils import log_mean_exp, kl_divergence, get_device, df_to_tensor
 
-from scvt.external.evaluate_FOSCTTM import calc_frac
-from scvt.utilities._utils import tensor_to_numpy, get_device
+from UniVI.external.evaluate_FOSCTTM import calc_frac
+from UniVI.utilities._utils import tensor_to_numpy, get_device
 
 
 from numpy import prod

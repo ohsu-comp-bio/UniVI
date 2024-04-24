@@ -2,11 +2,11 @@ from collections import OrderedDict
 import torch
 from torch import nn
 
-import scvt
+import UniVI
 import importlib
-importlib.reload(scvt._settings)
-from scvt._settings import Constants
-importlib.reload(scvt._settings)
+importlib.reload(UniVI._settings)
+from UniVI._settings import Constants
+importlib.reload(UniVI._settings)
 
 def create_unit_layers_wo_BATCHNORM(
         dim_in: int,

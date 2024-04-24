@@ -23,33 +23,33 @@ from torch import nn
 
 import scanpy as sc
 
-from scvt._settings import DataPath, DataDefault 
-from scvt._objectives import objective
-from scvt.utilities._utils import data_to_device, Logger, Timer, dic2obj, dic_params_print, tensor_to_df, tensor_to_numpy, df_to_tensor, get_device, embed_umap, embed_tsne, embed_pca, kl_divergence, check_mtx_to_df, lst_unique_from_dic, Lists
+from UniVI._settings import DataPath, DataDefault 
+from UniVI._objectives import objective
+from UniVI.utilities._utils import data_to_device, Logger, Timer, dic2obj, dic_params_print, tensor_to_df, tensor_to_numpy, df_to_tensor, get_device, embed_umap, embed_tsne, embed_pca, kl_divergence, check_mtx_to_df, lst_unique_from_dic, Lists
 
-from scvt.utilities._stats import MVGLikelihood
+from UniVI.utilities._stats import MVGLikelihood
 
-from scvt.models import _vae
-from scvt.models._vae import VAE
-from scvt._VAE import VAEMap
-from scvt.models._mmvae import MMVAE
-from scvt.models._utils import init_weights, EarlyStopping
-from scvt.models import _utils as model_utils
-from scvt.datasets._datasets import SCPairedDataLoader, anndata_sanity_check, model_feature_matching
-from scvt.datasets._external import get_cell_ident_from_reference
+from UniVI.models import _vae
+from UniVI.models._vae import VAE
+from UniVI._VAE import VAEMap
+from UniVI.models._mmvae import MMVAE
+from UniVI.models._utils import init_weights, EarlyStopping
+from UniVI.models import _utils as model_utils
+from UniVI.datasets._datasets import SCPairedDataLoader, anndata_sanity_check, model_feature_matching
+from UniVI.datasets._external import get_cell_ident_from_reference
 
-from scvt.external.evaluate_FOSCTTM import calc_frac
+from UniVI.external.evaluate_FOSCTTM import calc_frac
 
 import importlib
-from scvt import _objectives
-from scvt.plotting import plots
+from UniVI import _objectives
+from UniVI.plotting import plots
 importlib.reload(_objectives)
 importlib.reload(_vae)
 importlib.reload(model_utils)
 importlib.reload(plots)
 
-from scvt._objectives import elbo, objective
-from scvt.plotting.plots import grid_display, heatmap_sample_idx, heatmap_from_mtx, gg_point_embed, gg_point_pair_by_umap, gg_point_pair_embed, boxplot_from_mtx, gg_point_z_activation, gg_point_feature_active, gg_point_scatter
+from UniVI._objectives import elbo, objective
+from UniVI.plotting.plots import grid_display, heatmap_sample_idx, heatmap_from_mtx, gg_point_embed, gg_point_pair_by_umap, gg_point_pair_embed, boxplot_from_mtx, gg_point_z_activation, gg_point_feature_active, gg_point_scatter
 
 class CrossMap(VAEMap):
 

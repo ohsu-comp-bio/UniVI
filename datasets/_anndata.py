@@ -1,4 +1,4 @@
-from scvt.utilities._utils import str_to_path, Lists, check_mtx_to_df
+from UniVI.utilities._utils import str_to_path, Lists, check_mtx_to_df
 from typing import Union
 from pathlib import Path
 import os
@@ -9,7 +9,7 @@ import anndata
 import scanpy as sc
 import numpy as np
 
-from scvt.utilities._utils import Lists
+from UniVI.utilities._utils import Lists
 
 logger = logging.getLogger(__name__)
 

@@ -6,7 +6,7 @@ import numpy as np
 import glob
 from matplotlib import pyplot as plt
 
-from scvt.utilities._evaluate import EvalMap, predict_celltype
+from UniVI.utilities._evaluate import EvalMap, predict_celltype
 
 # summary file boxplot
 

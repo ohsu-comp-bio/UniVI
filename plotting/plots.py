@@ -10,7 +10,7 @@ import numpy as np
 
 import torch
 
-from scvt.utilities._utils import check_mtx_to_df, embed_umap, embed_tsne, embed_pca
+from UniVI.utilities._utils import check_mtx_to_df, embed_umap, embed_tsne, embed_pca
 
 def scale_iqr(mtx):
     assert isinstance(mtx, np.ndarray)

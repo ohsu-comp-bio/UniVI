@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from collections import defaultdict
 
-from scvt.utilities._utils import Lists
+from UniVI.utilities._utils import Lists
 
 from sklearn.metrics import mean_squared_error
 

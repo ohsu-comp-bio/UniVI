@@ -10,7 +10,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import anndata
 
-from scvt.utilities._utils import Lists
+from UniVI.utilities._utils import Lists
 
 def model_feature_matching(df_new, df_ref):
     assert isinstance(df_new, pd.DataFrame)

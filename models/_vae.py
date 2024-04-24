@@ -7,19 +7,19 @@ import torch.nn.functional as F
 
 from collections import OrderedDict
 
-from scvt.models import base
+from UniVI.models import base
 import importlib
 importlib.reload(base)
 
-import scvt
-from scvt._settings import Constants
-from scvt.models.base import Encoder, DecoderGaussian, DecoderNB
-from scvt.models._utils import register_hook_vae
-from scvt.utilities._utils import log_mean_exp
+import UniVI
+from UniVI._settings import Constants
+from UniVI.models.base import Encoder, DecoderGaussian, DecoderNB
+from UniVI.models._utils import register_hook_vae
+from UniVI.utilities._utils import log_mean_exp
 
 import importlib
-#from scvt import _objectives
-from scvt.models import base
+#from UniVI import _objectives
+from UniVI.models import base
 #importlib.reload(_objectives)
 #importlib.reload(model_utils)
 importlib.reload(base)

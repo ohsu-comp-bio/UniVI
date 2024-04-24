@@ -7,7 +7,7 @@ import anndata
 import scipy.sparse as ss
 
 
-from scvt._settings import DataPath
+from UniVI._settings import DataPath
 
 def get_cell_ident_from_reference(lst_barcodes,
         return_kind: Union[Literal["celltype", "ident"]]="celltype",

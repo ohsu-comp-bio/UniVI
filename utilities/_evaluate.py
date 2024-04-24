@@ -3,9 +3,9 @@ import rpy2.robjects as ro
 import sklearn
 import numpy as np
 import pandas as pd
-from scvt.plotting.sankey import sankey as plot_sankey
+from UniVI.plotting.sankey import sankey as plot_sankey
 from typing import Literal, Union, List
-from scvt.utilities._utils import Lists
+from UniVI.utilities._utils import Lists
 
 
 def unsupervised_clustering_accuracy( y: np.ndarray, y_pred: np.ndarray):

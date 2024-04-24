@@ -16,7 +16,7 @@ import umap
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 
-from scvt._settings import DataDefault
+from UniVI._settings import DataDefault
 
 
 import torch

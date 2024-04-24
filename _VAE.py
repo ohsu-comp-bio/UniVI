@@ -24,27 +24,27 @@ from torch import nn
 import scanpy as sc
 
 
-from scvt.utilities import _utils 
-from scvt._settings import DataPath, DataDefault, ColorIdent
-from scvt._objectives import objective
-from scvt.utilities._utils import Logger, Timer, dic2obj, dic_params_print, tensor_to_df, tensor_to_numpy, df_to_tensor, get_device, data_to_device, embed_umap, kl_divergence, check_mtx_to_df, substitute_zs_dim, lst_unique_from_dic, Lists
-from scvt.models._vae import VAE
-from scvt.models._utils import init_weights, EarlyStopping
-from scvt.models import _utils as model_utils
-from scvt.datasets._datasets import SCDataLoader, anndata_sanity_check, model_feature_matching
-from scvt.datasets._external import get_cell_ident_from_reference
+from UniVI.utilities import _utils 
+from UniVI._settings import DataPath, DataDefault, ColorIdent
+from UniVI._objectives import objective
+from UniVI.utilities._utils import Logger, Timer, dic2obj, dic_params_print, tensor_to_df, tensor_to_numpy, df_to_tensor, get_device, data_to_device, embed_umap, kl_divergence, check_mtx_to_df, substitute_zs_dim, lst_unique_from_dic, Lists
+from UniVI.models._vae import VAE
+from UniVI.models._utils import init_weights, EarlyStopping
+from UniVI.models import _utils as model_utils
+from UniVI.datasets._datasets import SCDataLoader, anndata_sanity_check, model_feature_matching
+from UniVI.datasets._external import get_cell_ident_from_reference
 
 
 import importlib
-from scvt import _objectives
-from scvt.plotting import plots
+from UniVI import _objectives
+from UniVI.plotting import plots
 importlib.reload(_objectives)
 importlib.reload(model_utils)
 importlib.reload(plots)
 importlib.reload(_utils)
 
-from scvt._objectives import elbo, objective
-from scvt.plotting.plots import grid_display, heatmap_sample_idx, heatmap_from_mtx, gg_point_ident, gg_point_embed, boxplot_from_mtx, gg_point_z_activation, gg_point_feature_active
+from UniVI._objectives import elbo, objective
+from UniVI.plotting.plots import grid_display, heatmap_sample_idx, heatmap_from_mtx, gg_point_ident, gg_point_embed, boxplot_from_mtx, gg_point_z_activation, gg_point_feature_active
 
 class VAEMap(object):
 
