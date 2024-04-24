@@ -1,3 +1,5 @@
+This is the home of a workflow developed through our research group - The Pathways + Omics group through Oregon Health & Science University (OHSU) Computational Biology - called UniVI.
+
 UniVI is a workflow that uses a variational mixture of experts autoencoder framework to learn correlations between multimodal biological sequencing data - namely for multimodal single-cell sequencing methods.
 
 We currently have a manuscript in preparation which I will link here when it is online.
