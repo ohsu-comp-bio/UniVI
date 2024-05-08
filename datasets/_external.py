@@ -16,7 +16,7 @@ def get_cell_ident_from_reference(lst_barcodes,
     if data_id == 'cit_hao':
         dataset = CIT_HAO()
     elif data_id == 'atac_multi':
-        dataset = ATA_MULTI()
+        dataset = ATAC_MULTI()
     else:
         raise ValueError(f"invalid data_id: {data_id}")
 
