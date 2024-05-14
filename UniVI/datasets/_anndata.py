@@ -189,7 +189,7 @@ class PrepAnnDataRNA:
         self.adata.var['mt'] = self.adata.var_names.str.startswith('MT-')  
         sc.pp.calculate_qc_metrics(self.adata, qc_vars=['mt'], 
 				percent_top=None, log1p=False, inplace=True)
-        print(self.adata)
+        #print(self.adata)
 
     def _remove_outliers(self):
         print(f'remove outliers: top and bottom {self.percent_outlier/2} %')
@@ -198,7 +198,7 @@ class PrepAnnDataRNA:
         top = np.percentile(total_counts, 100-self.percent_outlier)
         is_valid = (total_counts > bottom) & (total_counts < top)
         self.adata = self.adata[is_valid,:]
-        print(self.adata)
+        #print(self.adata)
 
     def _filter_out_cells_genes(self):
         print(f'filter out cells and genes with low quality: ')
@@ -207,14 +207,14 @@ class PrepAnnDataRNA:
         sc.pp.filter_cells(self.adata, min_genes=self.cells_threshold_min_genes)
         sc.pp.filter_genes(self.adata, min_cells=self.genes_threshold_min_cells)
         self.adata = self.adata[self.adata.obs.pct_counts_mt < self.obs_threshold_pct_counts_mt, :].copy()
-        print(self.adata)
+        #print(self.adata)
 
     def _normalize_log1p(self):
         print('normalize and log1p transformation')
         # library size normalization 
         sc.pp.normalize_total(self.adata, target_sum=self.target_sum)
         sc.pp.log1p(self.adata)
-        print(self.adata)
+        #print(self.adata)
 
     def _impute_missing_genes(self):
         print("need to implement: _impute_missing_genes")
@@ -257,14 +257,14 @@ class PrepAnnDataRNA:
 
             self.adata = self.adata[:, self.adata.var['highly_variable']].copy()
             assert self.adata.shape[1] == self.n_top_genes, 'something wrong in the feature dim.'
-        print(self.adata)        
+        #print(self.adata)        
 
     def _scale(self):
         self.adata.layers['lib_normed_log1p'] = self.adata.X.copy()
         #sc.pp.regress_out(self.adata, ['donor'])
         sc.pp.scale(self.adata, max_value=self.scale_max_value)        
         self.adata.layers['z_scaled'] = self.adata.X.copy()
-        print(self.adata)
+        #print(self.adata)
         
 
 class PrepAnnDataADT:
@@ -332,7 +332,7 @@ class PrepAnnDataADT:
         print('get statistics')
         # annotate the group of mitochondrial genes as 'mt'
         sc.pp.calculate_qc_metrics(self.adata,percent_top=None, log1p=False, inplace=True)
-        print(self.adata)
+        #print(self.adata)
 
     def _remove_outliers(self):
         print(f'remove outliers: top and bottom {self.percent_outlier/2} %')
@@ -341,14 +341,14 @@ class PrepAnnDataADT:
         top = np.percentile(total_counts, 100-self.percent_outlier)
         is_valid = (total_counts > bottom) & (total_counts < top)
         self.adata = self.adata[is_valid,:]
-        print(self.adata)
+        #print(self.adata)
 
     def _normalize_log1p(self):
         print('normalize and log1p transformation')
         # library size normalization 
         sc.pp.normalize_total(self.adata, target_sum=self.target_sum)
         sc.pp.log1p(self.adata)
-        print(self.adata)
+        #print(self.adata)
 
     def _impute_missing_genes(self):
         print("need to implement: _impute_missing_genes")
@@ -381,12 +381,12 @@ class PrepAnnDataADT:
             self._handle_missing_genes()
         else:
             print(f'by using all features')
-        print(self.adata)
+        #print(self.adata)
 
     def _scale(self):
         self.adata.layers['lib_normed_log1p'] = self.adata.X.copy()
         #sc.pp.regress_out(self.adata, ['donor'])
         sc.pp.scale(self.adata, max_value=self.scale_max_value)
         self.adata.layers['z_scaled'] = self.adata.X.copy()
-        print(self.adata)
+        #print(self.adata)
 
