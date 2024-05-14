@@ -236,7 +236,7 @@ class VAEMap(object):
         self.fpath_loss = Path(self.dpath_home).joinpath('loss.csv')
 
         ''' analysis directory '''
-        self.dpath_anal = Path(self.dpath_home).joinpath('anal')
+        self.dpath_anal = Path(self.dpath_home).joinpath('analysis')
         self.dpath_anal.mkdir(parents=True, exist_ok=True)
         self.dpath_anal_feature = Path(self.dpath_anal).joinpath('feature')
         self.dpath_anal_feature.mkdir(parents=True, exist_ok=True)
