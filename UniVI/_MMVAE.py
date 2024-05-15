@@ -48,7 +48,7 @@ importlib.reload(_vae)
 importlib.reload(model_utils)
 importlib.reload(plots)
 
-from UniVI._objectives import elbo, objective
+from UniVI._objectives import elbo, objective, _get_pz
 from UniVI.plotting.plots import grid_display, heatmap_sample_idx, heatmap_from_mtx, gg_point_embed, gg_point_pair_by_umap, gg_point_pair_embed, boxplot_from_mtx, gg_point_z_activation, gg_point_feature_active, gg_point_scatter
 
 class CrossMap(VAEMap):
@@ -467,11 +467,17 @@ class CrossMap(VAEMap):
     
         all_lst_paths_img = []
         
+        #print(lst_features)
         for feature in lst_features:
-            fname = 'plot_feature_' + feature + '_' + key_score + '.png'
+            fname = 'plot_feature_' + str(feature) + '_' + str(key_score) + '.png'
             fpath_feature = self.dpath_anal.joinpath(fname)
             
-            g_feature = self.plot_feature(feature, m=m, key_score=key_score)
+            ##### Changed by Andrew 5-14-2024 to reflect m = 'm1',            #####
+            ##### can also use m='m2' if needed to reflect other latent space #####
+            #g_feature = self.plot_feature(feature, m=m, key_score=key_score)
+            #print(feature)
+            g_feature = self.plot_feature(feature, m='m1', key_score=key_score)
+            
             if g_feature is None:
                 continue
     
@@ -483,7 +489,7 @@ class CrossMap(VAEMap):
     
         grid_display(lst_paths_imgs, ncols=ncols, lst_titles=[],
                                                 figratio=1.0, filepath_out=fpath_merge)
-
+    
 
     def plot_feature(self, feature, m='m1', key_score='lib_normed_log1p', figure_size=(2,2)):
     
@@ -515,7 +521,11 @@ class CrossMap(VAEMap):
             try:
                 score_all = adata_score.layers[key_score]
                 if isinstance(score_all, scipy.sparse.csr.csr_matrix):
-                    score_all = adata_score.layers[key_score].toarray()            
+                    score_all = adata_score.layers[key_score].toarray()
+                
+                ##### Print statement added by Andrew to check for error #####
+                print(adata_score.var.index == feature)
+                
                 score = score_all[:,adata_score.var.index==feature]
     
                 if isinstance(score, scipy.sparse.csr.csr_matrix):
@@ -1250,6 +1260,15 @@ class CrossMap(VAEMap):
         print("- plotting z activation")
         self.plot_z_activation(zss)
         print("- plotting feature activation")
+        
+        ##### Added by Andrew 5-14-2024 to check for error #####
+        print("xs variable:" )
+        print(xs)
+        print("es variable:")
+        print(es)
+        # Function erroring out after this code block
+        ########################################################
+        
         self.plot_features(xs, es)
         print("- plotting feature reconstruction")
         self.plot_features_recon(xs, es)
@@ -1434,13 +1453,17 @@ class CrossMap(VAEMap):
 
         ''' for rna, modality 1 '''
         hm_x1 = heatmap_from_mtx(df_x1[columns_1].iloc[index].values, **hm_x_kwargs)
-        hm_xp11 = heatmap_from_mtx(df_xp11[columns_1].iloc[index].values, **hm_x_kwargs)
-        hm_xp21 = heatmap_from_mtx(df_xp21[columns_1].iloc[index].values, **hm_x_kwargs)
+        #hm_xp11 = heatmap_from_mtx(df_xp11[columns_1].iloc[index].values, **hm_x_kwargs)
+        hm_xp11 = heatmap_from_mtx(xp11[columns_1].iloc[index].values, **hm_x_kwargs)
+        #hm_xp21 = heatmap_from_mtx(df_xp21[columns_1].iloc[index].values, **hm_x_kwargs)
+        hm_xp21 = heatmap_from_mtx(xp21[columns_1].iloc[index].values, **hm_x_kwargs)
 
         ''' for adt, modality 2 '''
         hm_x2 = heatmap_from_mtx(df_x2[columns_2].iloc[index].values, **hm_x_kwargs)
-        hm_xp12 = heatmap_from_mtx(df_xp12[columns_2].iloc[index].values, **hm_x_kwargs)
-        hm_xp22 = heatmap_from_mtx(df_xp22[columns_2].iloc[index].values, **hm_x_kwargs)
+        #hm_xp12 = heatmap_from_mtx(df_xp12[columns_2].iloc[index].values, **hm_x_kwargs)
+        hm_xp12 = heatmap_from_mtx(xp12[columns_2].iloc[index].values, **hm_x_kwargs)
+        #hm_xp22 = heatmap_from_mtx(df_xp22[columns_2].iloc[index].values, **hm_x_kwargs)
+        hm_xp22 = heatmap_from_mtx(xp22[columns_2].iloc[index].values, **hm_x_kwargs)
 
         ''' save images  '''
         hm_x1.save(fpath_hm_x1, verbose = False)

@@ -157,6 +157,32 @@ def gg_point_z_activation(
     zs: Union[pd.DataFrame, np.ndarray, torch.Tensor],
     title=''
 ):
+    
+    ##### The following code replaces the below code #####
+    # Default values for figure_size and nrow
+    figure_size = (10, 2)  # Default figure size if none of the conditions are met
+    nrow = 1               # Default number of rows
+
+    if zs.shape[1] <= 10:
+        figure_size = (20, 2)
+    elif 10 < zs.shape[1] <= 20:
+        figure_size = (18, 4)
+        nrow = 2
+    elif 20 < zs.shape[1] <= 30:
+        figure_size = (18, 4)
+        nrow = 3
+    elif 30 < zs.shape[1] <= 40:
+        figure_size = (18, 4)
+        nrow = 2
+    elif 40 < zs.shape[1] <= 50:
+        figure_size = (20, 4)
+        nrow = 3
+
+    # End code replacement
+    ######################################################
+
+    
+    '''
     if zs.shape[1] <= 10:
         figure_size=(20,2)
         nrow=1
@@ -172,6 +198,7 @@ def gg_point_z_activation(
     elif 40 < zs.shape[1] <= 50:
         figure_size=(20,4)
         nrow=3
+    '''
 
     ''' for zs dataframe '''
     df_zs = check_mtx_to_df(zs)

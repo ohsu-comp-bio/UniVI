@@ -23,6 +23,11 @@ def objective(loss_func, model, x, beta=1.0):
         raise ValueError("Invalid loss function: {loss_func}")
     return (loss, loss1, loss2)
 
+######## Added o 5-14-2024 by Andrew from OLD_objectives file in UniVI/tmp/OLD_objectives.py ##########
+def _get_pz(zs):
+    #return Normal(torch.zeros([*zs.size()]).to(get_device()), torch.ones([*zs.size()]).to(get_device()))
+    return Normal(torch.zeros([*zs.shape]).to(get_device()), torch.ones([*zs.shape]).to(get_device()))
+#######################################################################################################
 
 def kl_divergence(d1, d2, K=100):
     """Computes closed-form KL if available, else computes a MC estimate."""
