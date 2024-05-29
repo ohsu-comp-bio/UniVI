@@ -390,3 +390,139 @@ class PrepAnnDataADT:
         self.adata.layers['z_scaled'] = self.adata.X.copy()
         #print(self.adata)
 
+
+class PrepAnnDataATAC:
+    
+    def __init__(self, 
+        filepath_in, 
+        filepath_out_h5ad='prep_atac.h5ad', 
+        save=False,
+        skip_filter=False,
+        show_plot=True,
+        features_to_select=None,
+        missing_impute=False,
+        cells_threshold_min_peaks=500,
+        peaks_threshold_min_cells=5,
+        obs_threshold_pct_counts_mt = 10,
+        percent_outlier = 0.5,
+        target_sum = 1,
+        n_top_peaks = 2000,
+        scale_max_value = 10
+    ):
+        ''' outfile path '''
+        self.filepath_out_h5ad = filepath_out_h5ad
+        ''' attributes '''
+        self.save = save
+        self.features_to_select = features_to_select
+        self.missing_impute = missing_impute
+        self.cells_threshold_min_peaks = cells_threshold_min_peaks
+        self.peaks_threshold_min_cells = peaks_threshold_min_cells
+        self.obs_threshold_pct_counts_mt = obs_threshold_pct_counts_mt 
+        self.percent_outlier = percent_outlier 
+        self.target_sum = target_sum
+        self.n_top_peaks = n_top_peaks
+        self.scale_max_value = scale_max_value
+        
+        ''' init anndata '''
+        self.adata = None
+        self.features_missing = None
+        self.features_common = None
+        self._infile_to_adata(filepath_in)
+        ''' get stats '''
+        self._basic_stats()
+        ''' filter out cells and peaks '''
+        if not skip_filter: 
+            if self.percent_outlier > 0.:
+                self._remove_outliers()
+            self._filter_out_cells_peaks()
+        ''' rawdata backup for all peaks before normalization '''
+        self.adata.layers['counts'] = self.adata.X.copy()
+        self._normalize_log1p()
+        self._select_peaks()
+        ''' scaling '''
+        self._scale()
+        ''' save to file'''
+        if self.save:
+            self.adata.write(self.filepath_out_h5ad)
+        ''' show QC plot '''
+        if show_plot:
+            self.adata.obs.hist(bins=100, layout=(1,5), figsize=(14,2))
+        
+    def _infile_to_adata(self, filepath_in):
+        filepath_in = Path(filepath_in)
+        if filepath_in.suffix == '.csv':
+            self.adata = _read_csv_to_adata(filepath_in)
+        elif filepath_in.suffix == '.h5ad':
+            self.adata = anndata.read_h5ad(filepath_in)
+        else: 
+            raise ValueError(f"Invalid file format: {filepath_in}")
+
+    def _basic_stats(self):
+        print('get statistics')
+        self.adata.var['mt'] = self.adata.var_names.str.startswith('MT-')
+        sc.pp.calculate_qc_metrics(self.adata, qc_vars=['mt'], 
+                                   percent_top=None, log1p=False, inplace=True)
+
+    def _remove_outliers(self):
+        print(f'remove outliers: top and bottom {self.percent_outlier/2} %')
+        total_counts = self.adata.obs.total_counts.values
+        bottom = np.percentile(total_counts, self.percent_outlier)
+        top = np.percentile(total_counts, 100 - self.percent_outlier)
+        is_valid = (total_counts > bottom) & (total_counts < top)
+        self.adata = self.adata[is_valid, :]
+
+    def _filter_out_cells_peaks(self):
+        print(f'filter out cells and peaks with low quality: ')
+        print(f'peaks<{self.cells_threshold_min_peaks}, cells<{self.peaks_threshold_min_cells}')
+        sc.pp.filter_cells(self.adata, min_genes=self.cells_threshold_min_peaks)
+        sc.pp.filter_genes(self.adata, min_cells=self.peaks_threshold_min_cells)
+        self.adata = self.adata[self.adata.obs.pct_counts_mt < self.obs_threshold_pct_counts_mt, :].copy()
+
+    def _normalize_log1p(self):
+        print('normalize and log1p transformation')
+        sc.pp.normalize_total(self.adata, target_sum=self.target_sum)
+        sc.pp.log1p(self.adata)
+
+    def _impute_missing_peaks(self):
+        print("need to implement: _impute_missing_peaks")
+        assert False
+
+    def _handle_missing_peaks(self):
+        assert len(self.features_to_select) > 1
+        if Lists.exist_all_in_lists(self.features_to_select, self.adata.var.index.tolist()):
+            self.adata = self.adata[:, self.features_to_select]
+        else:
+            self.features_missing = Lists.items_not_in_list(self.features_to_select, 
+                                                            self.adata.var.index.tolist())
+            self.features_common = Lists.items_in_list(self.features_to_select, 
+                                                       self.adata.var.index.tolist())
+            if self.missing_impute:
+                self._impute_missing_peaks()
+            else:
+                print(f'Build anndata only with peaks being in the matrix')
+                print(f'List of missing peaks are stored in uns[\'missing_peaks\']')
+                print(f'{len(self.features_missing)}')
+                self.adata = self.adata[:, self.features_common]
+                self.adata.uns['missing_peaks'] = self.features_missing
+
+    def _select_peaks(self):
+        print('select peaks')
+        if self.features_to_select is not None:
+            print(f'by list of peaks: {len(self.features_to_select)}')
+            self._handle_missing_peaks()
+        else:
+            print(f'by highly variable peaks criteria: {self.n_top_peaks}')
+            sc.pp.highly_variable_genes(self.adata, 
+                                        n_top_genes=self.n_top_peaks,
+                                        subset=True,
+                                        layer="counts",
+                                        flavor="seurat_v3")
+            self.adata = self.adata[:, self.adata.var['highly_variable']].copy()
+            assert self.adata.shape[1] == self.n_top_peaks, 'something wrong in the feature dim.'
+
+    def _scale(self):
+        self.adata.layers['lib_normed_log1p'] = self.adata.X.copy()
+        sc.pp.scale(self.adata, max_value=self.scale_max_value)        
+        self.adata.layers['z_scaled'] = self.adata.X.copy()
+        
+
