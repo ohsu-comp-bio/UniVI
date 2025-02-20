@@ -42,6 +42,9 @@ class MMVAE(nn.Module):
         pz_sigma = torch.exp(_logvar/2) + Constants.eta
         return pz_mu, pz_sigma
 
+    # Updated this commented-out code block to below because of issues when performing training using the negative-binomial
+    # decoder model. There were invalid values being passed into pxzs[i][j] = vae._pxz(*vae.decoder(zs)) which threw several
+    # errors. These have thorough debugging print statements in the reworked function below.
     def forward(self, x):
 
         self.check_mu = [None, None]
@@ -64,7 +67,57 @@ class MMVAE(nn.Module):
                     pxzs[i][j] = vae._pxz(*vae.decoder(zs))
 
         return qzxs, pxzs, zss
+    
+    '''
+    def forward(self, x):
+        """
+        Forward pass for MMVAE with support for both Gaussian and NB decoders.
+        """
+        self.check_mu = [None, None]
+        self.check_sigma = [None, None]
 
+        qzxs, zss = [], []
+        pxzs = [[None for _ in range(len(self.vaes))] for _ in range(len(self.vaes))]
+
+        for i, vae in enumerate(self.vaes):
+            qzx, pxz, zs = vae(x[i])
+            qzxs.append(qzx)
+            zss.append(zs)
+            pxzs[i][i] = pxz 
+
+            self.check_mu[i] = vae.qzx_mu
+            self.check_sigma[i] = vae.qzx_sigma
+
+        for i, zs in enumerate(zss):
+            for j, vae in enumerate(self.vaes):
+                if i != j:
+                    try:
+                        # Decode zs based on the type of decoder
+                        if isinstance(vae.decoder, DecoderNB):
+                            # Negative Binomial processing
+                            total_count, logits = vae.decoder(zs)
+                            probs = torch.sigmoid(logits)
+                            probs = torch.clamp(probs, min=1e-6, max=1 - 1e-6)
+                            total_count = torch.nn.functional.softplus(total_count) + Constants.eta
+                            pxzs[i][j] = vae._pxz(total_count=total_count, probs=probs)
+
+                        elif isinstance(vae.decoder, DecoderGaussian):
+                            # Gaussian processing
+                            mu, sigma = vae.decoder(zs)
+                            sigma = torch.clamp(sigma, min=1e-6)  # Avoid invalid values
+                            pxzs[i][j] = vae._pxz(loc=mu, scale=sigma)
+
+                        else:
+                            raise ValueError(f"Unsupported decoder type: {type(vae.decoder)}")
+
+                    except Exception as e:
+                        print(f"[ERROR] Failed to create pxz for VAE {i} -> VAE {j}")
+                        print(f"Latent variables (zs): min={zs.min().item()}, max={zs.max().item()}, mean={zs.mean().item()}")
+                        print(f"Error: {e}")
+                        raise e
+
+        return qzxs, pxzs, zss
+    '''
 
     def recon_from_z1(self, z1):
         self.eval()

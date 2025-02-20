@@ -338,6 +338,7 @@ class CrossMap(VAEMap):
 	save=False
     ):
         x1, x2 = xs
+        
         assert type(x1) == type(x2)
 
         df_x1 = check_mtx_to_df(x1)
@@ -368,6 +369,10 @@ class CrossMap(VAEMap):
             df_z1 = tensor_to_df(zss[0], index=df_x1.index, columns=columns_zs)
             df_z2 = tensor_to_df(zss[1], index=df_x2.index, columns=columns_zs)
             result = {'z':df_z_avg, 'z1':df_z1, 'z2':df_z2}
+        else:
+            # Handle unexpected types
+            raise ValueError(f"Unsupported input type: {type(xs[0])}")
+            
         return result
 
     
@@ -934,6 +939,7 @@ class CrossMap(VAEMap):
         X2 = self.adata2.X
 
         ''' get latent features'''
+        
         dic_Z = self.get_latent_features([X1,X2])
 
         ''' save to the slots '''
@@ -1868,7 +1874,7 @@ class CrossMap(VAEMap):
     
         return df_corr
 
-    def plot_violin(keys, m='m1', groupby='ident', layer='xp', save=None):
+    def plot_violin(self, m='m1', groupby='ident', layer='xp', save=None):
         if 'm1' in m:
             adata = self.adata1
         elif 'm2' in m:

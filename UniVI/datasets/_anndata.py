@@ -131,6 +131,7 @@ class PrepAnnDataRNA:
         percent_outlier = 0.5,
         target_sum = 1,
         n_top_genes = 2000,
+        scale=True,
         scale_max_value = 10
     ):
         ''' outfile path '''
@@ -148,6 +149,7 @@ class PrepAnnDataRNA:
         self.percent_outlier = percent_outlier 
         self.target_sum = target_sum
         self.n_top_genes = n_top_genes
+        self.scale = scale
         self.scale_max_value = scale_max_value
         
         ''' init anndata '''
@@ -167,7 +169,8 @@ class PrepAnnDataRNA:
         self._normalize_log1p()
         self._select_genes()
         ''' scaling '''
-        self._scale()
+        if self.scale:
+            self._scale()
         ''' save to file'''
         if self.save:
             self.adata.write(self.filepath_out_h5ad)
@@ -260,6 +263,7 @@ class PrepAnnDataRNA:
         #print(self.adata)        
 
     def _scale(self):
+        print('scale data')
         self.adata.layers['lib_normed_log1p'] = self.adata.X.copy()
         #sc.pp.regress_out(self.adata, ['donor'])
         sc.pp.scale(self.adata, max_value=self.scale_max_value)        

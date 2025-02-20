@@ -249,22 +249,47 @@ class DecoderNB(nn.Module):
         self._dec_totalcount = nn.Linear(dim_hidden, dim_out)
         self._dec_logits = nn.Linear(dim_hidden, dim_out)
 
-    def forward(self, zs):
+    #def forward(self, zs):
         
         ''' reshaping for out layers ''' 
-        zs = self.dec_hid(zs) 
+        #zs = self.dec_hid(zs) 
 
         ''' for total_count '''
-        _dec_totalcount = self._dec_totalcount(zs) 
-        _dec_totalcount = nn.functional.softplus(_dec_totalcount)
-        pxz_param_total_count = torch.clamp(_dec_totalcount,
-                                            max=Constants.clamp_max)  ####?? needs clamps
+        #_dec_totalcount = self._dec_totalcount(zs) 
+        #_dec_totalcount = nn.functional.softplus(_dec_totalcount)
+        #pxz_param_total_count = torch.clamp(_dec_totalcount,
+        #                                    max=Constants.clamp_max)  ####?? needs clamps
         ''' for logits '''
-        _dec_logits = self._dec_logits(zs)
-        pxz_param_logits = torch.clamp(_dec_logits,
-                                       min=-Constants.clamp_max, max=Constants.clamp_max)
+        #_dec_logits = self._dec_logits(zs)
+        #pxz_param_logits = torch.clamp(_dec_logits,
+        #                               min=-Constants.clamp_max, max=Constants.clamp_max)
 
         ''' reshaping back to original params shape ''' 
+        #return pxz_param_total_count, pxz_param_logits
+    
+    # New forward() function due to the generation of invalid values outside of what is expected by 
+    # a negative binomial distribution. Might still need to set the min and max variables for both the
+    # pxz_param_total_count variable and the pxz_param_logits variable. This would keep the code more
+    # consistent.
+    def forward(self, zs):
+        ''' Reshaping for output layers '''
+        zs = self.dec_hid(zs) 
+
+        ''' Compute total_count '''
+        _dec_totalcount = self._dec_totalcount(zs) 
+        _dec_totalcount = nn.functional.softplus(_dec_totalcount)
+        pxz_param_total_count = torch.clamp(_dec_totalcount, max=Constants.clamp_max)
+
+        ''' Compute logits '''
+        _dec_logits = self._dec_logits(zs)
+
+        # Ensure logits are clamped to avoid extreme probabilities
+        _dec_logits = torch.clamp(_dec_logits, min=-10, max=10)
+
+        # Compute probabilities
+        pxz_param_logits = torch.sigmoid(_dec_logits)
+        pxz_param_logits = torch.clamp(pxz_param_logits, min=1e-6, max=1 - 1e-6)
+
         return pxz_param_total_count, pxz_param_logits
 
 

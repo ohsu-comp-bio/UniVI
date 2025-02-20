@@ -84,15 +84,47 @@ class VAE(nn.Module):
         if self.decoder.decoder_type == "gaussian":
             pxz_mu, pxz_sigma = self.decoder(zs)
             pxz = self._pxz(pxz_mu, pxz_sigma)
-    
+
         elif self.decoder.decoder_type == "nb":
             pxz_totalcount, pxz_logits = self.decoder(zs)
-            pxz = self._pxz(total_count=pxz_totalcount, logits=pxz_logits)   
+            pxz = self._pxz(total_count=pxz_totalcount, logits=pxz_logits) 
 
         else:
             raise ValueError(f'Unsupported distribution: {type(self.decoder)}')
+            
         return pxz
-        
+
+    '''
+    def _get_pxz(self, zs):
+        pxz = None        
+        if self.decoder.decoder_type == "gaussian":
+            pxz_mu, pxz_sigma = self.decoder(zs)
+            pxz = self._pxz(pxz_mu, pxz_sigma)
+
+        elif self.decoder.decoder_type == "nb":
+            # Decode latent variable zs
+            total_count, logits = self.decoder(zs)
+
+            # Clamp logits to avoid extreme values
+            logits = torch.clamp(logits, min=-10, max=10)
+
+            # Compute probabilities
+            probs = torch.sigmoid(logits)
+            probs = torch.clamp(probs, min=1e-6, max=1 - 1e-6)
+
+            # Ensure total_count is positive
+            total_count = torch.nn.functional.softplus(total_count) + Constants.eta
+
+            # Create Negative Binomial distribution
+            pxz = self._pxz(total_count=total_count, probs=probs)
+
+        else:
+            raise ValueError(f'Unsupported distribution: {type(self.decoder)}')
+
+        return pxz
+    '''
+
+    
     def forward(self, x):
         self.qzx_mu, self.qzx_sigma = self.encoder(x)
         qzx = self._qzx(self.qzx_mu, self.qzx_sigma)
@@ -127,10 +159,10 @@ class VAE(nn.Module):
             pxz = self._get_pxz(zs)
             xg = pxz.sample()
             return xg  # batch_size x n_features
-
+    
     def generate(self, lst_idx_zeros=[], batch_size=100):
-        print('need to be checked first: def generate in vae.py')
-        assert False
+        #print('need to be checked first: def generate in vae.py')
+        #assert False
         self.eval()
         with torch.no_grad():
             zs = self.pz.rsample([batch_size])
@@ -139,6 +171,7 @@ class VAE(nn.Module):
                 zs[:, lst_idx_zeros] = 0
             pxz = self._get_pxz(zs)
             xg = pxz.sample()
-            return xg  # batch_size x n_features
+            return xg  # batch_size x n_features        
+
 
 
