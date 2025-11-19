@@ -62,3 +62,14 @@ logs/
 # Slurm / cluster outputs
 slurm-*.out
 slurm-*.err
+
+# ====================
+# Figures / generated plots
+# ====================
+figures/
+!figures/README.md
+!figures/.gitkeep
+
+univi/figures/
+!univi/figures/README.md
+!univi/figures/.gitkeep
