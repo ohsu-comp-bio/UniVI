@@ -1,0 +1,56 @@
+{
+  "data": {
+    "modalities": [
+      {
+        "name": "rna",
+        "h5ad_path": "../data/Hao_RNA_data.h5ad",
+        "layer": null,
+        "X_key": "X",
+        "hidden_dims": [512, 256],
+        "likelihood": "nb"
+      },
+      {
+        "name": "adt",
+        "h5ad_path": "../data/Hao_ADT_data.h5ad",
+        "layer": null,
+        "X_key": "X",
+        "hidden_dims": [128, 64],
+        "likelihood": "nb"
+      }
+    ]
+  },
+  "model": {
+    "latent_dim": 40,
+    "hidden_dims_default": [256, 128],
+    "dropout": 0.1,
+    "batchnorm": true,
+
+    "beta": 80.0,
+    "gamma": 120.0,
+
+    "kl_anneal_start": 0,
+    "kl_anneal_end": 50,
+    "align_anneal_start": 0,
+    "align_anneal_end": 50
+  },
+  "training": {
+    "seed": 42,
+    "train_fraction": 0.8,
+    "batch_size": 512,
+    "num_workers": 0,
+
+    "n_epochs": 500,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "grad_clip": 5.0,
+    "device": "cpu",
+    "log_every": 10,
+
+    "early_stopping": true,
+    "patience": 20,
+    "min_delta": 0.0
+  },
+  "output": {
+    "dir": "../univi_runs/cite_seq_default_raw_counts"
+  }
+}
