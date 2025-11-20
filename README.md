@@ -4,7 +4,10 @@ UniVI is a **multi-modal variational autoencoder (VAE)** framework for aligning 
 
 - Joint embedding of RNA + ADT (CITE-seq)
 - RNA + ATAC (multiome) integration
+- RNA + ADT + ATAC (TEA-seq)
+- Independent non-paired modalities from the same tissue type
 - Cross-modal reconstruction and imputation
+- Data denoising
 - Evaluation of alignment quality (FOSCTTM, modality mixing, label transfer, etc.)
 
 This repository contains the core UniVI code, training scripts, parameter files, and example notebooks.
