@@ -1,5 +1,8 @@
 # UniVI
 
+[![PyPI version](https://img.shields.io/pypi/v/univi)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi)](https://pypi.org/project/univi/)
+
 UniVI is a **multi-modal variational autoencoder (VAE)** framework for aligning and integrating single-cell modalities such as RNA, ADT (CITE-seq), and ATAC. It’s built to support experiments like:
 
 - Joint embedding of RNA + ADT (CITE-seq)
@@ -8,7 +11,7 @@ UniVI is a **multi-modal variational autoencoder (VAE)** framework for aligning 
 - Independent non-paired modalities from the same tissue type
 - Cross-modal reconstruction and imputation
 - Data denoising
-- Evaluation of alignment quality (FOSCTTM, modality mixing, label transfer, etc.)
+- Structured evaluation of alignment quality (FOSCTTM, modality mixing, label transfer, etc.)
 
 This repository contains the core UniVI code, training scripts, parameter files, and example notebooks.
 
@@ -107,13 +110,9 @@ UniVI/
 
 ## Installation & quickstart
 
-> **Note (coming soon)**:
-> The commands below assume UniVI is available on PyPI and a conda channel (e.g. `conda-forge` or a dedicated `Ashford-A` channel).
-> Until the first public release is pushed, please use the **development install from source** (see below).
+### 1. Install UniVI via PyPI
 
-### 1. Install UniVI via pip (PyPI)
-
-Once UniVI is published on PyPI:
+If you just want to use UniVI:
 
 ```bash
 pip install univi
@@ -121,28 +120,16 @@ pip install univi
 
 This installs the `univi` package and all core dependencies.
 
-### 2. Install via conda / mamba
+You can then import it in Python:
 
-Once UniVI is available on a conda channel:
-
-```bash
-# Using conda (example: conda-forge)
-conda install -c conda-forge univi
-
-# Using mamba
-mamba install -c conda-forge univi
+```python
+import univi
+from univi import UniVIMultiModalVAE, ModalityConfig, UniVIConfig
 ```
 
-To create a fresh environment with UniVI:
+### 2. Development install (from source) — recommended for active development
 
-```bash
-conda create -n univi_env python=3.10 univi -c conda-forge
-conda activate univi_env
-```
-
-### 3. Development install (from source) — **current recommended method**
-
-Until the PyPI / conda packages are live, install from this repository:
+If you want to modify UniVI or run the notebooks exactly as in this repo:
 
 ```bash
 # Clone the repository
@@ -159,69 +146,88 @@ pip install -e .
 
 This makes the `univi` package importable in your scripts and notebooks while keeping it linked to the source tree.
 
+### 3. (Optional) Install via conda / mamba
+
+If UniVI is available on a conda channel (e.g. `conda-forge` or a dedicated channel), you can install with:
+
+```bash
+# Using conda
+conda install -c conda-forge univi
+
+# Using mamba
+mamba install -c conda-forge univi
+```
+
+To create a fresh environment:
+
+```bash
+conda create -n univi_env python=3.10 univi -c conda-forge
+conda activate univi_env
+```
+
 ---
 
-## Prepare input data
+## Preparing input data
 
-UniVI expects per-modality AnnData objects with matching cells (either truly paired data or a well-defined pairing between modalities (the univi/matching.py script contains supplemental functions for different non-joint data pairing):
+UniVI expects per-modality AnnData objects with matching cells (either truly paired data or consistently paired across modalities; `univi/matching.py` contains helper functions for more complex non-joint pairing).
 
-* Each modality (e.g. RNA / ADT / ATAC) is an `AnnData` with the same `obs_names` (same cells, same order).
+High-level expectations:
+
+* Each modality (e.g. RNA / ADT / ATAC) is an `AnnData` with the **same** `obs_names` (same cells, same order).
 * Raw counts are usually stored in `.layers["counts"]`, with a processed view in `.X` used for training.
-
-Typical conventions:
+* Decoder likelihoods should roughly match the distribution of the inputs per modality.
 
 ### RNA
 
 * `.layers["counts"]` → raw counts
-* `.X` → data used in model training, e.g.:
+* `.X` → training representation, e.g.:
 
   * log1p-normalized HVGs
   * raw counts
-  * normalized/scaled counts
+  * normalized / scaled counts
 
-Decoder likelihood (per RNA modality) should roughly match the input distribution:
+Typical decoders:
 
-* `"nb"` or `"zinb"` for raw or normalized counts
+* `"nb"` or `"zinb"` for raw / count-like data
 * `"gaussian"` for log-normalized / scaled data (treated as continuous)
 
 ### ADT (CITE-seq)
 
 * `.layers["counts"]` → raw ADT counts
-* `.X` → one of:
+* `.X` → e.g.:
 
   * CLR-normalized ADT
   * CLR-normalized + scaled ADT
   * raw ADT counts (depending on the experiment)
 
-Decoder likelihood for ADT:
+Typical decoders:
 
-* `"nb"` or `"zinb"` for raw / count-like data
+* `"nb"` or `"zinb"` for raw / count-like ADT
 * `"gaussian"` for normalized / scaled ADT
 
 ### ATAC
 
 * `.layers["counts"]` → raw peak counts
-* `.obsm["X_lsi"]` → LSI/TF–IDF components
-* `.X` → can be:
+* `.obsm["X_lsi"]` → LSI / TF–IDF components
+* `.X` → either:
 
-  * `obsm["X_lsi"]` (continuous LSI space)
-  * `layers["counts"]` (or a subset / HV peaks)
-  * another derived representation
+  * `obsm["X_lsi"]` (continuous LSI space), or
+  * `layers["counts"]` (possibly subsetted peaks)
 
-Decoder likelihood for ATAC:
+Typical decoders:
 
-* `"mse"` or `"gaussian"` if using continuous LSI
-* `"nb"` or `"poisson"` if using raw peak counts (likely subsetted, highly-variable peaks, etc.)
+* `"gaussian"` / `"mse"` if using continuous LSI
+* `"nb"` or `"poisson"` if using (subsetted) raw peak counts
 
 See the notebooks under `notebooks/` for end-to-end preprocessing examples for CITE-seq, Multiome, and TEA-seq.
 
 ---
 
-## Run a minimal training script
+## Running a minimal training script
 
-Once your data are preprocessed and saved (or loaded directly in a script), you can launch training using `scripts/train_univi.py` and any of the JSON configs under `parameter_files/`.
+Once your data are preprocessed and accessible, you can launch training using `scripts/train_univi.py` and any of the JSON configs under `parameter_files/`.
 
-Example (adjust paths / filenames to your setup):
+Example (adjust paths / filenames as needed):
 
 ```bash
 python scripts/train_univi.py \
@@ -235,10 +241,11 @@ A typical config file in `parameter_files/` specifies:
 * Latent dimensionality, β (beta) and γ (gamma)
 * Per-modality input dimensions and likelihoods
 * Training hyperparameters (epochs, batch size, learning rate, etc.)
+* Paths or names for the datasets to load
 
 ---
 
-## Evaluate a trained model
+## Evaluating a trained model
 
 After training, you can run evaluation to compute alignment metrics and generate UMAPs:
 
@@ -249,14 +256,16 @@ python scripts/evaluate_univi.py \
   --outdir figures/citeseq_run1
 ```
 
-These typically compute:
+Typical evaluation outputs include:
 
-* FOSCTTM
+* FOSCTTM (alignment quality)
 * Modality mixing scores
 * kNN label transfer accuracy
 * UMAPs colored by cell type and modality
 * Cross-modal reconstruction summaries
-* More to come!
 
-For more detailed, notebook-style workflows (e.g. TEA-seq tri-modal integration, Multiome RNA+ATAC, or non-paired matching), see the examples under `notebooks/`.
+For richer, exploratory workflows (TEA-seq tri-modal integration, Multiome RNA+ATAC, non-paired matching, etc.), see the notebooks in `notebooks/`.
 
+```
+::contentReference[oaicite:0]{index=0}
+```
