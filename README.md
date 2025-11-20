@@ -102,28 +102,28 @@ Typical conventions:
 **RNA**
 
 * `.layers["counts"]` → raw counts
-* `.X` → normalized / log1p counts (e.g. HVGs only)
+* `.X` → what's used in model training, can be normalized / log1p counts (e.g. HVGs only), raw counts, normalized / log1p / scaled counts, etc.
 * When setting up a model, decoder likelihood should toughly match the input distribution:
- * `"nb"` or `"zinb"` for raw counts/some instances of normalized counts.
- * `"gaussian"` for other isntances of normalized and normalized/scaled counts.
+  * `"nb"` or `"zinb"` for raw counts/some instances of normalized counts.
+  * `"gaussian"` for other isntances of normalized and normalized/scaled counts.
 
 **ADT (CITE-seq)**
 
 * `.layers["counts"]` → raw ADT counts
-* `.X` → CLR-normalized ADT
-* Decoder likelihood:
- * `"nb"` or `"zinb"` for more raw-like counts
- * `"gaussian"` for normalized or normalized/scaled counts
+* `.X` → can be CLR-normalized ADT, CLR-normalized / scaled ADT, raw ADT counts, or even preprocessed similar to RNA depending on integration goals
+* Decoder likelihood (should roughly match the input distribution):
+  * `"nb"` or `"zinb"` for more raw-like counts
+  * `"gaussian"` for normalized or normalized/scaled counts
 
 **ATAC**
 
 * `.layers["counts"]` → raw peak counts
 * `.obsm["X_lsi"]` → LSI/TF-IDF components
-* `.X` → can set to `obsm["X_lsi"]`, or `layers["counts"]` or other normalization methods for UniVI
-* Decoder likelihood:
- * `"mse"` if using the continuous LSI space
- * `"nb"` or `"poissom"` if using a subset of raw peak counts/highly variable peaks
- * `"gaussian"` if you treat it similarly to RNA preprocessing depending on integration goals
+* `.X` → can set to `obsm["X_lsi"]`, or `layers["counts"]`, or other normalization methods for UniVI depending on research goals
+* Decoder likelihood (should roughly match the input distribution):
+  * `"mse"` if using the continuous LSI space
+  * `"nb"` or `"poissom"` if using a subset of raw peak counts/highly variable peaks
+  * `"gaussian"` if you treat it similarly to RNA preprocessing depending on integration goals
 
 See `tutorials/` and `notebooks/` for full preprocessing examples.
 
