@@ -1,7 +1,3 @@
-Nice, congrats on the preprint 🎉
-
-Here’s your README rewritten with a **“Preprint / citation”** section added near the top, plus a ready-to-paste BibTeX block. I kept everything else the same except for tiny typo fixes (“mnodality” → “modality”, “poissom” → “poisson”, etc.).
-
 ````markdown
 # UniVI
 
