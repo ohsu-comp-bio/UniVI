@@ -1,0 +1,70 @@
+{% set name = "univi" %}
+{% set version = "0.1.0" %}
+
+package:
+  name: {{ name }}
+  version: {{ version }}
+
+source:
+  # While still developing, build directly from GitHub repo:
+  git_url: https://github.com/Ashford-A/UniVI.git
+  git_rev: main
+
+  # AFTER publish to PyPI, can switch to the sdist instead:
+  # url: https://pypi.io/packages/source/u/{{ name }}/{{ name }}-{{ version }}.tar.gz
+
+build:
+  noarch: python
+  script: {{ PYTHON }} -m pip install . --no-deps --ignore-installed -vv
+
+requirements:
+  host:
+    - python >=3.10
+    - pip
+
+  run:
+    - python >=3.10
+
+    # Core numerics / data
+    - numpy >=1.26
+    - scipy >=1.11
+    - pandas >=2.1
+
+    # Single-cell ecosystem
+    - anndata >=0.10
+    - scanpy >=1.11
+
+    # DL / ML
+    - pytorch >=2.2
+    - scikit-learn >=1.3
+
+    # I/O and stats helpers
+    - h5py >=3.10
+    - pyyaml >=6.0
+
+    # plotting / viz
+    - matplotlib >=3.8
+    - seaborn >=0.13
+
+    # clustering / graphs
+    - igraph >=0.11
+    - leidenalg >=0.10
+
+    # misc
+    - tqdm >=4.66
+
+test:
+  imports:
+    - univi
+  commands:
+    - python -c "import univi; print(getattr(univi, '__version__', 'no_version_attr'))"
+
+about:
+  home: https://github.com/Ashford-A/UniVI
+  summary: "UniVI: a scalable multi-modal variational autoencoder toolkit for seamless integration and analysis of multimodal single-cell data."
+  license: BSD-3-Clause      # or whatever we decide for in LICENSE file
+  license_file: LICENSE
+
+extra:
+  recipe-maintainers:
+    - Ashford-A

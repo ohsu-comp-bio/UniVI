@@ -1,75 +1,58 @@
-# ====================
-# Data (local only)
-# ====================
-data/
-!data/README.md
-
-# ====================
-# Python bytecode / cache
-# ====================
+# -------------------------
+# Python cache / bytecode
+# -------------------------
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyo
+*.pyd
+*.so
+*.dll
 
-# ====================
-# Virtual environments
-# ====================
-.env
-.venv
-venv/
-env/
-*.venv/
-
-# ====================
-# Jupyter
-# ====================
-.ipynb_checkpoints/
-.jupyter/
-
-# ====================
-# OS / editor cruft
-# ====================
-.DS_Store
-Thumbs.db
-*.swp
-*.swo
-
-# VSCode / PyCharm
-.vscode/
-.idea/
-
-# ====================
-# Build / dist artifacts
-# ====================
+# -------------------------
+# Build / packaging artifacts
+# -------------------------
 build/
 dist/
 *.egg-info/
 .eggs/
 
-# ====================
-# Testing / coverage
-# ====================
-.pytest_cache/
-.coverage
-htmlcov/
+# -------------------------
+# Jupyter notebooks
+# -------------------------
+.ipynb_checkpoints/
+*.ipynb~
+*.nbconvert.ipynb
 
-# ====================
-# Logs / outputs
-# ====================
-logs/
+# -------------------------
+# OS / editor cruft
+# -------------------------
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+*.orig
+
+# -------------------------
+# Logs / temp files
+# -------------------------
 *.log
+*.tmp
+*.bak
 
-# Slurm / cluster outputs
-slurm-*.out
-slurm-*.err
+# -------------------------
+# Large local data & models
+# (keep only small metadata READMEs)
+# -------------------------
+data/**
+!data/README.md
 
-# ====================
-# Figures / generated plots
-# ====================
+saved_models/
 figures/
-!figures/README.md
-!figures/.gitkeep
 
-univi/figures/
-!univi/figures/README.md
-!univi/figures/.gitkeep
+# -------------------------
+# Environment files (optional)
+# -------------------------
+.env
+.env.*
+
