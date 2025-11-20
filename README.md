@@ -433,6 +433,5 @@ Typical evaluation outputs include:
 
 For richer, exploratory workflows (TEA-seq tri-modal integration, Multiome RNA+ATAC, non-paired matching, etc.), see the notebooks in `notebooks/`.
 
-```
-::contentReference[oaicite:0]{index=0}
-```
+
+
