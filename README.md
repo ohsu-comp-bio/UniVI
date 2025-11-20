@@ -1,3 +1,8 @@
+Nice, congrats on the preprint 🎉
+
+Here’s your README rewritten with a **“Preprint / citation”** section added near the top, plus a ready-to-paste BibTeX block. I kept everything else the same except for tiny typo fixes (“mnodality” → “modality”, “poissom” → “poisson”, etc.).
+
+````markdown
 # UniVI
 
 UniVI is a **multi-modal variational autoencoder (VAE)** framework for aligning and integrating single-cell modalities such as RNA, ADT (CITE-seq), and ATAC. It’s built to support experiments like:
@@ -11,6 +16,27 @@ UniVI is a **multi-modal variational autoencoder (VAE)** framework for aligning 
 - Evaluation of alignment quality (FOSCTTM, modality mixing, label transfer, etc.)
 
 This repository contains the core UniVI code, training scripts, parameter files, and example notebooks.
+
+---
+
+## Preprint
+
+If you use UniVI in your work, please cite:
+
+> Ashford AJ, Enright T, Nikolova O, Demir E.  
+> **Unifying Multimodal Single-Cell Data Using a Mixture of Experts β-Variational Autoencoder-Based Framework.**  
+> *bioRxiv* (2025). doi: [10.1101/2025.02.28.640429](https://www.biorxiv.org/content/10.1101/2025.02.28.640429v1.full)
+
+```bibtex
+@article{ashford2025univi,
+  title   = {Unifying Multimodal Single-Cell Data Using a Mixture of Experts β-Variational Autoencoder-Based Framework},
+  author  = {Ashford, Andrew J. and Enright, Trevor and Nikolova, Olga and Demir, Emek},
+  journal = {bioRxiv},
+  year    = {2025},
+  doi     = {10.1101/2025.02.28.640429},
+  url     = {https://www.biorxiv.org/content/10.1101/2025.02.28.640429v1}
+}
+````
 
 ---
 
@@ -102,16 +128,18 @@ Typical conventions:
 **RNA**
 
 * `.layers["counts"]` → raw counts
-* `.X` → what's used in model training, can be normalized / log1p counts (e.g. HVGs only), raw counts, normalized / log1p / scaled counts, etc.
-* When setting up a model, decoder likelihood for each mnodality should roughly match its respective input distribution:
-  * `"nb"` or `"zinb"` for raw counts/some instances of normalized counts.
-  * `"gaussian"` for other isntances of normalized and normalized/scaled counts.
+* `.X` → what's used in model training; can be normalized / log1p counts (e.g. HVGs only), raw counts, normalized / log1p / scaled counts, etc.
+* When setting up a model, decoder likelihood for each modality should roughly match its respective input distribution:
+
+  * `"nb"` or `"zinb"` for raw counts or some instances of normalized counts
+  * `"gaussian"` for other instances of normalized and normalized/scaled counts
 
 **ADT (CITE-seq)**
 
 * `.layers["counts"]` → raw ADT counts
 * `.X` → can be CLR-normalized ADT, CLR-normalized / scaled ADT, raw ADT counts, or even preprocessed similar to RNA depending on integration goals
 * Decoder likelihood for ADT data, depending on how it's preprocessed (should roughly match the input distribution):
+
   * `"nb"` or `"zinb"` for more raw-like counts
   * `"gaussian"` for normalized or normalized/scaled counts
 
@@ -119,10 +147,11 @@ Typical conventions:
 
 * `.layers["counts"]` → raw peak counts
 * `.obsm["X_lsi"]` → LSI/TF-IDF components
-* `.X` → can set to `obsm["X_lsi"]`, or `layers["counts"]`, or other normalization methods for UniVI depending on research goals
+* `.X` → can be set to `obsm["X_lsi"]`, `layers["counts"]`, or other normalization methods for UniVI depending on research goals
 * Decoder likelihood for ATAC data, depending on how it's preprocessed (should roughly match the input distribution):
+
   * `"mse"` if using the continuous LSI space
-  * `"nb"` or `"poissom"` if using a subset of raw peak counts/highly variable peaks
+  * `"nb"` or `"poisson"` if using a subset of raw peak counts / highly variable peaks
   * `"gaussian"` if you treat it similarly to RNA preprocessing depending on integration goals
 
 See `tutorials/` and `notebooks/` for full preprocessing examples.
@@ -168,7 +197,7 @@ These typically compute:
 * kNN label transfer accuracy
 * UMAPs colored by cell type and modality
 * Cross-modal reconstruction summaries
-* We're continuously implementing new evaluation metrics and tools to use, so this list is not exhaustive
+* We're continuously implementing new evaluation metrics and tools, so this list is not exhaustive.
 
 For more detailed, notebook-style workflows (e.g. TEA-seq tri-modal integration, Multiome RNA+ATAC, or non-paired matching), see the examples under `notebooks/` and `tutorials/`.
 
