@@ -89,8 +89,8 @@ UniVI/
     ├── plotting.py                # Plotting helpers / evaluation visualizations
     ├── trainer.py                 # UniVITrainer: training loop, logging, checkpointing
     ├── hyperparam_optimization/   # Hyperparameter search scripts
-    │   ├── __init__.py
-    │   ├── common.py              # Shared hparam search utilities
+    │   ├── __init__.py            # Re-exports run_*_hparam_search helpers
+    │   ├── common.py              # Shared hparam search utilities (sampling, training, metrics)
     │   ├── run_adt_hparam_search.py
     │   ├── run_atac_hparam_search.py
     │   ├── run_citeseq_hparam_search.py
@@ -242,6 +242,172 @@ A typical config file in `parameter_files/` specifies:
 * Per-modality input dimensions and likelihoods
 * Training hyperparameters (epochs, batch size, learning rate, etc.)
 * Paths or names for the datasets to load
+
+---
+
+## Hyperparameter tuning (optional)
+
+UniVI includes a hyperparameter optimization module with helpers for:
+
+* **Unimodal** RNA, ADT, ATAC
+* **Bi-modal** CITE-seq (RNA+ADT) and Multiome (RNA+ATAC)
+* **Tri-modal** TEA-seq (RNA+ADT+ATAC)
+
+Each `run_*_hparam_search` function:
+
+* Randomly samples hyperparameter configurations from a predefined search space
+* Trains a UniVI model for each configuration
+* Computes validation loss and (for multi-modal setups) alignment metrics (FOSCTTM, label transfer, modality mixing)
+* Returns a `pandas.DataFrame` with one row per config, plus the best configuration and its summary metrics
+
+All helpers are available via:
+
+```python
+from univi.hyperparam_optimization import (
+    run_multiome_hparam_search,
+    run_citeseq_hparam_search,
+    run_teaseq_hparam_search,
+    run_rna_hparam_search,
+    run_atac_hparam_search,
+    run_adt_hparam_search,
+)
+```
+
+### CITE-seq (RNA + ADT) hyperparameter search
+
+```python
+from univi.hyperparam_optimization import run_citeseq_hparam_search
+
+df, best_result, best_cfg = run_citeseq_hparam_search(
+    rna_train=rna_train,
+    adt_train=adt_train,
+    rna_val=rna_val,
+    adt_val=adt_val,
+    celltype_key="cell_type",   # or None if you don't have labels
+    device="cuda",
+    layer="counts",             # raw counts for NB/ZINB decoders
+    X_key="X",
+    max_configs=100,
+    seed=0,
+)
+
+# Save all configs and metrics
+df.to_csv("citeseq_hparam_results.csv", index=False)
+
+print("Best config:")
+print(best_cfg)
+print("Best composite score:", best_result.metrics["composite_score"])
+```
+
+Under the hood this:
+
+* Uses medium/wide RNA and small/medium ADT MLP architectures
+* Searches over latent dimension, β, γ, learning rate, weight decay, dropout, batchnorm, and per-modality likelihoods (NB / ZINB / Gaussian)
+* Combines validation loss and FOSCTTM into a simple composite score
+
+### 10x Multiome (RNA + ATAC) hyperparameter search
+
+```python
+from univi.hyperparam_optimization import run_multiome_hparam_search
+
+df, best_result, best_cfg = run_multiome_hparam_search(
+    rna_train=rna_train,
+    atac_train=atac_train,
+    rna_val=rna_val,
+    atac_val=atac_val,
+    celltype_key="cell_type",   # optional; enables label-transfer metrics
+    device="cuda",
+    layer="counts",
+    X_key="X",
+    max_configs=100,
+    seed=0,
+)
+
+df.to_csv("multiome_hparam_results.csv", index=False)
+```
+
+This function assumes paired RNA/ATAC AnnData objects with matching `obs_names` in train/val splits and searches over a slightly wider latent and β/γ range suitable for RNA+ATAC integration.
+
+### TEA-seq (RNA + ADT + ATAC) hyperparameter search
+
+```python
+from univi.hyperparam_optimization import run_teaseq_hparam_search
+
+df, best_result, best_cfg = run_teaseq_hparam_search(
+    rna_train=rna_train,
+    adt_train=adt_train,
+    atac_train=atac_train,
+    rna_val=rna_val,
+    adt_val=adt_val,
+    atac_val=atac_val,
+    celltype_key="cell_type",
+    device="cuda",
+    layer="counts",
+    X_key="X",
+    max_configs=100,
+    seed=0,
+)
+
+df.to_csv("teaseq_hparam_results.csv", index=False)
+```
+
+All `*_train` and `*_val` AnnData objects must be fully paired and share the same `obs_names`. The search space includes per-modality architectures and likelihoods, plus global latent and regularization hyperparameters.
+
+### Unimodal RNA / ADT / ATAC hyperparameter search
+
+For unimodal setups, you can use:
+
+```python
+from univi.hyperparam_optimization import (
+    run_rna_hparam_search,
+    run_adt_hparam_search,
+    run_atac_hparam_search,
+)
+
+# RNA-only (e.g., HVG log1p or raw-count space)
+df_rna, best_result_rna, best_cfg_rna = run_rna_hparam_search(
+    rna_train=rna_train,
+    rna_val=rna_val,
+    device="cuda",
+    layer="counts",   # or "log1p" for Gaussian / lognormal decoders
+    X_key="X",
+    max_configs=50,
+    seed=0,
+)
+
+# ADT-only
+df_adt, best_result_adt, best_cfg_adt = run_adt_hparam_search(
+    adt_train=adt_train,
+    adt_val=adt_val,
+    device="cuda",
+    layer="counts",
+    X_key="X",
+    max_configs=50,
+    seed=0,
+)
+
+# ATAC-only
+df_atac, best_result_atac, best_cfg_atac = run_atac_hparam_search(
+    atac_train=atac_train,
+    atac_val=atac_val,
+    device="cuda",
+    layer="counts",   # or TF-IDF/LSI representation
+    X_key="X",
+    max_configs=50,
+    seed=0,
+)
+```
+
+The unimodal routines:
+
+* Use validation loss as the objective (no cross-modal alignment)
+* Explore latent size, β, learning rate, weight decay, dropout, batchnorm, architectures, and decoder likelihoods appropriate to each modality
+
+Each function returns `(df, best_result, best_cfg)`, where:
+
+* `df` is a `pandas.DataFrame` with one row per config
+* `best_result` is a `SearchResult` dataclass with metrics and runtime
+* `best_cfg` is the best-performing hyperparameter dictionary (ready to plug back into a manual `UniVIConfig` / `TrainingConfig` if desired)
 
 ---
 
