@@ -49,7 +49,7 @@ UniVI/
 │   ├── UniVI_working_environment.yml
 │   ├── UniVI_working_environment_v2_full.yml
 │   ├── UniVI_working_environment_v2_minimal.yml
-│   └── univi_env.yml
+│   └── univi_env.yml              # Recommended env to use - has necessary packages for CUDA GPU usage
 ├── data/                          # Example datasets (Hao CITE-seq, 10x Multiome, TEA-seq)
 │   ├── README.md                  # Notes on data sources / formats
 │   ├── Hao_CITE-seq_data/
