@@ -12,6 +12,7 @@ UniVI is a **multi-modal variational autoencoder (VAE)** framework for aligning 
 - Cross-modal reconstruction and imputation
 - Data denoising
 - Structured evaluation of alignment quality (FOSCTTM, modality mixing, label transfer, etc.)
+- Exploratory analysis of the relationships between heterogeneous molecular readouts that inform biological functional dimensions
 
 This repository contains the core UniVI code, training scripts, parameter files, and example notebooks.
 
