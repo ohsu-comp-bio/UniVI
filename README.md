@@ -108,7 +108,7 @@ UniVI/
 ## Installation & quickstart
 
 > **Note (coming soon)**:
-> The commands below assume UniVI is available on PyPI and a conda channel (e.g. `conda-forge` or a dedicated `ashford-a` channel).
+> The commands below assume UniVI is available on PyPI and a conda channel (e.g. `conda-forge` or a dedicated `Ashford-A` channel).
 > Until the first public release is pushed, please use the **development install from source** (see below).
 
 ### 1. Install UniVI via pip (PyPI)
