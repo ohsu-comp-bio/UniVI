@@ -58,7 +58,7 @@ UniVI/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/<your-org-or-user>/UniVI.git
+git clone https://github.com/Ashford-A/UniVI.git
 cd UniVI
 ```
 
@@ -67,7 +67,7 @@ cd UniVI
 Pick one of the environment files under `envs/` (adjust the name if yours is different):
 
 ```bash
-conda env create -f envs/UniVI_working_environment_v2_full.yml
+conda env create -f envs/univi_env.yml
 conda activate univi
 ```
 
@@ -92,7 +92,7 @@ This makes the `univi` package importable in your scripts and notebooks.
 
 ## Prepare input data
 
-UniVI expects per-modality AnnData objects with matching cells:
+UniVI expects per-modality AnnData objects with matching cells, be that paired data or some other pairing metric:
 
 * Each modality (e.g. RNA / ADT / ATAC) is an `AnnData` with the same `obs_names` (same cells, same order).
 * Raw counts are usually stored in `.layers["counts"]`, with a processed view in `.X`.
@@ -103,20 +103,27 @@ Typical conventions:
 
 * `.layers["counts"]` → raw counts
 * `.X` → normalized / log1p counts (e.g. HVGs only)
-* Decoder likelihood: `"nb"` or `"zinb"`
+* When setting up a model, decoder likelihood should toughly match the input distribution:
+ * `"nb"` or `"zinb"` for raw counts/some instances of normalized counts.
+ * `"gaussian"` for other isntances of normalized and normalized/scaled counts.
 
 **ADT (CITE-seq)**
 
 * `.layers["counts"]` → raw ADT counts
 * `.X` → CLR-normalized ADT
-* Decoder likelihood: `"nb"` or `"gaussian"` depending on how you preprocess
+* Decoder likelihood:
+ * `"nb"` or `"zinb"` for more raw-like counts
+ * `"gaussian"` for normalized or normalized/scaled counts
 
 **ATAC**
 
 * `.layers["counts"]` → raw peak counts
 * `.obsm["X_lsi"]` → LSI/TF-IDF components
-* `.X` → often set to `obsm["X_lsi"]` for UniVI
-* Decoder likelihood: `"mse"` (continuous LSI space)
+* `.X` → can set to `obsm["X_lsi"]`, or `layers["counts"]` or other normalization methods for UniVI
+* Decoder likelihood:
+ * `"mse"` if using the continuous LSI space
+ * `"nb"` or `"poissom"` if using a subset of raw peak counts/highly variable peaks
+ * `"gaussian"` if you treat it similarly to RNA preprocessing depending on integration goals
 
 See `tutorials/` and `notebooks/` for full preprocessing examples.
 
@@ -161,6 +168,7 @@ These typically compute:
 * kNN label transfer accuracy
 * UMAPs colored by cell type and modality
 * Cross-modal reconstruction summaries
+* We're continuously implementing new evaluation metrics and tools to use, so this list is not exhaustive
 
 For more detailed, notebook-style workflows (e.g. TEA-seq tri-modal integration, Multiome RNA+ATAC, or non-paired matching), see the examples under `notebooks/` and `tutorials/`.
 
