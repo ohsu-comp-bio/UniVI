@@ -67,7 +67,7 @@ cd UniVI
 Pick one of the environment files under `envs/` (adjust the name if yours is different):
 
 ```bash
-conda env create -f envs/univi_env.yml
+conda env create -f envs/UniVI_working_environment_v2_full.yml
 conda activate univi
 ```
 
