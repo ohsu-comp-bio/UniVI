@@ -29,9 +29,25 @@ class UniVIMultiModalVAE(nn.Module):
     LOGVAR_MAX = 10.0
     EPS = 1e-8
 
-    def __init__(self, cfg: UniVIConfig):
+    def __init__(
+        self,
+        cfg: UniVIConfig,
+        *,
+        loss_mode: str = "v2",
+        v1_recon: str = "cross",
+        v1_recon_mix: float = 0.0,
+        normalize_v1_terms: bool = True,
+    ):
         super().__init__()
         self.cfg = cfg
+        # Loss / objective mode
+        # - v2: lightweight multimodal ELBO with MoE/PoE fusion + per-mod recon + KL-to-prior + mean-L2 alignment
+        # - v1: paper-style cross-reconstruction + cross-posterior KL alignment (requires paired / pseudo-paired samples)
+        self.loss_mode = str(loss_mode).lower()
+        self.v1_recon = str(v1_recon).lower()
+        self.v1_recon_mix = float(v1_recon_mix)
+        self.normalize_v1_terms = bool(normalize_v1_terms)
+
         self.latent_dim = cfg.latent_dim
 
         # Max weights for annealing
@@ -330,7 +346,31 @@ class UniVIMultiModalVAE(nn.Module):
     # forward
     # ------------------------------------------------------------------
 
-    def forward(
+def forward(
+    self,
+    x_dict: Dict[str, torch.Tensor],
+    epoch: int = 0,
+) -> Dict[str, torch.Tensor]:
+    """
+    Dispatch to the requested objective.
+
+    - loss_mode="v2" (default): MoE/PoE fused posterior → decode each observed modality once;
+      recon + β·KL(q(z|x_obs)||p(z)) + γ·L2(μ_m, μ_m')
+    - loss_mode="v1": paper-style objective with cross-reconstruction + cross-posterior KL alignment:
+      ∑_k ∑_j E_{q_k(z|x_k)}[-log p_j(x_j|z)] + β∑_k KL(q_k||p) + γ∑_{k≠j} KL(q_k||q_j)
+
+    Notes
+    -----
+    The v1 objective assumes the modalities in x_dict correspond to the *same cells* (paired or pseudo-paired).
+    """
+    mode = (self.loss_mode or "v2").lower()
+    if mode in ("v1", "paper", "cross"):
+        return self._forward_v1(x_dict=x_dict, epoch=epoch)
+    if mode in ("v2", "lite", "moe", "poe"):
+        return self._forward_v2(x_dict=x_dict, epoch=epoch)
+    raise ValueError(f"Unknown loss_mode={self.loss_mode!r}. Expected 'v1' or 'v2'.")
+
+    def _forward_v2(
         self,
         x_dict: Dict[str, torch.Tensor],
         epoch: int = 0,
@@ -420,6 +460,185 @@ class UniVIMultiModalVAE(nn.Module):
     # ------------------------------------------------------------------
     # annealing helper
     # ------------------------------------------------------------------
+
+
+def _forward_v1(
+    self,
+    x_dict: Dict[str, torch.Tensor],
+    epoch: int = 0,
+) -> Dict[str, torch.Tensor]:
+    """
+    v1 (paper-style) objective:
+      L = ∑_{k∈M_obs} ∑_{j∈M_obs} E_{q_k(z|x_k)}[-log p_j(x_j|z)]
+        + β ∑_{k∈M_obs} KL(q_k(z|x_k) || p(z))
+        + γ ∑_{k,j∈M_obs, k≠j} KL(q_k(z|x_k) || q_j(z|x_j))
+
+    Implementation details:
+    - Uses *one decoder per target modality* (p_{θ,j}). Cross-recon uses the same target decoder with different z sources.
+    - Requires paired/pseudo-paired samples: x_k and x_j must refer to the same underlying cells in the minibatch.
+    - recon source policy is controlled by self.v1_recon:
+        * "cross" (default): all sources k and all targets j (includes self + cross)
+        * "self": only k==j reconstruction
+        * "avg": average the sampled z's across observed modalities, then reconstruct each target once
+        * "moe": use fused z (mixture_of_experts) to reconstruct each target once
+        * "src:<modname>": use only that modality's z as the source (e.g., "src:rna" or "src:adt")
+    - If normalize_v1_terms=True (default), each group is averaged so the scale doesn't grow with #modalities.
+    """
+    # 1) encode per modality
+    mu_dict, logvar_dict = self.encode_modalities(x_dict)
+    assert len(mu_dict) > 0, "At least one modality must be present."
+
+    present = list(mu_dict.keys())
+    K = len(present)
+
+    # 2) pick a 'reporting' latent (for xhat output + mu_z/logvar_z keys)
+    mu_moe, logvar_moe = self.mixture_of_experts(mu_dict, logvar_dict)
+    z_moe = self._reparameterize(mu_moe, logvar_moe)
+
+    # 3) build per-modality z samples (sources)
+    z_src = {m: self._reparameterize(mu_dict[m], logvar_dict[m]) for m in present}
+
+    v1_recon = (self.v1_recon or "cross").lower()
+
+    # Helpers to compute recon for a given z and a given target modality
+    def recon_target_from_z(z: torch.Tensor, target_mod: str) -> torch.Tensor:
+        # raw decoder output for that modality
+        raw = self.decoders[target_mod](z)
+        # lookup likelihood for that modality
+        m_cfg = next(cfg for cfg in self.cfg.modalities if cfg.name == target_mod)
+        return self._recon_loss(
+            x=x_dict[target_mod],
+            raw_dec_out=raw,
+            likelihood=m_cfg.likelihood,
+            mod_name=target_mod,
+        )
+
+    # 4) reconstruction losses
+    recon_per_target = {m: torch.zeros(mu_dict[present[0]].size(0), device=mu_dict[present[0]].device) for m in present}
+    recon_total = 0.0
+
+    if v1_recon.startswith("src:"):
+        src_name = v1_recon.split("src:", 1)[1].strip()
+        if src_name not in z_src:
+            raise ValueError(f"v1_recon={self.v1_recon!r} but '{src_name}' not present in batch. Present: {present}")
+        z_use = z_src[src_name]
+        for j in present:
+            loss_j = recon_target_from_z(z_use, j)
+            recon_per_target[j] = recon_per_target[j] + loss_j
+            recon_total = recon_total + loss_j
+
+    elif v1_recon == "self":
+        for j in present:
+            loss_j = recon_target_from_z(z_src[j], j)
+            recon_per_target[j] = recon_per_target[j] + loss_j
+            recon_total = recon_total + loss_j
+
+    elif v1_recon in ("avg", "average"):
+        # average *samples* across observed modalities (simple, matches your "average z1,z2" idea)
+        z_avg = torch.stack([z_src[m] for m in present], dim=0).mean(dim=0)
+        for j in present:
+            loss_j = recon_target_from_z(z_avg, j)
+            recon_per_target[j] = recon_per_target[j] + loss_j
+            recon_total = recon_total + loss_j
+        z_moe = z_avg  # use avg in outputs for clarity
+
+    elif v1_recon in ("moe", "poe", "fused"):
+        for j in present:
+            loss_j = recon_target_from_z(z_moe, j)
+            recon_per_target[j] = recon_per_target[j] + loss_j
+            recon_total = recon_total + loss_j
+
+    else:
+        # default: full cross-reconstruction over all (k -> j)
+        for k in present:
+            zk = z_src[k]
+            for j in present:
+                loss_j = recon_target_from_z(zk, j)
+                recon_per_target[j] = recon_per_target[j] + loss_j
+                recon_total = recon_total + loss_j
+
+        # Optional extra recon from averaged z (acts like a "both zs" term) if v1_recon_mix > 0
+        if self.v1_recon_mix > 0.0 and K > 1:
+            z_avg = torch.stack([z_src[m] for m in present], dim=0).mean(dim=0)
+            mix = float(self.v1_recon_mix)
+            for j in present:
+                loss_j = recon_target_from_z(z_avg, j)
+                recon_total = recon_total + mix * loss_j
+                recon_per_target[j] = recon_per_target[j] + mix * loss_j
+
+    # normalize reconstruction term so it doesn't blow up with K
+    if self.normalize_v1_terms:
+        if v1_recon == "self":
+            denom = max(K, 1)
+        elif v1_recon.startswith("src:") or v1_recon in ("avg", "average", "moe", "poe", "fused"):
+            denom = max(K, 1)
+        else:
+            denom = max(K * K, 1)
+        recon_total = recon_total / float(denom)
+        recon_per_target = {k: v / float(denom) for k, v in recon_per_target.items()}
+
+    # 5) KL to prior: sum over observed modality posteriors
+    mu_p = self.prior_mu.expand_as(mu_dict[present[0]])
+    logvar_p = self.prior_logvar.expand_as(logvar_dict[present[0]])
+    kl_terms = []
+    for k in present:
+        kl_terms.append(self._kl_gaussian(mu_dict[k], logvar_dict[k], mu_p, logvar_p))
+    kl = torch.stack(kl_terms, dim=0).sum(dim=0)
+    if self.normalize_v1_terms:
+        kl = kl / float(max(K, 1))
+
+    # 6) cross-posterior KL alignment (ordered pairs k != j)
+    if K < 2:
+        cross_kl = torch.zeros(mu_dict[present[0]].size(0), device=mu_dict[present[0]].device)
+    else:
+        cross_terms = []
+        for i in range(K):
+            for j in range(K):
+                if i == j:
+                    continue
+                mi, lvi = mu_dict[present[i]], logvar_dict[present[i]]
+                mj, lvj = mu_dict[present[j]], logvar_dict[present[j]]
+                cross_terms.append(self._kl_gaussian(mi, lvi, mj, lvj))
+        cross_kl = torch.stack(cross_terms, dim=0).sum(dim=0)
+        if self.normalize_v1_terms:
+            cross_kl = cross_kl / float(K * (K - 1))
+
+    # 7) annealing
+    beta = self._anneal_weight(epoch, self.cfg.kl_anneal_start, self.cfg.kl_anneal_end, self.beta_max)
+    gamma = self._anneal_weight(epoch, self.cfg.align_anneal_start, self.cfg.align_anneal_end, self.gamma_max)
+
+    # 8) total loss
+    loss = recon_total + beta * kl + gamma * cross_kl
+
+    loss_mean = loss.mean()
+    recon_mean = recon_total.mean()
+    kl_mean = kl.mean()
+    align_mean = cross_kl.mean()
+
+    beta_t = torch.tensor(beta, device=loss_mean.device)
+    gamma_t = torch.tensor(gamma, device=loss_mean.device)
+
+    # For convenience / compatibility: provide an xhat computed from the reporting z (z_moe above)
+    xhat_dict = self.decode_modalities(z_moe)
+
+    return {
+        "loss": loss_mean,
+        "recon_total": recon_mean,
+        "kl": kl_mean,
+        "align": align_mean,              # in v1, this is cross-posterior KL
+        "cross_kl": align_mean,           # explicit alias
+        "mu_z": mu_moe,
+        "logvar_z": logvar_moe,
+        "z": z_moe,
+        "xhat": xhat_dict,
+        "mu_dict": mu_dict,
+        "logvar_dict": logvar_dict,
+        "recon_per_modality": {k: v.mean() for k, v in recon_per_target.items()},
+        "beta": beta_t,
+        "gamma": gamma_t,
+    }
+
+
 
     def _anneal_weight(self, epoch: int, start: int, end: int, max_val: float) -> float:
         if end <= start:

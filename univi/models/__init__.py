@@ -2,6 +2,4 @@
 
 from .univi import UniVIMultiModalVAE
 
-__all__ = [
-    "UniVIMultiModalVAE",
-]
+__all__ = ["UniVIMultiModalVAE"]
