@@ -356,6 +356,171 @@ python scripts/train_univi.py \
   --data-root /path/to/your/data
 ```
 
+### 3) Quickstart: run UniVI from Python / Jupyter
+
+If you prefer to stay inside a notebook or a Python script instead of calling the CLI, you can build the configs, model, and trainer directly.
+
+Below is a minimal **CITE-seq (RNA + ADT)** example using paired AnnData objects.
+
+```python
+import numpy as np
+import scanpy as sc
+import torch
+
+from torch.utils.data import DataLoader, Subset
+
+from univi import (
+    UniVIMultiModalVAE,
+    ModalityConfig,
+    UniVIConfig,
+    TrainingConfig,
+)
+from univi.data import MultiModalDataset
+from univi.trainer import UniVITrainer
+````
+
+#### 1) Load preprocessed AnnData (paired cells)
+
+```python
+# Example: CITE-seq with RNA + ADT
+rna = sc.read_h5ad("path/to/rna_citeseq.h5ad")
+adt = sc.read_h5ad("path/to/adt_citeseq.h5ad")
+
+# Assumes rna.obs_names == adt.obs_names (same cells, same order)
+adata_dict = {
+    "rna": rna,
+    "adt": adt,
+}
+```
+
+#### 2) Build `MultiModalDataset` and DataLoaders
+
+```python
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+dataset = MultiModalDataset(
+    adata_dict=adata_dict,
+    X_key="X",          # use .X from each AnnData for training
+    device=device,      # tensors moved to this device on-the-fly
+)
+
+n_cells = rna.n_obs
+idx = np.arange(n_cells)
+rng = np.random.default_rng(0)
+rng.shuffle(idx)
+
+split = int(0.8 * n_cells)
+train_idx, val_idx = idx[:split], idx[split:]
+
+train_ds = Subset(dataset, train_idx)
+val_ds   = Subset(dataset, val_idx)
+
+batch_size = 256
+
+train_loader = DataLoader(
+    train_ds,
+    batch_size=batch_size,
+    shuffle=True,
+    num_workers=0,
+)
+
+val_loader = DataLoader(
+    val_ds,
+    batch_size=batch_size,
+    shuffle=False,
+    num_workers=0,
+)
+```
+
+#### 3) Define UniVI configs (v1 vs UniVI-lite)
+
+```python
+# UniVI model config (architecture + regularization)
+univi_cfg = UniVIConfig(
+    latent_dim=40,
+    beta=5.0,          # KL weight
+    gamma=40.0,        # alignment weight (used differently in v1 vs lite)
+    encoder_dropout=0.1,
+    decoder_dropout=0.0,
+    encoder_batchnorm=True,
+    decoder_batchnorm=False,
+    kl_anneal_start=0,
+    kl_anneal_end=25,
+    align_anneal_start=0,
+    align_anneal_end=25,
+    modalities=[
+        ModalityConfig(
+            name="rna",
+            input_dim=rna.n_vars,
+            encoder_hidden=[1024, 512],
+            decoder_hidden=[512, 1024],
+            likelihood="nb",   # counts-like RNA
+        ),
+        ModalityConfig(
+            name="adt",
+            input_dim=adt.n_vars,
+            encoder_hidden=[256, 128],
+            decoder_hidden=[128, 256],
+            likelihood="nb",   # counts-like ADT
+        ),
+    ],
+)
+
+# Training config (epochs, LR, device, etc.)
+train_cfg = TrainingConfig(
+    n_epochs=200,
+    batch_size=batch_size,
+    lr=1e-3,
+    weight_decay=1e-4,
+    device=device,
+    log_every=10,
+    grad_clip=5.0,
+    num_workers=0,
+    seed=42,
+    early_stopping=True,
+    patience=25,
+    min_delta=0.0,
+)
+```
+
+Choose the loss / objective mode when you build the model:
+
+```python
+# UniVI-lite (a.k.a. "v2" objective, missing-modality friendly)
+model = UniVIMultiModalVAE(
+    cfg=univi_cfg,
+    loss_mode="lite",   # alias: "v2"
+).to(device)
+
+# OR: paper-style v1 objective (paired batches, cross-modal reconstruction)
+# model = UniVIMultiModalVAE(
+#     cfg=univi_cfg,
+#     loss_mode="v1",
+# ).to(device)
+```
+
+#### 4) Train inside Python / Jupyter
+
+```python
+trainer = UniVITrainer(
+    model=model,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    train_cfg=train_cfg,
+    device=device,
+)
+
+history = trainer.fit()  # runs the training loop
+```
+
+`history` (if returned by your version of `UniVITrainer`) typically contains per-epoch loss and metric curves. After training, you can reuse `model` directly for:
+
+* Computing latent embeddings (`encode_modalities` / `mixture_of_experts`)
+* Cross-modal reconstruction (forward passes with different modality subsets)
+* Exporting `z` to AnnData or NumPy for downstream analysis (UMAP, clustering, DE, etc.)
+
+```
+
 ---
 
 ## Hyperparameter tuning (optional)
