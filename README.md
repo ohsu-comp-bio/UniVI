@@ -555,39 +555,14 @@ history = trainer.fit()  # runs the training loop
 #### 6) Write latent `z` into AnnData `.obsm["X_univi"]`
 
 ```python
-@torch.no_grad()
-def write_univi_latent(model, adata_dict, *, obsm_key="X_univi", batch_size=512, device="cpu"):
-    model.eval()
-    names = list(adata_dict.keys())
-    n = adata_dict[names[0]].n_obs
-
-    # require paired order
-    for nm in names[1:]:
-        if not np.array_equal(adata_dict[nm].obs_names.values, adata_dict[names[0]].obs_names.values):
-            raise ValueError(f"obs_names mismatch between {names[0]} and {nm}")
-
-    zs = []
-    for start in range(0, n, batch_size):
-        end = min(n, start + batch_size)
-        x_dict = {}
-        for nm, ad in adata_dict.items():
-            X = ad.X[start:end]
-            X = X.A if hasattr(X, "A") else X
-            x_dict[nm] = torch.as_tensor(X, dtype=torch.float32, device=device)
-
-        out = model(x_dict)
-        zs.append(out["z"].detach().cpu().numpy())
-
-    Z = np.vstack(zs)
-
-    for nm, ad in adata_dict.items():
-        ad.obsm[obsm_key] = Z
-
-    return Z
+from univi import write_univi_latent
 
 Z = write_univi_latent(model, adata_dict, obsm_key="X_univi", device=device)
 print("Embedding shape:", Z.shape)
 ```
+
+> **Tip**
+> If you want deterministic embeddings for plotting, add the argument `use_mean=True` to the `write_univi_latent` function so you store mu_z instead of a sampled z. Of note, a sampled z is a stochastic sampling from each latent distribution which allows for generative modeling, while mu_z uses the means of each latent distribution for a more informative view of overall latent structure.
 
 ---
 

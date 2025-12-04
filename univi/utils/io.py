@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Sequence, Union
 import os
 import json
 import torch
+import numpy as np
 import scanpy as sc
 import anndata as ad
 
@@ -32,6 +33,7 @@ def load_checkpoint(path: str):
 def save_config_json(config: Dict[str, Any], path: str):
     with open(path, "w") as f:
         json.dump(config, f, indent=2, sort_keys=True)
+
 
 def load_config(config_path: str):
     import json
@@ -65,6 +67,7 @@ def load_config(config_path: str):
         cfg["training"].setdefault("device", "cuda")
 
     return cfg
+
 
 def save_anndata_splits(
     adata: ad.AnnData,
@@ -157,4 +160,74 @@ def save_anndata_splits(
         test.write_h5ad(paths["test"])
 
     return {"train": train, "val": val, "test": test}
+
+
+@torch.no_grad()
+def write_univi_latent(
+    model,
+    adata_dict: Dict[str, "anndata.AnnData"],
+    *,
+    obsm_key: str = "X_univi",
+    batch_size: int = 512,
+    device: str | torch.device = "cpu",
+    use_mean: bool = False,
+):
+    """
+    Run UniVI in eval mode and write the fused latent embedding Z into each AnnData in adata_dict.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        UniVIMultiModalVAE (works for both loss_mode="v1" and loss_mode="lite"/"v2").
+    adata_dict : dict[str, AnnData]
+        Dict of paired/pseudo-paired AnnData objects. Must share identical obs_names in the same order.
+    obsm_key : str
+        Key to write in .obsm (e.g., "X_univi").
+    batch_size : int
+        Mini-batch size for encoding.
+    device : str or torch.device
+        Device for model inputs (should match where your model lives).
+    use_mean : bool
+        If True, writes mu_z instead of a stochastic sample z.
+
+    Returns
+    -------
+    Z : np.ndarray, shape (n_cells, latent_dim)
+        Latent embedding written into each AnnData.obsm[obsm_key].
+    """
+    model.eval()
+
+    names = list(adata_dict.keys())
+    if len(names) == 0:
+        raise ValueError("adata_dict is empty.")
+
+    n = adata_dict[names[0]].n_obs
+
+    # require paired order
+    ref = adata_dict[names[0]].obs_names.values
+    for nm in names[1:]:
+        if not np.array_equal(adata_dict[nm].obs_names.values, ref):
+            raise ValueError(f"obs_names mismatch between {names[0]} and {nm}")
+
+    zs = []
+    for start in range(0, n, batch_size):
+        end = min(n, start + batch_size)
+        x_dict = {}
+
+        for nm, ad in adata_dict.items():
+            X = ad.X[start:end]
+            X = X.A if hasattr(X, "A") else np.asarray(X)
+            x_dict[nm] = torch.as_tensor(X, dtype=torch.float32, device=device)
+
+        out = model(x_dict)
+        z = out["mu_z"] if use_mean and ("mu_z" in out) else out["z"]
+        zs.append(z.detach().cpu().numpy())
+
+    Z = np.vstack(zs)
+
+    for nm, ad in adata_dict.items():
+        ad.obsm[obsm_key] = Z
+
+    return Z
+
 

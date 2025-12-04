@@ -5,6 +5,7 @@
 from .config import ModalityConfig, UniVIConfig, TrainingConfig
 from .models import UniVIMultiModalVAE
 from . import matching
+from .utils import write_univi_latent
 
 def __getattr__(name):
     # Lazy import so `import univi` works even without torch installed
@@ -20,4 +21,5 @@ __all__ = [
     "UniVITrainer",
     "UniVIMultiModalVAE",
     "matching",
+    "write_univi_latent",
 ]
