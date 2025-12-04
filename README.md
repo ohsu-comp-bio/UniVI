@@ -519,8 +519,6 @@ history = trainer.fit()  # runs the training loop
 * Cross-modal reconstruction (forward passes with different modality subsets)
 * Exporting `z` to AnnData or NumPy for downstream analysis (UMAP, clustering, DE, etc.)
 
-```
-
 ---
 
 ## Hyperparameter tuning (optional)
