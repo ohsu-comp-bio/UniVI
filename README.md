@@ -61,6 +61,8 @@ At a high level:
 UniVI/
 ├── README.md                      # Project overview, installation, quickstart
 ├── pyproject.toml                 # Python packaging config (pip / PyPI)
+├── assets/                        # Assets folder, currently just houses the figures subfolder
+│   └── figures/                   # Contains schematic figure(s) for repository front page
 ├── conda.recipe/                  # Conda build recipe (for conda-build)
 │   └── meta.yaml
 ├── envs/                          # Example conda environments
