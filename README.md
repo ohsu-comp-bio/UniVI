@@ -513,7 +513,7 @@ trainer = UniVITrainer(
 history = trainer.fit()  # runs the training loop
 ```
 
-`history` (if returned by your version of `UniVITrainer`) typically contains per-epoch loss and metric curves. After training, you can reuse `model` directly for:
+`history` typically contains per-epoch loss and metric curves. After training, you can reuse `model` directly for:
 
 * Computing latent embeddings (`encode_modalities` / `mixture_of_experts`)
 * Cross-modal reconstruction (forward passes with different modality subsets)
