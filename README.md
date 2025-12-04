@@ -523,7 +523,7 @@ history = trainer.fit()  # runs the training loop
 * Cross-modal reconstruction (forward passes with different modality subsets)
 * Exporting `z` to AnnData or NumPy for downstream analysis (UMAP, clustering, DE, etc.)
 
-### 6) Write latent `z` into AnnData `.obsm["X_univi"]`
+#### 6) Write latent `z` into AnnData `.obsm["X_univi"]`
 
 ```python
 @torch.no_grad()
