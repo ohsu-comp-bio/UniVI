@@ -279,7 +279,7 @@ UniVI can be trained on **counts** (NB/ZINB/Poisson likelihoods) or **continuous
 
 Recommended pattern (example showing several preprocessing options for the different data types, YMMV):
 
-```json
+```json5
 {
   "data": {
     "modalities": [
