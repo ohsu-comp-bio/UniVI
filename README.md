@@ -486,7 +486,7 @@ train_cfg = TrainingConfig(
 #### 4) Choose the objective: **v1** vs **UniVI-lite**
 
 * **v1** (paper objective): cross-reconstruction + cross-posterior alignment
-  Best when batches are paired/pseudo-paired and you want explicit cross-prediction.
+  * Best when batches are paired/pseudo-paired and you want explicit cross-prediction.
 * **lite** (aka `"v2"`): missing-modality friendly; trains even if some modalities are absent in a batch.
 
 ```python
