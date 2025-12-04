@@ -256,17 +256,25 @@ In `parameter_files/*.json`, set a single switch that controls the objective:
 
 **Paper objective (v1; cross-reconstruction + cross-posterior alignment):**
 
-```json
+```json5
 {
-  "loss_mode": "v1"
+  "model": {
+    "loss_mode": "v1",
+    "v1_recon": "cross",             // or "cross" | "self" | "avg" | "moe" | "src:rna" etc.
+    "v1_recon_mix": 0.0,             // optional extra averaged-z recon weight
+    "normalize_v1_terms": true
 }
 ````
 
 **UniVI-lite objective (v2; lightweight / fusion-based):**
 
-```json
+```json5
 {
-  "loss_mode": "lite"
+  "model": {
+    "loss_mode": "lite",             // "lite" is also a proxy for "v2"
+    "v1_recon": "cross",             // doesn't get used if loss_mode="lite"
+    "v1_recon_mix": 0.0,             // doesn't get used if loss_mode="lite"
+    "normalize_v1_terms": true       // doesn't get used if loss_mode="lite"  
 }
 ```
 
@@ -323,7 +331,7 @@ Example: **CITE-seq (RNA + ADT)**
 
 ```bash
 python scripts/train_univi.py \
-  --config parameter_files/defaults_cite_seq_v1.json \
+  --config parameter_files/defaults_cite_seq_scaled_gaussian_v1.json \
   --outdir saved_models/citeseq_v1_run1 \
   --data-root /path/to/your/data
 ```
@@ -332,7 +340,7 @@ python scripts/train_univi.py \
 
 ```bash
 python scripts/train_univi.py \
-  --config parameter_files/defaults_cite_seq_lite.json \
+  --config parameter_files/defaults_cite_seq_scaled_gaussian_lite.json \
   --outdir saved_models/citeseq_lite_run1 \
   --data-root /path/to/your/data
 ```
@@ -352,8 +360,8 @@ python scripts/train_univi.py \
 
 ```bash
 python scripts/train_univi.py \
-  --config parameter_files/defaults_multiome_lite.json \
-  --outdir saved_models/multiome_lite_run1 \
+  --config parameter_files/ \
+  --outdir saved_models/defaults_multiome_lite.json \
   --data-root /path/to/your/data
 ```
 
@@ -363,7 +371,7 @@ Example: **TEA-seq (RNA + ADT + ATAC)**
 
 ```bash
 python scripts/train_univi.py \
-  --config parameter_files/defaults_teaseq_v1.json \
+  --config parameter_files/defaults_tea_seq_v1.json \
   --outdir saved_models/teaseq_v1_run1 \
   --data-root /path/to/your/data
 ```
@@ -372,7 +380,7 @@ python scripts/train_univi.py \
 
 ```bash
 python scripts/train_univi.py \
-  --config parameter_files/defaults_teaseq_lite.json \
+  --config parameter_files/defaults_tea_seq_lite.json \
   --outdir saved_models/teaseq_lite_run1 \
   --data-root /path/to/your/data
 ```
