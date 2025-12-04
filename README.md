@@ -250,13 +250,13 @@ UniVI supports two training regimes:
 * **UniVI v1**: paired/pseudo-paired batches + cross-modal reconstruction (e.g., RNA→ADT and ADT→RNA) + posterior alignment.
 * **UniVI-lite**: missing-modality friendly (can train when only a subset of modalities are present in a batch), typically with a lighter latent alignment term.
 
-### 0) Choose your training objective (v1 vs lite) in the config JSON
+### 0) Choose your training objective (aka loss_mode) (v1 vs lite (aka v2)) in the config JSON
 
 In your `parameter_files/*.json`, set a single switch controlling the objective. Recommended pattern:
 
 ```json
 {
-  "objective": "v1"
+  "loss_mode": "v1"
 }
 ```
 
@@ -264,11 +264,10 @@ or:
 
 ```json
 {
-  "objective": "lite"
+  "loss_mode": "lite" # Interchangeable with "loss_mode: "v2",
+                      # both do the non-v1 architecture/objective.
 }
 ```
-
-> If your repo uses a different field name than `objective` (e.g., `loss_mode`, `training_objective`, `use_cross_recon`), keep your existing key and use the values `"v1"` vs `"lite"` accordingly.
 
 ### 1) Normalization / representation switch (counts vs continuous)
 
@@ -289,7 +288,7 @@ Recommended pattern (example):
 * Use `.layers["counts"]` when you want NB/ZINB/Poisson decoders.
 * Use continuous `.X` (log1p/CLR/LSI) when you want Gaussian/MSE decoders.
 
-> Jupyter notebooks in this repository show recommended preprocessing per dataset; the key is that the decoder likelihood should match the input distribution.
+> Jupyter Notebooks in this repository (UniVI/notebooks/) show recommended preprocessing per dataset for different data types and analyses. Depending on your research goals, you can use several different methods of preprocessing. The model is quite robust when it comes to learning underlying biology regardless of input data processing method used; the main key is that the decoder likelihood should roughly match the input distribution per-modality. 
 
 ### 2) Train (CLI)
 
@@ -352,8 +351,6 @@ python scripts/train_univi.py \
   --outdir saved_models/teaseq_lite_run1 \
   --data-root /path/to/your/data
 ```
-
-> Suggestion: keep parallel config templates per dataset: `*_v1.json` and `*_lite.json` that differ only in `objective` (and any recommended default β/γ).
 
 ---
 
