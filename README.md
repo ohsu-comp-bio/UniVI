@@ -66,6 +66,7 @@ At a high level:
 ```text
 UniVI/
 ├── README.md                      # Project overview, installation, quickstart
+├── LICENSE                        # MIT license text file
 ├── pyproject.toml                 # Python packaging config (pip / PyPI)
 ├── assets/                        # Assets folder, currently just houses the figures subfolder
 │   └── figures/                   # Contains schematic figure(s) for repository front page
