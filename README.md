@@ -6,9 +6,9 @@
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/main/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.1.7/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/main/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.1.7/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
