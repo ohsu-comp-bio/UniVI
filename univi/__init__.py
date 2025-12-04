@@ -1,6 +1,6 @@
 # univi/__init__.py
-#
-# Keep exports stable so existing notebooks/scripts keep working.
+
+__version__ = "0.1.6"
 
 from .config import ModalityConfig, UniVIConfig, TrainingConfig
 from .models import UniVIMultiModalVAE

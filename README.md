@@ -1,7 +1,8 @@
 # UniVI
 
 [![PyPI version](https://img.shields.io/pypi/v/univi)](https://pypi.org/project/univi/)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.1.4)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.1.6)](https://pypi.org/project/univi/)
+![UniVI schematic](https://raw.githubusercontent.com/Ashford-A/UniVI/main/assets/figures/univi_overview_dark.png)
 
 <picture>
   <!-- Dark mode -->
