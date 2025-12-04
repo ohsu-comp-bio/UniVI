@@ -48,7 +48,12 @@ data/**
 !data/README.md
 
 saved_models/
-figures/
+/figures/
+
+# allow versioned assets figures
+!assets/
+!assets/figures/
+!assets/figures/**
 
 # -------------------------
 # Environment files (optional)

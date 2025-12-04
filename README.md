@@ -3,6 +3,20 @@
 [![PyPI version](https://img.shields.io/pypi/v/univi)](https://pypi.org/project/univi/)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.1.2)](https://pypi.org/project/univi/)
 
+<picture>
+  <!-- Dark mode -->
+  <source media="(prefers-color-scheme: dark)" srcset="assets/figures/univi_overview_dark.png">
+  <!-- Light mode / fallback -->
+  <img src="assets/figures/univi_overview_light.png"
+       alt="UniVI overview and evaluation roadmap"
+       width="100%">
+</picture>
+
+**UniVI overview and evaluation roadmap.**  
+(a) Generic UniVI architecture schematic. (b) Core training objective (v1). (c–d) Example modality combinations (paired multiome; tri-modal TEA-seq). (e) Evaluation roadmap spanning latent alignment (FOSCTTM↓), modality mixing, label transfer, reconstruction/prediction NLL, and downstream biological consistency. :contentReference[oaicite:0]{index=0} :contentReference[oaicite:1]{index=1}
+
+---
+
 UniVI is a **multi-modal variational autoencoder (VAE)** framework for aligning and integrating single-cell modalities such as RNA, ADT (CITE-seq), and ATAC. It’s built to support experiments like:
 
 - Joint embedding of RNA + ADT (CITE-seq)
