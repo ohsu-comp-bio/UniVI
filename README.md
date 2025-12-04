@@ -1,7 +1,7 @@
 # UniVI
 
 [![PyPI version](https://img.shields.io/pypi/v/univi)](https://pypi.org/project/univi/)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.1.2)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.1.4)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode -->
@@ -144,6 +144,9 @@ import univi
 from univi import UniVIMultiModalVAE, ModalityConfig, UniVIConfig
 ```
 
+> **Note:** UniVI requires `torch`. If `import torch` fails, install PyTorch for your platform/CUDA from:
+> [https://pytorch.org/get-started/locally/](https://pytorch.org/get-started/locally/)
+
 ### 2. Development install (from source) — recommended for active development
 
 If you want to modify UniVI or run the notebooks exactly as in this repo:
@@ -240,25 +243,117 @@ See the notebooks under `notebooks/` for end-to-end preprocessing examples for C
 
 ---
 
-## Running a minimal training script
+## Running a minimal training script (UniVI v1 vs UniVI-lite)
 
-Once your data are preprocessed and accessible, you can launch training using `scripts/train_univi.py` and any of the JSON configs under `parameter_files/`.
+UniVI supports two training regimes:
 
-Example (adjust paths / filenames as needed):
+* **UniVI v1**: paired/pseudo-paired batches + cross-modal reconstruction (e.g., RNA→ADT and ADT→RNA) + posterior alignment.
+* **UniVI-lite**: missing-modality friendly (can train when only a subset of modalities are present in a batch), typically with a lighter latent alignment term.
+
+### 0) Choose your training objective (v1 vs lite) in the config JSON
+
+In your `parameter_files/*.json`, set a single switch controlling the objective. Recommended pattern:
+
+```json
+{
+  "objective": "v1"
+}
+```
+
+or:
+
+```json
+{
+  "objective": "lite"
+}
+```
+
+> If your repo uses a different field name than `objective` (e.g., `loss_mode`, `training_objective`, `use_cross_recon`), keep your existing key and use the values `"v1"` vs `"lite"` accordingly.
+
+### 1) Normalization / representation switch (counts vs continuous)
+
+UniVI can be trained on **counts** (NB/ZINB/Poisson likelihoods) or **continuous** representations (Gaussian/MSE likelihoods). In your configs, keep this explicit.
+
+Recommended pattern (example):
+
+```json
+{
+  "input_representation": {
+    "RNA":  { "layer": "counts", "X_key": "X", "assume_log1p": false },
+    "ADT":  { "layer": "counts", "X_key": "X", "assume_log1p": false },
+    "ATAC": { "layer": "counts", "X_key": "X_lsi", "assume_log1p": false }
+  }
+}
+```
+
+* Use `.layers["counts"]` when you want NB/ZINB/Poisson decoders.
+* Use continuous `.X` (log1p/CLR/LSI) when you want Gaussian/MSE decoders.
+
+> Your notebooks show recommended preprocessing per dataset; the key is that the decoder likelihood should match the input distribution.
+
+### 2) Train (CLI)
+
+Example: **CITE-seq (RNA + ADT)**
+
+**UniVI v1**
 
 ```bash
 python scripts/train_univi.py \
-  --config parameter_files/defaults_cite_seq.json \
-  --outdir saved_models/citeseq_run1 \
+  --config parameter_files/defaults_cite_seq_v1.json \
+  --outdir saved_models/citeseq_v1_run1 \
   --data-root /path/to/your/data
 ```
 
-A typical config file in `parameter_files/` specifies:
+**UniVI-lite**
 
-* Latent dimensionality, β (beta) and γ (gamma)
-* Per-modality input dimensions and likelihoods
-* Training hyperparameters (epochs, batch size, learning rate, etc.)
-* Paths or names for the datasets to load
+```bash
+python scripts/train_univi.py \
+  --config parameter_files/defaults_cite_seq_lite.json \
+  --outdir saved_models/citeseq_lite_run1 \
+  --data-root /path/to/your/data
+```
+
+Example: **Multiome (RNA + ATAC)**
+
+**UniVI v1**
+
+```bash
+python scripts/train_univi.py \
+  --config parameter_files/defaults_multiome_v1.json \
+  --outdir saved_models/multiome_v1_run1 \
+  --data-root /path/to/your/data
+```
+
+**UniVI-lite**
+
+```bash
+python scripts/train_univi.py \
+  --config parameter_files/defaults_multiome_lite.json \
+  --outdir saved_models/multiome_lite_run1 \
+  --data-root /path/to/your/data
+```
+
+Example: **TEA-seq (RNA + ADT + ATAC)**
+
+**UniVI v1**
+
+```bash
+python scripts/train_univi.py \
+  --config parameter_files/defaults_teaseq_v1.json \
+  --outdir saved_models/teaseq_v1_run1 \
+  --data-root /path/to/your/data
+```
+
+**UniVI-lite**
+
+```bash
+python scripts/train_univi.py \
+  --config parameter_files/defaults_teaseq_lite.json \
+  --outdir saved_models/teaseq_lite_run1 \
+  --data-root /path/to/your/data
+```
+
+> Suggestion: keep parallel config templates per dataset: `*_v1.json` and `*_lite.json` that differ only in `objective` (and any recommended default β/γ).
 
 ---
 
@@ -308,19 +403,9 @@ df, best_result, best_cfg = run_citeseq_hparam_search(
     seed=0,
 )
 
-# Save all configs and metrics
 df.to_csv("citeseq_hparam_results.csv", index=False)
-
-print("Best config:")
-print(best_cfg)
-print("Best composite score:", best_result.metrics["composite_score"])
+print("Best config:", best_cfg)
 ```
-
-Under the hood this:
-
-* Uses medium/wide RNA and small/medium ADT MLP architectures
-* Searches over latent dimension, β, γ, learning rate, weight decay, dropout, batchnorm, and per-modality likelihoods (NB / ZINB / Gaussian)
-* Combines validation loss and FOSCTTM into a simple composite score
 
 ### 10x Multiome (RNA + ATAC) hyperparameter search
 
@@ -332,7 +417,7 @@ df, best_result, best_cfg = run_multiome_hparam_search(
     atac_train=atac_train,
     rna_val=rna_val,
     atac_val=atac_val,
-    celltype_key="cell_type",   # optional; enables label-transfer metrics
+    celltype_key="cell_type",
     device="cuda",
     layer="counts",
     X_key="X",
@@ -342,8 +427,6 @@ df, best_result, best_cfg = run_multiome_hparam_search(
 
 df.to_csv("multiome_hparam_results.csv", index=False)
 ```
-
-This function assumes paired RNA/ATAC AnnData objects with matching `obs_names` in train/val splits and searches over a slightly wider latent and β/γ range suitable for RNA+ATAC integration.
 
 ### TEA-seq (RNA + ADT + ATAC) hyperparameter search
 
@@ -368,11 +451,7 @@ df, best_result, best_cfg = run_teaseq_hparam_search(
 df.to_csv("teaseq_hparam_results.csv", index=False)
 ```
 
-All `*_train` and `*_val` AnnData objects must be fully paired and share the same `obs_names`. The search space includes per-modality architectures and likelihoods, plus global latent and regularization hyperparameters.
-
 ### Unimodal RNA / ADT / ATAC hyperparameter search
-
-For unimodal setups, you can use:
 
 ```python
 from univi.hyperparam_optimization import (
@@ -381,18 +460,16 @@ from univi.hyperparam_optimization import (
     run_atac_hparam_search,
 )
 
-# RNA-only (e.g., HVG log1p or raw-count space)
 df_rna, best_result_rna, best_cfg_rna = run_rna_hparam_search(
     rna_train=rna_train,
     rna_val=rna_val,
     device="cuda",
-    layer="counts",   # or "log1p" for Gaussian / lognormal decoders
+    layer="counts",
     X_key="X",
     max_configs=50,
     seed=0,
 )
 
-# ADT-only
 df_adt, best_result_adt, best_cfg_adt = run_adt_hparam_search(
     adt_train=adt_train,
     adt_val=adt_val,
@@ -403,28 +480,16 @@ df_adt, best_result_adt, best_cfg_adt = run_adt_hparam_search(
     seed=0,
 )
 
-# ATAC-only
 df_atac, best_result_atac, best_cfg_atac = run_atac_hparam_search(
     atac_train=atac_train,
     atac_val=atac_val,
     device="cuda",
-    layer="counts",   # or TF-IDF/LSI representation
+    layer="counts",
     X_key="X",
     max_configs=50,
     seed=0,
 )
 ```
-
-The unimodal routines:
-
-* Use validation loss as the objective (no cross-modal alignment)
-* Explore latent size, β, learning rate, weight decay, dropout, batchnorm, architectures, and decoder likelihoods appropriate to each modality
-
-Each function returns `(df, best_result, best_cfg)`, where:
-
-* `df` is a `pandas.DataFrame` with one row per config
-* `best_result` is a `SearchResult` dataclass with metrics and runtime
-* `best_cfg` is the best-performing hyperparameter dictionary (ready to plug back into a manual `UniVIConfig` / `TrainingConfig` if desired)
 
 ---
 
@@ -448,6 +513,4 @@ Typical evaluation outputs include:
 * Cross-modal reconstruction summaries
 
 For richer, exploratory workflows (TEA-seq tri-modal integration, Multiome RNA+ATAC, non-paired matching, etc.), see the notebooks in `notebooks/`.
-
-
 
