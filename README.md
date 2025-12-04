@@ -250,24 +250,28 @@ UniVI supports two training regimes:
 * **UniVI v1**: paired/pseudo-paired batches + cross-modal reconstruction (e.g., RNA→ADT and ADT→RNA) + posterior alignment.
 * **UniVI-lite**: missing-modality friendly (can train when only a subset of modalities are present in a batch), typically with a lighter latent alignment term.
 
-### 0) Choose your training objective (aka loss_mode) (v1 vs lite (aka v2)) in the config JSON
+### 0) Choose the training objective (`loss_mode`) in your config JSON
 
-In your `parameter_files/*.json`, set a single switch controlling the objective. Recommended pattern:
+In `parameter_files/*.json`, set a single switch that controls the objective:
+
+**Paper objective (v1; cross-reconstruction + cross-posterior alignment):**
 
 ```json
 {
   "loss_mode": "v1"
 }
-```
+````
 
-or:
+**UniVI-lite objective (v2; lightweight / fusion-based):**
 
 ```json
 {
-  "loss_mode": "lite" # Interchangeable with "loss_mode: "v2",
-                      # both do the non-v1 architecture/objective.
+  "loss_mode": "lite"
 }
 ```
+
+> **Note**
+> `loss_mode: "lite"` is an alias for `loss_mode: "v2"` (they run the same objective in the current code).
 
 ### 1) Normalization / representation switch (counts vs continuous)
 
