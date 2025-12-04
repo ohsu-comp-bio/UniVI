@@ -277,16 +277,37 @@ In `parameter_files/*.json`, set a single switch that controls the objective:
 
 UniVI can be trained on **counts** (NB/ZINB/Poisson likelihoods) or **continuous** representations (Gaussian/MSE likelihoods). In your configs, keep this explicit.
 
-Recommended pattern (example):
+Recommended pattern (example showing several preprocessing options for the different data types, YMMV):
 
 ```json
 {
-  "input_representation": {
-    "RNA":  { "layer": "counts", "X_key": "X", "assume_log1p": false },
-    "ADT":  { "layer": "counts", "X_key": "X", "assume_log1p": false },
-    "ATAC": { "layer": "counts", "X_key": "X_lsi", "assume_log1p": false }
+  "data": {
+    "modalities": [
+      {
+        "name": "rna",
+        "layer": "log1p",            // uses .X or .layers["log1p"]
+        "X_key": "X",
+        "assume_log1p": true,        // already log-normalized
+        "likelihood": "gaussian"
+      },
+      {
+        "name": "adt",
+        "layer": "counts",           // raw counts in .layers["counts"]
+        "X_key": "counts",
+        "assume_log1p": false,       // use raw for ZINB
+        "likelihood": "zinb"
+      },
+      {
+        "name": "atac",
+        "layer": "X_lsi",            // continuous LSI features
+        "X_key": "X_lsi",
+        "assume_log1p": false,
+        "likelihood": "gaussian"
+      }
+    ]
   }
 }
+
 ```
 
 * Use `.layers["counts"]` when you want NB/ZINB/Poisson decoders.
