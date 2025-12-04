@@ -483,23 +483,27 @@ train_cfg = TrainingConfig(
 )
 ```
 
-Choose the loss / objective mode when you build the model:
+### 4) Choose the objective: **v1** vs **UniVI-lite**
+
+* **v1** (paper objective): cross-reconstruction + cross-posterior alignment
+  Best when batches are paired/pseudo-paired and you want explicit cross-prediction.
+* **lite** (aka `"v2"`): missing-modality friendly; trains even if some modalities are absent in a batch.
 
 ```python
-# UniVI-lite (a.k.a. "v2" objective, missing-modality friendly)
+# Option A: UniVI v1 (paper)
 model = UniVIMultiModalVAE(
-    cfg=univi_cfg,
-    loss_mode="lite",   # alias: "v2"
+    univi_cfg,
+    loss_mode="v1",
+    v1_recon="cross",          # "cross" | "self" | "avg" | "moe" | "src:rna" etc.
+    v1_recon_mix=0.0,          # optional extra averaged-z recon weight
+    normalize_v1_terms=True,
 ).to(device)
 
-# OR: paper-style v1 objective (paired batches, cross-modal reconstruction)
-# model = UniVIMultiModalVAE(
-#     cfg=univi_cfg,
-#     loss_mode="v1",
-# ).to(device)
+# Option B: UniVI-lite (v2)
+# model = UniVIMultiModalVAE(univi_cfg, loss_mode="lite").to(device)
 ```
 
-#### 4) Train inside Python / Jupyter
+#### 5) Train inside Python / Jupyter
 
 ```python
 trainer = UniVITrainer(
@@ -518,6 +522,43 @@ history = trainer.fit()  # runs the training loop
 * Computing latent embeddings (`encode_modalities` / `mixture_of_experts`)
 * Cross-modal reconstruction (forward passes with different modality subsets)
 * Exporting `z` to AnnData or NumPy for downstream analysis (UMAP, clustering, DE, etc.)
+
+### 6) Write latent `z` into AnnData `.obsm["X_univi"]`
+
+```python
+@torch.no_grad()
+def write_univi_latent(model, adata_dict, *, obsm_key="X_univi", batch_size=512, device="cpu"):
+    model.eval()
+    names = list(adata_dict.keys())
+    n = adata_dict[names[0]].n_obs
+
+    # require paired order
+    for nm in names[1:]:
+        if not np.array_equal(adata_dict[nm].obs_names.values, adata_dict[names[0]].obs_names.values):
+            raise ValueError(f"obs_names mismatch between {names[0]} and {nm}")
+
+    zs = []
+    for start in range(0, n, batch_size):
+        end = min(n, start + batch_size)
+        x_dict = {}
+        for nm, ad in adata_dict.items():
+            X = ad.X[start:end]
+            X = X.A if hasattr(X, "A") else X
+            x_dict[nm] = torch.as_tensor(X, dtype=torch.float32, device=device)
+
+        out = model(x_dict)
+        zs.append(out["z"].detach().cpu().numpy())
+
+    Z = np.vstack(zs)
+
+    for nm, ad in adata_dict.items():
+        ad.obsm[obsm_key] = Z
+
+    return Z
+
+Z = write_univi_latent(model, adata_dict, obsm_key="X_univi", device=device)
+print("Embedding shape:", Z.shape)
+```
 
 ---
 
