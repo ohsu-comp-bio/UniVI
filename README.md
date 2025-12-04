@@ -13,7 +13,7 @@
 </picture>
 
 **UniVI overview and evaluation roadmap.**  
-(a) Generic UniVI architecture schematic. (b) Core training objective (v1). (c–d) Example modality combinations (paired multiome; tri-modal TEA-seq). (e) Evaluation roadmap spanning latent alignment (FOSCTTM↓), modality mixing, label transfer, reconstruction/prediction NLL, and downstream biological consistency.
+(a) Generic UniVI architecture schematic. (b) Core training objective (UniVI v1). (c) Example modality combinations beyond bi-modal data (e.g. TEA-seq RNA + ATAC + ADT). (d) Evaluation roadmap spanning latent alignment (FOSCTTM↓), modality mixing, label transfer, reconstruction/prediction NLL, and downstream biological consistency.
 
 ---
 
