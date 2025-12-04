@@ -185,15 +185,22 @@ def encode_adata(
     adata,
     modality: str,
     device: str = "cpu",
+    layer: Optional[str] = None,
     X_key: str = "X",
     batch_size: int = 1024,
 ) -> np.ndarray:
     """
     Push an AnnData through the UniVI encoder for a single modality.
-    Returns a (n_cells, latent_dim) numpy array of the *mean* of q(z|x_m).
+
+    Selection rules:
+      - if X_key != "X": uses adata.obsm[X_key]
+      - else: uses adata.layers[layer] if layer is not None, else adata.X
+
+    Returns a (n_cells, latent_dim) numpy array of the *fused* mean latent.
     """
+    from .data import _get_matrix
     model.eval()
-    X = adata.layers[X_key] if X_key in adata.layers else adata.X
+    X = _get_matrix(adata, layer=layer, X_key=X_key)
     if sp.issparse(X):
         X = X.toarray()
 
@@ -201,29 +208,34 @@ def encode_adata(
     with torch.no_grad():
         for start in range(0, X.shape[0], batch_size):
             end = min(start + batch_size, X.shape[0])
-            xb = torch.as_tensor(X[start:end], dtype=torch.float32, device=device)
+            xb = torch.as_tensor(np.asarray(X[start:end]), dtype=torch.float32, device=device)
             mu_dict, logvar_dict = model.encode_modalities({modality: xb})
-            mu = mu_dict[modality]  # [batch, latent_dim]
-            zs.append(mu.cpu().numpy())
+            mu_z, _ = model.mixture_of_experts(mu_dict, logvar_dict)
+            zs.append(mu_z.cpu().numpy())
 
-    Z = np.vstack(zs)
-    return Z
-
+    return np.vstack(zs)
 def cross_modal_predict(
     model,
     adata_src,
     src_mod: str,
     tgt_mod: str,
     device: str = "cpu",
+    layer: Optional[str] = None,
     X_key: str = "X",
     batch_size: int = 512,
 ) -> np.ndarray:
     """
     Given source modality data, encode to z and decode into target modality.
+
+    Selection rules:
+      - if X_key != "X": uses adata_src.obsm[X_key]
+      - else: uses adata_src.layers[layer] if layer is not None, else adata_src.X
+
     Returns reconstructed X_hat for the target modality as a numpy array.
     """
+    from .data import _get_matrix
     model.eval()
-    X = adata_src.layers[X_key] if X_key in adata_src.layers else adata_src.X
+    X = _get_matrix(adata_src, layer=layer, X_key=X_key)
     if sp.issparse(X):
         X = X.toarray()
 
@@ -231,49 +243,36 @@ def cross_modal_predict(
     with torch.no_grad():
         for start in range(0, X.shape[0], batch_size):
             end = min(start + batch_size, X.shape[0])
-            xb = torch.as_tensor(X[start:end], dtype=torch.float32, device=device)
+            xb = torch.as_tensor(np.asarray(X[start:end]), dtype=torch.float32, device=device)
 
-            # encode only the source modality
             mu_dict, logvar_dict = model.encode_modalities({src_mod: xb})
-            mu_z, logvar_z = model.mixture_of_experts(mu_dict, logvar_dict)  # single-modality reduces to that encoder
+            mu_z, _ = model.mixture_of_experts(mu_dict, logvar_dict)
             xhat_dict = model.decode_modalities(mu_z)
             preds.append(xhat_dict[tgt_mod].cpu().numpy())
 
-    X_hat = np.vstack(preds)
-    return X_hat
-
+    return np.vstack(preds)
 def denoise_adata(
     model,
     adata,
     modality: str,
     device: str = "cpu",
+    layer: Optional[str] = None,
     X_key: str = "X",
     batch_size: int = 512,
-    layer_out: str = "univi_denoised",
-) -> None:
+) -> np.ndarray:
     """
-    Denoise a modality by encoding + decoding.
-    Writes the denoised matrix into adata.layers[layer_out].
+    Denoise (reconstruct) a modality by encoding and decoding within the same modality.
     """
-    model.eval()
-    X = adata.layers[X_key] if X_key in adata.layers else adata.X
-    if sp.issparse(X):
-        X = X.toarray()
-
-    preds = []
-    with torch.no_grad():
-        for start in range(0, X.shape[0], batch_size):
-            end = min(start + batch_size, X.shape[0])
-            xb = torch.as_tensor(X[start:end], dtype=torch.float32, device=device)
-            mu_dict, logvar_dict = model.encode_modalities({modality: xb})
-            mu_z, logvar_z = model.mixture_of_experts(mu_dict, logvar_dict)
-            xhat_dict = model.decode_modalities(mu_z)
-            preds.append(xhat_dict[modality].cpu().numpy())
-
-    X_denoised = np.vstack(preds)
-    # store result in layers
-    adata.layers[layer_out] = X_denoised
-
+    return cross_modal_predict(
+        model,
+        adata_src=adata,
+        src_mod=modality,
+        tgt_mod=modality,
+        device=device,
+        layer=layer,
+        X_key=X_key,
+        batch_size=batch_size,
+    )
 def fit_latent_gaussians_by_label(
     Z: np.ndarray,
     labels: np.ndarray,
@@ -328,202 +327,3 @@ def sample_from_latent_gaussians(
 
 import scipy.sparse as sp
 import torch
-
-def encode_adata(
-    model,
-    adata,
-    modality: str,
-    device: str = "cpu",
-    layer: Optional[str] = None,
-    batch_size: int = 512,
-):
-    """
-    Encode a single AnnData object into UniVI latent space.
-
-    Parameters
-    ----------
-    model : UniVIMultiModalVAE
-        Trained model.
-    adata : AnnData
-        AnnData for the given modality (features must match training).
-    modality : str
-        Name of the modality (must be in model.modality_names).
-    device : str
-        "cpu" or "cuda".
-    layer : str or None
-        If not None, use adata.layers[layer], else adata.X.
-    batch_size : int
-        Batch size for encoding.
-
-    Returns
-    -------
-    z_all : np.ndarray
-        Latent embedding [n_cells, latent_dim].
-    """
-    from anndata import AnnData  # type hints only
-
-    assert modality in model.modality_names, (
-        f"Unknown modality '{modality}'. Available: {model.modality_names}"
-    )
-
-    model.eval()
-    model.to(device)
-
-    X = adata.layers[layer] if layer is not None else adata.X
-    if sp.issparse(X):
-        X = X.toarray()
-    X = np.asarray(X, dtype=np.float32)
-
-    zs = []
-    with torch.no_grad():
-        for start in range(0, X.shape[0], batch_size):
-            xb = X[start:start + batch_size]
-            xb_t = torch.as_tensor(xb, dtype=torch.float32, device=device)
-
-            mu_dict, logvar_dict = model.encode_modalities({modality: xb_t})
-            mu_z, logvar_z = model.mixture_of_experts(mu_dict, logvar_dict)
-            zs.append(mu_z.cpu().numpy())
-
-    return np.vstack(zs)
-
-
-# ------------------------------------------------------------------
-# 6. Helper: cross-modal prediction (src_mod -> tgt_mod)
-# ------------------------------------------------------------------
-
-def cross_modal_predict(
-    model,
-    adata_src,
-    src_mod: str,
-    tgt_mod: str,
-    device: str = "cpu",
-    layer: Optional[str] = None,
-    batch_size: int = 512,
-):
-    """
-    Encode source modality and decode to target modality.
-
-    Returns a dense numpy array with shape [n_cells, n_features_tgt].
-    """
-    from anndata import AnnData  # type hints
-
-    assert src_mod in model.modality_names
-    assert tgt_mod in model.modality_names
-
-    model.eval()
-    model.to(device)
-
-    X = adata_src.layers[layer] if layer is not None else adata_src.X
-    if sp.issparse(X):
-        X = X.toarray()
-    X = np.asarray(X, dtype=np.float32)
-
-    preds = []
-    with torch.no_grad():
-        for start in range(0, X.shape[0], batch_size):
-            xb = X[start:start + batch_size]
-            xb_t = torch.as_tensor(xb, dtype=torch.float32, device=device)
-
-            mu_dict, logvar_dict = model.encode_modalities({src_mod: xb_t})
-            mu_z, logvar_z = model.mixture_of_experts(mu_dict, logvar_dict)
-            xhat_dict = model.decode_modalities(mu_z)
-            preds.append(xhat_dict[tgt_mod].cpu().numpy())
-
-    return np.vstack(preds)
-
-
-# ------------------------------------------------------------------
-# 7. Helper: denoise an AnnData in-place using UniVI decoder
-# ------------------------------------------------------------------
-
-def denoise_adata(
-    model,
-    adata,
-    modality: str,
-    device: str = "cpu",
-    layer: Optional[str] = None,
-    batch_size: int = 512,
-    out_layer: str = "univi_denoised",
-):
-    """
-    Encode–decode and store reconstructed values in adata.layers[out_layer].
-    """
-    Xhat = cross_modal_predict(
-        model=model,
-        adata_src=adata,
-        src_mod=modality,
-        tgt_mod=modality,
-        device=device,
-        layer=layer,
-        batch_size=batch_size,
-    )
-    adata.layers[out_layer] = Xhat
-    return adata
-
-
-# ------------------------------------------------------------------
-# 8. Cell-type–conditional Gaussians in latent space
-# ------------------------------------------------------------------
-
-def fit_latent_gaussians_by_label(
-    Z: np.ndarray,
-    labels: np.ndarray,
-) -> Dict[str, Dict[str, np.ndarray]]:
-    """
-    For each label, fit a Gaussian in latent space.
-
-    Returns a dict: label -> {"mean": mu, "cov": cov}.
-    """
-    Z = np.asarray(Z, dtype=np.float32)
-    labels = np.asarray(labels)
-
-    uniq = np.unique(labels)
-    out: Dict[str, Dict[str, np.ndarray]] = {}
-
-    for lab in uniq:
-        idx = np.where(labels == lab)[0]
-        if idx.size == 0:
-            continue
-        Zg = Z[idx]
-        mu = Zg.mean(axis=0)
-        cov = np.cov(Zg, rowvar=False)
-        out[str(lab)] = {"mean": mu, "cov": cov}
-
-    return out
-
-
-def sample_from_latent_gaussians(
-    gauss_by_label: Dict[str, Dict[str, np.ndarray]],
-    spec: Dict[str, int],
-    random_state: Optional[int] = None,
-) -> Dict[str, np.ndarray]:
-    """
-    Sample latent vectors per label from fitted Gaussians.
-
-    Parameters
-    ----------
-    gauss_by_label : dict
-        Output of fit_latent_gaussians_by_label.
-    spec : dict
-        Mapping label -> number of samples to draw.
-    random_state : int or None
-        Seed for reproducibility.
-
-    Returns
-    -------
-    samples : dict
-        Mapping label -> [n_samples, latent_dim] array.
-    """
-    rng = np.random.default_rng(random_state)
-    out: Dict[str, np.ndarray] = {}
-
-    for lab, n in spec.items():
-        if lab not in gauss_by_label or n <= 0:
-            continue
-        mu = gauss_by_label[lab]["mean"]
-        cov = gauss_by_label[lab]["cov"]
-        z = rng.multivariate_normal(mean=mu, cov=cov, size=n)
-        out[lab] = z.astype(np.float32)
-
-    return out
-

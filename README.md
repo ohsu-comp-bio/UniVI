@@ -1,14 +1,14 @@
 # UniVI
 
 [![PyPI version](https://img.shields.io/pypi/v/univi)](https://pypi.org/project/univi/)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.1.8)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.1.9)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.1.8/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.1.9/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.1.8/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.1.9/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
@@ -61,74 +61,105 @@ MIT License — see `LICENSE`.
 
 ## Repository structure
 
-At a high level:
-
 ```text
 UniVI/
-├── README.md                      # Project overview, installation, quickstart
-├── LICENSE                        # MIT license text file
-├── pyproject.toml                 # Python packaging config (pip / PyPI)
-├── assets/                        # Assets folder, currently just houses the figures subfolder
-│   └── figures/                   # Contains schematic figure(s) for repository front page
-├── conda.recipe/                  # Conda build recipe (for conda-build)
+├── README.md                              # Project overview, installation, quickstart
+├── LICENSE                                # MIT license text file
+├── pyproject.toml                         # Python packaging config (pip / PyPI)
+├── assets/                                # Static assets used by README/docs
+│   └── figures/                           # Schematic figure(s) for repository front page
+├── conda.recipe/                          # Conda build recipe (for conda-build)
 │   └── meta.yaml
-├── envs/                          # Example conda environments
+├── envs/                                  # Example conda environments
 │   ├── UniVI_working_environment.yml
 │   ├── UniVI_working_environment_v2_full.yml
 │   ├── UniVI_working_environment_v2_minimal.yml
-│   └── univi_env.yml              # Recommended env to use - has necessary packages for CUDA GPU usage
-├── data/                          # Example datasets (Hao CITE-seq, 10x Multiome, TEA-seq)
-│   ├── README.md                  # Notes on data sources / formats
-│   ├── Hao_CITE-seq_data/
-│   ├── PBMC_10x_Multiome_data/
-│   └── TEA-seq_data/
-├── figures/                       # Generated figures used in docs / paper
-├── notebooks/                     # Jupyter notebooks for demos & benchmarks
-│   ├── UniVI_CITE-seq_*.ipynb     # CITE-seq examples and benchmarks
-│   ├── UniVI_10x_Multiome_*.ipynb # 10x PBMC Multiome examples
-│   └── UniVI_TEA-seq_*.ipynb      # TEA-seq (tri-modal) examples
-├── parameter_files/               # JSON configs for model & training hyperparameters
-│   ├── defaults_*.json            # Default configs (per modality / experiment)
-│   └── params_*.json              # Example “named” configs (RNA, ADT, ATAC, etc.)
-├── saved_models/                  # Example trained UniVI checkpoints
-│   └── univi_*.pt                 # (Reproducibility / ready-made demos)
-├── scripts/                       # CLI entry points for training & evaluation
-│   ├── train_univi.py             # Train UniVI from a parameter JSON
-│   ├── evaluate_univi.py          # Evaluate trained models (FOSCTTM, label transfer, etc.)
-│   ├── benchmark_univi_citeseq.py # CITE-seq-specific benchmarking script
-│   └── run_multiome_hparam_search.py
-└── univi/                         # UniVI Python package (importable as `import univi`)
-    ├── __init__.py                # Package exports and __version__
-    ├── config.py                  # Config dataclasses & helpers
-    ├── data.py                    # Dataset wrappers, loaders (MultiModalDataset, etc.)
-    ├── evaluation.py              # Metrics (FOSCTTM, mixing scores, label transfer, etc.)
-    ├── matching.py                # Modality matching / alignment helpers
-    ├── models/                    # VAE architectures and modality-specific modules
+│   └── univi_env.yml                      # Recommended env (CUDA-friendly)
+├── data/                                  # Small example data notes (datasets are typically external)
+│   └── README.md                          # Notes on data sources / formats
+├── notebooks/                             # Jupyter notebooks (demos & benchmarks)
+│   ├── UniVI_CITE-seq_*.ipynb
+│   ├── UniVI_10x_Multiome_*.ipynb
+│   └── UniVI_TEA-seq_*.ipynb
+├── parameter_files/                       # JSON configs for model + training + data selectors
+│   ├── defaults_*.json                    # Default configs (per experiment)
+│   └── params_*.json                      # Example “named” configs (RNA, ADT, ATAC, etc.)
+├── scripts/                               # Reproducible entry points (revision-friendly)
+│   ├── train_univi.py                     # Train UniVI from a parameter JSON
+│   ├── evaluate_univi.py                  # Evaluate trained models (FOSCTTM, label transfer, etc.)
+│   ├── benchmark_univi_citeseq.py         # CITE-seq-specific benchmarking script
+│   ├── run_multiome_hparam_search.py
+│   ├── run_frequency_robustness.py.       # Composition/frequency mismatch robustness
+│   ├── run_do_not_integrate_detection.py  # “Do-not-integrate” unmatched population demo
+│   ├── run_benchmarks.py                  # Unified wrapper (includes optional Harmony baseline)
+│   └── revision_reproduce_all.sh          # One-click: reproduces figures + supplemental tables
+└── univi/                                 # UniVI Python package (importable as `import univi`)
+    ├── __init__.py                        # Package exports and __version__
+    ├── __main__.py                        # Enables: `python -m univi ...`
+    ├── cli.py                             # Minimal CLI (e.g., export-s1, encode)
+    ├── pipeline.py                        # Config-driven model+data loading; latent encoding helpers
+    ├── diagnostics.py                     # Exports Supplemental_Table_S1.xlsx (env + hparams + dataset stats)
+    ├── config.py                          # Config dataclasses (UniVIConfig, ModalityConfig, TrainingConfig)
+    ├── data.py                            # Dataset wrappers + matrix selectors (layer/X_key, obsm support)
+    ├── evaluation.py                      # Metrics (FOSCTTM, mixing, label transfer, feature recovery)
+    ├── matching.py                        # Modality matching / alignment helpers
+    ├── objectives.py                      # Losses (ELBO variants, KL/alignment annealing, etc.)
+    ├── plotting.py                        # Plotting helpers + consistent style defaults
+    ├── trainer.py                         # UniVITrainer: training loop, logging, checkpointing
+    ├── figures/                           # Package-internal figure assets (placeholder)
+    │   └── .gitkeep
+    ├── models/                            # VAE architectures + building blocks
     │   ├── __init__.py
-    │   ├── decoders.py            # Likelihood-specific decoders (NB, ZINB, Gaussian, etc.)
-    │   ├── encoders.py            # Modality-specific encoders (RNA, ADT, ATAC)
-    │   ├── mlp.py                 # Shared MLP building blocks
-    │   └── univi.py               # Core UniVI VAE architectures
-    ├── objectives.py              # Losses (ELBO, alignment, KL annealing, etc.)
-    ├── plotting.py                # Plotting helpers / evaluation visualizations
-    ├── trainer.py                 # UniVITrainer: training loop, logging, checkpointing
-    ├── hyperparam_optimization/   # Hyperparameter search scripts
-    │   ├── __init__.py            # Re-exports run_*_hparam_search helpers
-    │   ├── common.py              # Shared hparam search utilities (sampling, training, metrics)
+    │   ├── mlp.py                         # Shared MLP building blocks
+    │   ├── encoders.py                    # Modality encoders
+    │   ├── decoders.py                    # Likelihood-specific decoders (NB, ZINB, Gaussian, etc.)
+    │   └── univi.py                       # Core UniVI multi-modal VAE
+    ├── hyperparam_optimization/           # Hyperparameter search scripts
+    │   ├── __init__.py
+    │   ├── common.py
     │   ├── run_adt_hparam_search.py
     │   ├── run_atac_hparam_search.py
     │   ├── run_citeseq_hparam_search.py
     │   ├── run_multiome_hparam_search.py
     │   ├── run_rna_hparam_search.py
     │   └── run_teaseq_hparam_search.py
-    └── utils/                     # General utilities
+    └── utils/                             # General utilities
         ├── __init__.py
-        ├── io.py                  # I/O helpers (AnnData, configs, checkpoints)
-        ├── logging.py             # Logging configuration / progress reporting
-        ├── seed.py                # Reproducibility helpers (seeding RNGs)
-        ├── stats.py               # Small statistical helpers / transforms
-        └── torch_utils.py         # PyTorch utilities (device, tensor helpers)
+        ├── io.py                          # I/O helpers (AnnData, configs, checkpoints)
+        ├── logging.py                     # Logging configuration / progress reporting
+        ├── seed.py                        # Reproducibility helpers (seeding RNGs)
+        ├── stats.py                       # Small statistical helpers / transforms
+        └── torch_utils.py                 # PyTorch utilities (device, tensor helpers)
+
 ```
+
+## Generated outputs
+
+Most entry-point scripts write results into a user-specified output directory (commonly `runs/`), which is **not** tracked in git.
+
+A typical `runs/` folder produced by `scripts/revision_reproduce_all.sh` looks like:
+
+```text
+runs/
+└── <run_name>/
+    ├── checkpoints/
+    │   └── univi_checkpoint.pt
+    ├── eval/
+    │   ├── metrics.json                   # Summary metrics (FOSCTTM, label transfer, etc.)
+    │   └── metrics.csv                    # Same metrics in tabular form
+    ├── robustness/
+    │   ├── frequency_perturbation_results.csv
+    │   ├── frequency_perturbation_plot.png
+    │   ├── frequency_perturbation_plot.pdf
+    │   ├── do_not_integrate_summary.csv
+    │   ├── do_not_integrate_plot.png
+    │   └── do_not_integrate_plot.pdf
+    ├── benchmarks/
+    │   ├── results.csv                    # Multi-method benchmark table (if enabled)
+    │   ├── results.png
+    │   └── results.pdf
+    └── tables/
+        └── Supplemental_Table_S1.xlsx     # Environment + hyperparameters + dataset stats (+ optional metrics)
 
 ---
 

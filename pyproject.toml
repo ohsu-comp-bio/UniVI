@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "univi"
-version = "0.1.8"
+version = "0.1.9"
 description = "UniVI: a scalable multi-modal variational autoencoder toolkit for seamless integration and analysis of multimodal single-cell data."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,6 +28,7 @@ dependencies = [
   "igraph>=0.11",
   "leidenalg>=0.10",
   "tqdm>=4.66",
+  "openpyxl>=3.1",
 ]
 
 classifiers = [
@@ -44,3 +45,9 @@ Repository = "https://github.com/Ashford-A/UniVI"
 
 [tool.setuptools.packages.find]
 include = ["univi*"]
+
+[project.optional-dependencies]
+bench = ["harmonypy>=0.0.9"]
+
+[project.scripts]
+univi = "univi.cli:main"

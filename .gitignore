@@ -61,3 +61,6 @@ saved_models/
 .env
 .env.*
 
+
+.DS_Store
+**/.DS_Store

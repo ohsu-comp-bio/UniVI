@@ -11,6 +11,28 @@ from anndata import AnnData
 import anndata as ad
 
 
+
+def set_style(*, font_scale: float = 1.25, dpi: int = 150):
+    """Set readable, journal-friendly plotting defaults.
+
+    This keeps plots legible in manuscripts and supplements (Reviewer feedback).
+    """
+    import matplotlib as mpl
+
+    base = 10.0 * float(font_scale)
+    mpl.rcParams.update({
+        "figure.dpi": dpi,
+        "savefig.dpi": 300,
+        "font.size": base,
+        "axes.titlesize": base * 1.2,
+        "axes.labelsize": base * 1.1,
+        "xtick.labelsize": base * 0.95,
+        "ytick.labelsize": base * 0.95,
+        "legend.fontsize": base * 0.95,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    })
+
 def umap_by_modality(
     adata_dict: Dict[str, AnnData],
     obsm_key: str = "X_univi",
@@ -105,5 +127,3 @@ def umap_by_modality(
         color=color,
         savepath=savepath,
     )
-
-

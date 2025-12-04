@@ -157,9 +157,17 @@ class UniVITrainer:
                 self.optimizer.zero_grad()
 
             with torch.set_grad_enabled(train):
-                #out = self.model(x_dict, epoch=epoch)
+                #try:
+                #    out = self.model(x_dict, epoch=epoch)
+                #except TypeError:
+                #    # Backwards-compat: older forwards may not accept epoch kwarg
+                #    out = self.model(x_dict)
                 try:
-                    out = self.model(x_dict, epoch=epoch)
+                    try:
+                        out = self.model(x_dict, epoch=epoch)
+                    except TypeError:
+                        # Backwards-compat: older forwards may not accept epoch kwarg
+                        out = self.model(x_dict)
                 except TypeError:
                     out = self.model(x_dict)
 

@@ -6,7 +6,6 @@ import os
 import json
 import torch
 import numpy as np
-import scanpy as sc
 import anndata as ad
 
 
@@ -229,5 +228,3 @@ def write_univi_latent(
         ad.obsm[obsm_key] = Z
 
     return Z
-
-

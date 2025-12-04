@@ -1,117 +1,190 @@
 # univi/data.py
 
 from __future__ import annotations
-from typing import Dict, Optional
 
+from typing import Dict, Optional, Union, Mapping, Any, Tuple
+
+import os
 import numpy as np
 import scipy.sparse as sp
+import anndata as ad
+from anndata import AnnData
+
 import torch
 from torch.utils.data import Dataset
-from anndata import AnnData
+
+
+LayerSpec = Union[None, str, Mapping[str, Optional[str]]]
+XKeySpec = Union[str, Mapping[str, str]]
+
+
+def _get_matrix(adata: AnnData, *, layer: Optional[str], X_key: str):
+    """Return the 2D matrix view selected by (layer, X_key).
+
+    - If X_key == "X": uses adata.layers[layer] if layer is not None, else adata.X
+    - Else: uses adata.obsm[X_key]
+    """
+    if X_key != "X":
+        if X_key not in adata.obsm:
+            raise KeyError(f"X_key={X_key!r} not found in adata.obsm. Keys={list(adata.obsm.keys())}")
+        return adata.obsm[X_key]
+    if layer is not None:
+        if layer not in adata.layers:
+            raise KeyError(f"layer={layer!r} not found in adata.layers. Keys={list(adata.layers.keys())}")
+        return adata.layers[layer]
+    return adata.X
+
+
+def infer_input_dim(adata: AnnData, *, layer: Optional[str], X_key: str) -> int:
+    X = _get_matrix(adata, layer=layer, X_key=X_key)
+    if not hasattr(X, "shape") or len(X.shape) != 2:
+        raise ValueError(f"Selected matrix for (layer={layer!r}, X_key={X_key!r}) is not 2D.")
+    return int(X.shape[1])
+
+
+def align_paired_obs_names(
+    adata_dict: Dict[str, AnnData],
+    *,
+    how: str = "intersection",
+    require_nonempty: bool = True,
+) -> Dict[str, AnnData]:
+    """Align paired modalities by obs_names and order.
+
+    If how == "intersection": take intersection of obs_names across modalities and
+    reorder every AnnData to the same shared order.
+    """
+    if not adata_dict:
+        raise ValueError("adata_dict is empty")
+
+    if how != "intersection":
+        raise ValueError(f"Unsupported how={how!r}. Only 'intersection' is supported.")
+
+    names = list(adata_dict.keys())
+    shared = None
+    for nm in names:
+        idx = adata_dict[nm].obs_names
+        shared = idx if shared is None else shared.intersection(idx)
+
+    if require_nonempty and (shared is None or len(shared) == 0):
+        raise ValueError("No shared obs_names across modalities (intersection is empty).")
+
+    shared = shared.sort_values()
+    out: Dict[str, AnnData] = {}
+    for nm in names:
+        out[nm] = adata_dict[nm].loc[shared].copy()
+    return out
 
 
 class MultiModalDataset(Dataset):
-    """
-    Simple multimodal dataset wrapping multiple AnnData objects.
+    """Multimodal Dataset wrapping multiple AnnData objects.
 
-    Assumes that, when `paired=True`, all modalities have the same number
-    of cells and matching order of cells (same obs_names).
+    Supports either a *single* (layer, X_key) for all modalities **or**
+    per-modality {'rna': 'counts', 'atac': None, ...} specifications.
 
     Parameters
     ----------
-    adata_dict : dict
-        Dict mapping modality name -> AnnData (e.g. {"rna": rna_adata, "adt": adt_adata}).
-    layer : str or None
-        If not None, use this .layers[layer] for all modalities (typical for raw counts).
-        If None, use `.X` or `.obsm[X_key]` depending on X_key.
-    X_key : str
-        If "X", use `.X`; otherwise use `.obsm[X_key]` (e.g. for precomputed embeddings).
-    paired : bool
-        If True, all modalities must have the same n_obs; __len__ returns that.
-        (Unpaired mode can be extended later if you want.)
-    device : str or torch.device or None
-        Optional device to move tensors to. If None, leave on CPU.
+    adata_dict
+        Dict mapping modality name -> AnnData.
+    layer
+        None / str / dict[str, Optional[str]].
+    X_key
+        str / dict[str, str]. Use "X" for adata.X / adata.layers[layer]; otherwise uses adata.obsm[X_key].
+    paired
+        If True, assumes all modalities have same n_obs and same obs_names order.
+    device
+        Optional device to move tensors to during __getitem__.
     """
 
     def __init__(
         self,
         adata_dict: Dict[str, AnnData],
-        layer: Optional[str] = None,
-        X_key: str = "X",
+        *,
+        layer: LayerSpec = None,
+        X_key: XKeySpec = "X",
         paired: bool = True,
         device: Optional[torch.device] = None,
     ):
         self.adata_dict = adata_dict
-        self.modalities = list(adata_dict.keys())
-        self.layer = layer
-        self.X_key = X_key
         self.paired = paired
         self.device = device
 
-        # basic checks
-        if len(self.modalities) == 0:
-            raise ValueError("adata_dict must contain at least one modality.")
+        if isinstance(layer, Mapping):
+            self.layer_by_modality = dict(layer)
+        else:
+            self.layer_by_modality = {k: layer for k in adata_dict.keys()}
+
+        if isinstance(X_key, Mapping):
+            self.xkey_by_modality = dict(X_key)
+        else:
+            self.xkey_by_modality = {k: X_key for k in adata_dict.keys()}
 
         if paired:
-            n_cells = None
-            ref_obs = None
-            for name, adata in adata_dict.items():
-                if n_cells is None:
-                    n_cells = adata.n_obs
-                    ref_obs = adata.obs_names
-                else:
-                    if adata.n_obs != n_cells:
-                        raise ValueError(
-                            f"All modalities must have same n_obs when paired=True; "
-                            f"got {name} with n_obs={adata.n_obs} vs {n_cells}."
-                        )
-                    # optional: enforce matching obs_names
-                    if not np.array_equal(adata.obs_names, ref_obs):
-                        raise ValueError(
-                            f"obs_names for modality '{name}' do not match reference."
-                        )
-            self.n_cells = n_cells
-        else:
-            # you could sum lengths or do something fancier for unpaired mode
-            # For now we still require paired=True in the training code.
-            raise NotImplementedError("Unpaired mode is not yet implemented.")
+            first = next(iter(adata_dict.values()))
+            for nm, adata in self.adata_dict.items():
+                if adata.n_obs != first.n_obs:
+                    raise ValueError(
+                        f"Paired dataset requires matching n_obs across modalities. Got {nm}={adata.n_obs}, first={first.n_obs}"
+                    )
+                if not np.array_equal(adata.obs_names.values, first.obs_names.values):
+                    raise ValueError(
+                        f"Paired dataset requires identical obs_names order. Modality '{nm}' does not match."
+                    )
+
+    @property
+    def n_cells(self) -> int:
+        return len(self)
 
     def __len__(self) -> int:
-        return self.n_cells
+        first = next(iter(self.adata_dict.values()))
+        return int(first.n_obs)
 
-    def _get_X_row(self, adata: AnnData, idx: int) -> np.ndarray:
-        """
-        Extract one row as a dense float32 numpy array from AnnData.
-        Respects `self.layer` and `self.X_key`.
-        """
-        if self.layer is not None:
-            if self.layer not in adata.layers:
-                raise KeyError(f"Layer '{self.layer}' not found in adata.layers.")
-            X = adata.layers[self.layer]
-        else:
-            if self.X_key == "X":
-                X = adata.X
-            else:
-                if self.X_key not in adata.obsm:
-                    raise KeyError(f"X_key '{self.X_key}' not found in adata.obsm.")
-                X = adata.obsm[self.X_key]
-
-        if sp.issparse(X):
-            row = X[idx].toarray().ravel()
-        else:
-            row = np.asarray(X[idx]).ravel()
-
+    def _get_X_row(self, adata: AnnData, idx: int, *, layer: Optional[str], X_key: str) -> np.ndarray:
+        X = _get_matrix(adata, layer=layer, X_key=X_key)
+        row = X[idx]
+        if sp.issparse(row):
+            row = row.toarray()
+        row = np.asarray(row).reshape(-1)
         return row.astype(np.float32)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """
-        Returns a dict mapping modality -> tensor of shape [n_features].
-        """
         out: Dict[str, torch.Tensor] = {}
         for name, adata in self.adata_dict.items():
-            row_np = self._get_X_row(adata, idx)
+            layer = self.layer_by_modality.get(name, None)
+            xkey = self.xkey_by_modality.get(name, "X")
+            row_np = self._get_X_row(adata, idx, layer=layer, X_key=xkey)
             t = torch.from_numpy(row_np)
             if self.device is not None:
                 t = t.to(self.device)
             out[name] = t
         return out
+
+
+def dataset_from_anndata_dict(
+    adata_dict: Dict[str, AnnData],
+    *,
+    layer: LayerSpec = None,
+    X_key: XKeySpec = "X",
+    paired: bool = True,
+    align_obs: bool = True,
+) -> Tuple[MultiModalDataset, Dict[str, AnnData]]:
+    """Convenience: optionally align obs_names and build MultiModalDataset."""
+    if align_obs and paired:
+        adata_dict = align_paired_obs_names(adata_dict, how="intersection")
+    ds = MultiModalDataset(adata_dict, layer=layer, X_key=X_key, paired=paired)
+    return ds, adata_dict
+
+
+def load_anndata_dict_from_config(
+    modality_cfgs: list[dict[str, Any]],
+    *,
+    data_root: Optional[str] = None,
+) -> Dict[str, AnnData]:
+    """Load h5ad files described by the JSON config's data.modalities list."""
+    out: Dict[str, AnnData] = {}
+    for m in modality_cfgs:
+        name = m["name"]
+        path = m["h5ad_path"]
+        if data_root is not None and not os.path.isabs(path):
+            path = os.path.join(data_root, path)
+        out[name] = ad.read_h5ad(path)
+    return out
