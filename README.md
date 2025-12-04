@@ -289,7 +289,7 @@ Recommended pattern (example):
 * Use `.layers["counts"]` when you want NB/ZINB/Poisson decoders.
 * Use continuous `.X` (log1p/CLR/LSI) when you want Gaussian/MSE decoders.
 
-> Your notebooks show recommended preprocessing per dataset; the key is that the decoder likelihood should match the input distribution.
+> Jupyter notebooks in this repository show recommended preprocessing per dataset; the key is that the decoder likelihood should match the input distribution.
 
 ### 2) Train (CLI)
 
