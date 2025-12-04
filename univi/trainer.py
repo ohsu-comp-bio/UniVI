@@ -157,7 +157,12 @@ class UniVITrainer:
                 self.optimizer.zero_grad()
 
             with torch.set_grad_enabled(train):
-                out = self.model(x_dict, epoch=epoch)
+                #out = self.model(x_dict, epoch=epoch)
+                try:
+                    out = self.model(x_dict, epoch=epoch)
+                except TypeError:
+                    out = self.model(x_dict)
+
                 loss = out["loss"]
 
                 beta_val = float(out.get("beta", 0.0))
