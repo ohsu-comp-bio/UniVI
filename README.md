@@ -54,6 +54,11 @@ If you use UniVI in your work, please cite:
 
 ---
 
+## License
+MIT License — see `LICENSE`.
+
+---
+
 ## Repository structure
 
 At a high level:
