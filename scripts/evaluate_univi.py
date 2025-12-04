@@ -125,8 +125,15 @@ def main():
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
     # Instantiate model and load checkpoint
+    model_kwargs = {
+        "loss_mode": ckpt.get("loss_mode", "lite"),
+        "v1_recon": ckpt.get("v1_recon", "cross"),
+        "v1_recon_mix": ckpt.get("v1_recon_mix", 0.0),
+        "normalize_v1_terms": ckpt.get("normalize_v1_terms", True),
+    }
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    model = UniVIMultiModalVAE(univi_cfg).to(device)
+    #model = UniVIMultiModalVAE(univi_cfg).to(device)
+    model = UniVIMultiModalVAE(univi_cfg, **model_kwargs).to(device)
     ckpt = load_checkpoint(args.checkpoint)
     model.load_state_dict(ckpt["model_state"])
     model.eval()

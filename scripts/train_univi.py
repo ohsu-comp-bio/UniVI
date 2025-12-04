@@ -209,7 +209,7 @@ def main():
         else None
     )
 
-    # Instantiate model & trainer
+    # Instantiate trainer
     model = UniVIMultiModalVAE(univi_cfg)
 
     train_cfg = TrainingConfig(
@@ -228,6 +228,20 @@ def main():
         cfg=train_cfg,
     )
 
+    # Instantiate model
+    loss_mode = cfg["model"].get("loss_mode", "lite")  # or "v1"
+    v1_recon = cfg["model"].get("v1_recon", "cross")
+    v1_recon_mix = cfg["model"].get("v1_recon_mix", 0.0)
+    normalize_v1_terms = cfg["model"].get("normalize_v1_terms", True)
+
+    model = UniVIMultiModalVAE(
+        univi_cfg,
+        loss_mode=loss_mode,
+        v1_recon=v1_recon,
+        v1_recon_mix=v1_recon_mix,
+        normalize_v1_terms=normalize_v1_terms,
+    ).to(train_cfg.device)
+
     logger.info("Starting training...")
     trainer.fit()
     logger.info("Training finished.")
@@ -238,7 +252,13 @@ def main():
         ckpt_path,
         model_state=model.state_dict(),
         optimizer_state=trainer.optimizer.state_dict(),
-        extra={"config_path": os.path.abspath(args.config)},
+        extra={
+            "config_path": os.path.abspath(args.config),
+            "loss_mode": loss_mode,
+            "v1_recon": v1_recon,
+            "v1_recon_mix": v1_recon_mix,
+            "normalize_v1_terms": normalize_v1_terms,
+        },
     )
     logger.info(f"Saved checkpoint to {ckpt_path}")
 

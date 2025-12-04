@@ -29,7 +29,8 @@ Usage (example):
       --celltype-key celltype.l2 \
       --checkpoint path/to/univi_checkpoint.pt \
       --config-json path/to/univi_config.json \
-      --output-dir benchmarks/hao_level2_univi
+      --output-dir benchmarks/hao_level2_univi \
+      --loss_mode v1
 
 """
 
@@ -207,7 +208,8 @@ def benchmark_univi_citeseq(
     univi_cfg = UniVIConfig.from_dict(cfg_dict["univi"])
     train_cfg = TrainingConfig.from_dict(cfg_dict["training"])
 
-    model = UniVIMultiModalVAE(univi_cfg)
+    #model = UniVIMultiModalVAE(univi_cfg)
+    model = UniVIMultiModalVAE(univi_cfg, loss_mode=args.loss_mode)
     trainer = UniVITrainer(
         model=model,
         train_loader=None,
@@ -356,6 +358,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Benchmark UniVI on paired CITE-seq (RNA + ADT).")
     p.add_argument("--rna-h5ad", required=True, help="Path to RNA AnnData (.h5ad).")
     p.add_argument("--adt-h5ad", required=True, help="Path to ADT AnnData (.h5ad).")
+    p.add_argument("--loss_mode", type=str, default="lite", help="Training objective: v1 or lite")
     p.add_argument("--celltype-key", default="celltype.l2", help="obs key for cell type labels.")
     p.add_argument("--checkpoint", required=True, help="Path to UniVI checkpoint (.pt).")
     p.add_argument("--config-json", required=True, help="Path to UniVI config JSON.")

@@ -272,8 +272,10 @@ def run_multiome_hparam_search(
             shuffle=False,
             num_workers=train_cfg.num_workers,
         )
+        
+        loss_mode = cfg.get("model", {}).get("loss_mode", "lite")
 
-        model = UniVIMultiModalVAE(univi_cfg).to(train_cfg.device)
+        model = UniVIMultiModalVAE(univi_cfg, loss_mode=loss_mode).to(train_cfg.device)
         trainer = UniVITrainer(
             model=model,
             train_loader=train_loader,
