@@ -3,6 +3,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Tuple
+
 import torch
 from torch import nn
 
@@ -19,9 +20,7 @@ class EncoderConfig:
 
 
 class GaussianEncoder(nn.Module):
-    """
-    Simple encoder: x -> (mu, logvar) for a diagonal Gaussian.
-    """
+    """x -> (mu, logvar) for a diagonal Gaussian."""
 
     def __init__(self, cfg: EncoderConfig):
         super().__init__()
@@ -38,3 +37,4 @@ class GaussianEncoder(nn.Module):
         h = self.net(x)
         mu, logvar = torch.chunk(h, 2, dim=-1)
         return mu, logvar
+

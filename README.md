@@ -1,33 +1,33 @@
 # UniVI
 
 [![PyPI version](https://img.shields.io/pypi/v/univi)](https://pypi.org/project/univi/)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.2.1)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.2.2)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.1/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.2/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.1/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.2/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
 
-**UniVI overview and evaluation roadmap.**  
+**UniVI overview and evaluation roadmap.**
 (a) Generic UniVI architecture schematic. (b) Core training objective (for UniVI v1 - see documentation for UniVI-lite training objective). (c) Example modality combinations beyond bi-modal data (e.g. TEA-seq (tri-modal RNA + ATAC + ADT)). (d) Evaluation roadmap spanning latent alignment (FOSCTTM ↓), modality mixing, label transfer, reconstruction/prediction NLL, and downstream biological consistency.
 
 ---
 
 UniVI is a **multi-modal variational autoencoder (VAE)** framework for aligning and integrating single-cell modalities such as RNA, ADT (CITE-seq), and ATAC. It’s built to support experiments like:
 
-- Joint embedding of RNA + ADT (CITE-seq)
-- RNA + ATAC (Multiome) integration
-- RNA + ADT + ATAC (TEA-seq) tri-modal data integration
-- Independent non-paired modalities from the same tissue type
-- Cross-modal reconstruction and imputation
-- Data denoising
-- Structured evaluation of alignment quality (FOSCTTM, modality mixing, label transfer, etc.)
-- Exploratory analysis of the relationships between heterogeneous molecular readouts that inform biological functional dimensions
+* Joint embedding of RNA + ADT (CITE-seq)
+* RNA + ATAC (Multiome) integration
+* RNA + ADT + ATAC (TEA-seq) tri-modal data integration
+* Independent non-paired modalities from the same tissue type
+* Cross-modal reconstruction and imputation
+* Data denoising
+* Structured evaluation of alignment quality (FOSCTTM, modality mixing, label transfer, etc.)
+* Exploratory analysis of the relationships between heterogeneous molecular readouts that inform biological functional dimensions
 
 This repository contains the core UniVI code, training scripts, parameter files, and example notebooks.
 
@@ -37,8 +37,8 @@ This repository contains the core UniVI code, training scripts, parameter files,
 
 If you use UniVI in your work, please cite:
 
-> Ashford AJ, Enright T, Nikolova O, Demir E.  
-> **Unifying Multimodal Single-Cell Data Using a Mixture of Experts β-Variational Autoencoder-Based Framework.**  
+> Ashford AJ, Enright T, Nikolova O, Demir E.
+> **Unifying Multimodal Single-Cell Data Using a Mixture of Experts β-Variational Autoencoder-Based Framework.**
 > *bioRxiv* (2025). doi: [10.1101/2025.02.28.640429](https://www.biorxiv.org/content/10.1101/2025.02.28.640429v1.full)
 
 ```bibtex
@@ -50,11 +50,12 @@ If you use UniVI in your work, please cite:
   doi     = {10.1101/2025.02.28.640429},
   url     = {https://www.biorxiv.org/content/10.1101/2025.02.28.640429v1}
 }
-````
+```
 
 ---
 
 ## License
+
 MIT License — see `LICENSE`.
 
 ---
@@ -283,38 +284,50 @@ See the notebooks under `notebooks/` for end-to-end preprocessing examples for C
 
 ---
 
-## Running a minimal training script (UniVI v1 vs UniVI-lite)
+## Training modes & example recipes (v1 vs v2/lite + optional label head)
 
 UniVI supports two training regimes:
 
-* **UniVI v1**: paired/pseudo-paired batches + cross-modal reconstruction (e.g., RNA→ADT and ADT→RNA) + posterior alignment.
-* **UniVI-lite**: missing-modality friendly (can train when only a subset of modalities are present in a batch), typically with a lighter latent alignment term.
+* **UniVI v1**: paired/pseudo-paired batches + all-vs-all cross-modal reconstruction (e.g., RNA→ADT and ADT→RNA; and for K modalities, K·(K−1) ordered recon terms) + posterior alignment across modality posteriors.
+* **UniVI-lite / v2**: fused latent posterior (precision-weighted MoE/PoE style) + per-modality reconstruction + β·KL(q_fused||p) + γ·pairwise alignment between modality posteriors. Scales cleanly to 3+ modalities and is the recommended default.
+
+### Optional classification head
+
+You can add a categorical decoder head on the latent `z` by initializing the model with:
+
+* `n_label_classes > 0`
+* `label_loss_weight` (default 1.0)
+
+If your dataset yields `(x_dict, y)` batches, UniVI adds:
+`+ label_loss_weight · CE(class_logits(z), y)` to the per-sample loss.
+
+---
+
+## Running a minimal training script (UniVI v1 vs UniVI-lite)
 
 ### 0) Choose the training objective (`loss_mode`) in your config JSON
 
 In `parameter_files/*.json`, set a single switch that controls the objective:
 
-**Paper objective (v1; cross-reconstruction + cross-posterior alignment):**
+**Paper objective (v1; "avg" trains with 50% weight on self-reconstruction and 50% weight on cross-reconstruction, with weights automatically adjusted so this stays true for any number of modalities):**
 
 ```json5
 {
   "model": {
     "loss_mode": "v1",
-    "v1_recon": "cross",             // or "cross" | "self" | "avg" | "moe" | "src:rna" etc.
-    "v1_recon_mix": 0.0,             // optional extra averaged-z recon weight
+    "v1_recon": "avg",
     "normalize_v1_terms": true
+  }
 }
-````
+```
 
 **UniVI-lite objective (v2; lightweight / fusion-based):**
 
 ```json5
 {
   "model": {
-    "loss_mode": "lite",             // "lite" is also a proxy for "v2"
-    "v1_recon": "cross",             // doesn't get used if loss_mode="lite"
-    "v1_recon_mix": 0.0,             // doesn't get used if loss_mode="lite"
-    "normalize_v1_terms": true       // doesn't get used if loss_mode="lite"  
+    "loss_mode": "lite"
+  }
 }
 ```
 
@@ -323,9 +336,12 @@ In `parameter_files/*.json`, set a single switch that controls the objective:
 
 ### 1) Normalization / representation switch (counts vs continuous)
 
-UniVI can be trained on **counts** (NB/ZINB/Poisson likelihoods) or **continuous** representations (Gaussian/MSE likelihoods). In your configs, keep this explicit.
+**Important note on selectors:**
 
-Recommended pattern (example showing several preprocessing options for the different data types, YMMV):
+* `layer` selects `.layers[layer]` (if `X_key == "X"`).
+* `X_key == "X"` selects `.X`/`.layers[layer]`; otherwise `X_key` selects `.obsm[X_key]`.
+
+Correct pattern:
 
 ```json5
 {
@@ -333,35 +349,34 @@ Recommended pattern (example showing several preprocessing options for the diffe
     "modalities": [
       {
         "name": "rna",
-        "layer": "log1p",            // uses .X or .layers["log1p"]
+        "layer": "log1p",        // uses adata.layers["log1p"] (since X_key=="X")
         "X_key": "X",
-        "assume_log1p": true,        // already log-normalized
+        "assume_log1p": true,
         "likelihood": "gaussian"
       },
       {
         "name": "adt",
-        "layer": "counts",           // raw counts in .layers["counts"]
-        "X_key": "counts",
-        "assume_log1p": false,       // use raw for ZINB
+        "layer": "counts",       // uses adata.layers["counts"] (since X_key=="X")
+        "X_key": "X",
+        "assume_log1p": false,
         "likelihood": "zinb"
       },
       {
         "name": "atac",
-        "layer": "X_lsi",            // continuous LSI features
-        "X_key": "X_lsi",
+        "layer": null,           // ignored because X_key != "X"
+        "X_key": "X_lsi",        // uses adata.obsm["X_lsi"]
         "assume_log1p": false,
         "likelihood": "gaussian"
       }
     ]
   }
 }
-
 ```
 
 * Use `.layers["counts"]` when you want NB/ZINB/Poisson decoders.
-* Use continuous `.X` (log1p/CLR/LSI) when you want Gaussian/MSE decoders.
+* Use continuous `.X` or `.obsm["X_lsi"]` when you want Gaussian/MSE decoders.
 
-> Jupyter Notebooks in this repository (UniVI/notebooks/) show recommended preprocessing per dataset for different data types and analyses. Depending on your research goals, you can use several different methods of preprocessing. The model is quite robust when it comes to learning underlying biology regardless of input data processing method used; the main key is that the decoder likelihood should roughly match the input distribution per-modality. 
+> Jupyter Notebooks in this repository (UniVI/notebooks/) show recommended preprocessing per dataset for different data types and analyses. Depending on your research goals, you can use several different methods of preprocessing. The model is quite robust when it comes to learning underlying biology regardless of input data processing method used; the main key is that the decoder likelihood should roughly match the input distribution per-modality.
 
 ### 2) Train (CLI)
 
@@ -396,12 +411,12 @@ python scripts/train_univi.py \
   --data-root /path/to/your/data
 ```
 
-**UniVI-lite**
+**UniVI-lite** (fixed argument order)
 
 ```bash
 python scripts/train_univi.py \
-  --config parameter_files/ \
-  --outdir saved_models/defaults_multiome_lite.json \
+  --config parameter_files/defaults_multiome_lite.json \
+  --outdir saved_models/multiome_lite_run1 \
   --data-root /path/to/your/data
 ```
 
@@ -444,33 +459,29 @@ from univi import (
     UniVIConfig,
     TrainingConfig,
 )
-from univi.data import MultiModalDataset
+from univi.data import MultiModalDataset, align_paired_obs_names
 from univi.trainer import UniVITrainer
-````
+```
 
 #### 1) Load preprocessed AnnData (paired cells)
 
 ```python
-# Example: CITE-seq with RNA + ADT
 rna = sc.read_h5ad("path/to/rna_citeseq.h5ad")
 adt = sc.read_h5ad("path/to/adt_citeseq.h5ad")
 
-# Assumes rna.obs_names == adt.obs_names (same cells, same order)
-adata_dict = {
-    "rna": rna,
-    "adt": adt,
-}
+adata_dict = {"rna": rna, "adt": adt}
+adata_dict = align_paired_obs_names(adata_dict)  # ensures same obs_names/order
 ```
 
-#### 2) Build `MultiModalDataset` and DataLoaders
+#### 2) Build `MultiModalDataset` and DataLoaders (unsupervised)
 
 ```python
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 dataset = MultiModalDataset(
     adata_dict=adata_dict,
-    X_key="X",          # use .X from each AnnData for training
-    device=device,      # tensors moved to this device on-the-fly
+    X_key="X",
+    device=None,  # recommended: keep dataset on CPU; trainer moves tensors
 )
 
 n_cells = rna.n_obs
@@ -486,29 +497,35 @@ val_ds   = Subset(dataset, val_idx)
 
 batch_size = 256
 
-train_loader = DataLoader(
-    train_ds,
-    batch_size=batch_size,
-    shuffle=True,
-    num_workers=0,
-)
+train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
+```
 
-val_loader = DataLoader(
-    val_ds,
-    batch_size=batch_size,
-    shuffle=False,
-    num_workers=0,
-)
+#### (Optional) Supervised batches for the label head
+
+If you add `labels=` to the dataset, each item yields `(x_dict, y)`, and you should supply a `collate_fn`:
+
+```python
+y_codes = rna.obs["celltype"].astype("category").cat.codes.to_numpy()
+
+dataset_sup = MultiModalDataset(adata_dict=adata_dict, X_key="X", labels=y_codes)
+
+def collate_xy(batch):
+    xs, ys = zip(*batch)
+    x = {k: torch.stack([d[k] for d in xs], 0) for k in xs[0].keys()}
+    y = torch.as_tensor(ys, dtype=torch.long)
+    return x, y
+
+train_loader = DataLoader(dataset_sup, batch_size=batch_size, shuffle=True, collate_fn=collate_xy)
 ```
 
 #### 3) Define UniVI configs (v1 vs UniVI-lite)
 
 ```python
-# UniVI model config (architecture + regularization)
 univi_cfg = UniVIConfig(
     latent_dim=40,
-    beta=5.0,          # KL weight
-    gamma=40.0,        # alignment weight (used differently in v1 vs lite)
+    beta=5.0,
+    gamma=40.0,
     encoder_dropout=0.1,
     decoder_dropout=0.0,
     encoder_batchnorm=True,
@@ -518,24 +535,11 @@ univi_cfg = UniVIConfig(
     align_anneal_start=0,
     align_anneal_end=25,
     modalities=[
-        ModalityConfig(
-            name="rna",
-            input_dim=rna.n_vars,
-            encoder_hidden=[1024, 512],
-            decoder_hidden=[512, 1024],
-            likelihood="nb",   # counts-like RNA
-        ),
-        ModalityConfig(
-            name="adt",
-            input_dim=adt.n_vars,
-            encoder_hidden=[256, 128],
-            decoder_hidden=[128, 256],
-            likelihood="nb",   # counts-like ADT
-        ),
+        ModalityConfig("rna", rna.n_vars, [1024, 512], [512, 1024], likelihood="nb"),
+        ModalityConfig("adt", adt.n_vars, [256, 128],  [128, 256],  likelihood="nb"),
     ],
 )
 
-# Training config (epochs, LR, device, etc.)
 train_cfg = TrainingConfig(
     n_epochs=200,
     batch_size=batch_size,
@@ -552,24 +556,28 @@ train_cfg = TrainingConfig(
 )
 ```
 
-#### 4) Choose the objective: **v1** vs **UniVI-lite**
-
-* **v1** (paper objective): cross-reconstruction + cross-posterior alignment.
-  * Best when batches are paired/pseudo-paired and you want explicit cross-prediction.
-* **lite** (aka `"v2"`): missing-modality friendly; trains even if some modalities are absent in a batch.
+#### 4) Choose the objective + (optional) classification head
 
 ```python
-# Option A: UniVI v1 (paper)
+# Option A: UniVI v1
 model = UniVIMultiModalVAE(
     univi_cfg,
     loss_mode="v1",
-    v1_recon="cross",          # "cross" | "self" | "avg" | "moe" | "src:rna" etc.
-    v1_recon_mix=0.0,          # optional extra averaged-z recon weight
+    v1_recon="cross",
+    v1_recon_mix=0.0,
     normalize_v1_terms=True,
 ).to(device)
 
-# Option B: UniVI-lite (v2)
+# Option B: UniVI-lite / v2
 # model = UniVIMultiModalVAE(univi_cfg, loss_mode="lite").to(device)
+
+# Optional: add a classification head (decoder-only)
+# model = UniVIMultiModalVAE(
+#     univi_cfg,
+#     loss_mode="lite",
+#     n_label_classes=int(np.max(y_codes) + 1),
+#     label_loss_weight=1.0,
+# ).to(device)
 ```
 
 #### 5) Train inside Python / Jupyter
@@ -583,26 +591,36 @@ trainer = UniVITrainer(
     device=device,
 )
 
-history = trainer.fit()  # runs the training loop
+history = trainer.fit()
 ```
-
-`history` typically contains per-epoch loss and metric curves. After training, you can reuse `model` directly for:
-
-* Computing latent embeddings (`encode_modalities` / `mixture_of_experts`)
-* Cross-modal reconstruction (forward passes with different modality subsets)
-* Exporting `z` to AnnData or NumPy for downstream analysis (UMAP, clustering, DE, etc.)
 
 #### 6) Write latent `z` into AnnData `.obsm["X_univi"]`
 
 ```python
 from univi import write_univi_latent
 
-Z = write_univi_latent(model, adata_dict, obsm_key="X_univi", device=device)
+Z = write_univi_latent(model, adata_dict, obsm_key="X_univi", device=device, use_mean=True)
 print("Embedding shape:", Z.shape)
 ```
 
 > **Tip**
-> If you want deterministic embeddings for plotting, add the argument `use_mean=True` to the `write_univi_latent` function so you store mu_z instead of a sampled z. Of note, a sampled z is a stochastic sampling from each latent distribution which allows for generative modeling, while mu_z uses the means of each latent distribution for a more informative view of overall latent structure.
+> Use `use_mean=True` for deterministic plotting/UMAP. Sampling (`use_mean=False`) is stochastic and useful for generative behavior.
+
+---
+
+## Evaluating / encoding: choosing the latent representation
+
+Some utilities (e.g., `encode_adata`) support selecting what embedding to return:
+
+* `"moe_mean"` / `"moe_sample"`: fused latent (MoE/PoE)
+* `"modality_mean"` / `"modality_sample"`: per-modality latent
+
+```python
+from univi.evaluation import encode_adata
+
+Z_rna = encode_adata(model, rna, modality="rna", device=device, layer="counts", latent="modality_mean")
+Z_moe = encode_adata(model, rna, modality="rna", device=device, layer="counts", latent="moe_mean")
+```
 
 ---
 
@@ -762,4 +780,5 @@ Typical evaluation outputs include:
 * Cross-modal reconstruction summaries
 
 For richer, exploratory workflows (TEA-seq tri-modal integration, Multiome RNA+ATAC, non-paired matching, etc.), see the notebooks in `notebooks/`.
+
 
