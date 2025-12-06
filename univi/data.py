@@ -101,7 +101,8 @@ def align_paired_obs_names(
 
     out: Dict[str, AnnData] = {}
     for nm in names:
-        slc = adata_dict[nm].loc[shared]
+        #slc = adata_dict[nm].loc[shared]
+        slc = adata_dict[nm][shared, :]
         out[nm] = slc.copy() if copy else slc
     return out
 
