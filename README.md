@@ -673,7 +673,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 dataset = MultiModalDataset(
     adata_dict=adata_dict,
     X_key="X",
-    device=None,  # recommended: keep dataset on CPU; trainer moves tensors
+    device=None,  # "cpu" or "cuda"
 )
 
 n_cells = rna.n_obs
