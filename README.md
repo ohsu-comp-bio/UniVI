@@ -313,7 +313,6 @@ Use labels to “shape” the latent in one of three ways:
 
 ## Supervised labels (three supported patterns)
 
-```md
 ### A) Latent classification head (decoder-only): `p(y|z)` (works in **lite/v2** and **v1**)
 
 This is the simplest way to shape the latent. UniVI attaches a categorical head to the latent `z` and adds:
