@@ -250,25 +250,20 @@ def label_transfer_knn(
     labels_target: Optional[np.ndarray] = None,
     k: int = 15,
     metric: str = "euclidean",
-    return_label_order: bool = False,  # keeps your old scripts working
-    return_f1: bool = False,           # new: include macro/weighted F1
-) -> Tuple[np.ndarray, Optional[float], np.ndarray, Optional[np.ndarray], Optional[Dict[str, float]]]:
+    return_label_order: bool = False,
+    return_f1: bool = False,
+):
     """
-    Majority-vote kNN label transfer from source → target.
-
-    Backwards-compatible behavior:
-      - If labels_target is None:
-          returns (pred_labels, None, empty_cm, None, None)
-      - If labels_target provided:
-          returns (pred_labels, acc, cm, label_order (optional), f1_dict (optional))
-
-    If return_label_order=False, label_order is returned as None.
-    If return_f1=False, f1_dict is returned as None.
+    Backwards-compatible returns:
+      - if labels_target is None: (pred_labels, None, empty_cm)
+      - if labels_target provided and both flags False: (pred_labels, acc, cm)
+      - if return_label_order True: add label_order
+      - if return_f1 True: add f1_dict
+      - if both True: add both (label_order, f1_dict) in that order
     """
     Z_source = np.asarray(Z_source, dtype=np.float32)
     Z_target = np.asarray(Z_target, dtype=np.float32)
     labels_source = np.asarray(labels_source)
-
     if labels_target is not None:
         labels_target = np.asarray(labels_target)
 
@@ -281,7 +276,6 @@ def label_transfer_knn(
     nn.fit(Z_source)
     neigh_idx = nn.kneighbors(Z_target, return_distance=False)
 
-    # map labels_source -> integer codes for fast bincount voting
     uniq_src, src_codes = np.unique(labels_source, return_inverse=True)
 
     pred_codes = np.empty(Z_target.shape[0], dtype=np.int64)
@@ -293,26 +287,24 @@ def label_transfer_knn(
     pred_labels = uniq_src[pred_codes]
 
     if labels_target is None:
-        empty = np.array([])
-        return pred_labels, None, empty, None, None
+        return pred_labels, None, np.array([])
 
     label_order = np.unique(np.concatenate([labels_target, pred_labels]))
     acc = float(accuracy_score(labels_target, pred_labels))
     cm = confusion_matrix(labels_target, pred_labels, labels=label_order)
 
-    f1_dict: Optional[Dict[str, float]] = None
+    extras = []
+    if return_label_order:
+        extras.append(label_order)
     if return_f1:
-        f1_dict = {
+        extras.append({
             "macro_f1": float(f1_score(labels_target, pred_labels, average="macro")),
             "weighted_f1": float(f1_score(labels_target, pred_labels, average="weighted")),
-        }
+        })
 
-    if not return_label_order:
-        label_order_out = None
-    else:
-        label_order_out = label_order
-
-    return pred_labels, acc, cm, label_order_out, f1_dict
+    if not extras:
+        return pred_labels, acc, cm
+    return (pred_labels, acc, cm, *extras)
 
 
 # ------------------------------------------------------------------
