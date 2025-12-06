@@ -90,7 +90,7 @@ UniVI/
 │   ├── evaluate_univi.py                  # Evaluate trained models (FOSCTTM, label transfer, etc.)
 │   ├── benchmark_univi_citeseq.py         # CITE-seq-specific benchmarking script
 │   ├── run_multiome_hparam_search.py
-│   ├── run_frequency_robustness.py.       # Composition/frequency mismatch robustness
+│   ├── run_frequency_robustness.py        # Composition/frequency mismatch robustness
 │   ├── run_do_not_integrate_detection.py  # “Do-not-integrate” unmatched population demo
 │   ├── run_benchmarks.py                  # Unified wrapper (includes optional Harmony baseline)
 │   └── revision_reproduce_all.sh          # One-click: reproduces figures + supplemental tables
@@ -313,13 +313,13 @@ Use labels to “shape” the latent in one of three ways:
 
 ## Supervised labels (three supported patterns)
 
+```md
 ### A) Latent classification head (decoder-only): `p(y|z)` (works in **lite/v2** and **v1**)
 
 This is the simplest way to shape the latent. UniVI attaches a categorical head to the latent `z` and adds:
 
-[
-\mathcal{L} ;+=; \lambda \cdot \mathrm{CE}(\text{logits}(z), y)
-]
+```math
+\mathcal{L} \;+=\; \lambda \cdot \mathrm{CE}(\mathrm{logits}(z), y)
 
 **How to enable:** initialize the model with:
 
