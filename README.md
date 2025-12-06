@@ -1,20 +1,20 @@
 # UniVI
 
 [![PyPI version](https://img.shields.io/pypi/v/univi)](https://pypi.org/project/univi/)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.2.4)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.2.5)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.4/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.5/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.4/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.5/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
 
 **UniVI overview and evaluation roadmap.**
-(a) Generic UniVI architecture schematic. (b) Core training objective (for UniVI v1 - see documentation for UniVI-lite training objective). (c) Example modality combinations beyond bi-modal data (e.g. TEA-seq (tri-modal RNA + ATAC + ADT)). (d) Evaluation roadmap spanning latent alignment (FOSCTTM ↓), modality mixing, label transfer, reconstruction/prediction NLL, and downstream biological consistency.
+(a) Generic UniVI architecture schematic. (b) Core training objective (for UniVI v1 - see documentation for UniVI-lite training objective). (c) Example modality combinations beyond bi-modal data (e.g. TEA-seq (tri-modal RNA + ATAC + ADT)). (d) Evaluation roadmap spanning latent alignment (FOSCTTM), modality mixing, label transfer, reconstruction/prediction NLL, and downstream biological consistency.
 
 ---
 
