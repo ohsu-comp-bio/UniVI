@@ -1,14 +1,14 @@
 # UniVI
 
 [![PyPI version](https://img.shields.io/pypi/v/univi)](https://pypi.org/project/univi/)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.2.3)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.2.4)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.3/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.4/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.3/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.4/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
@@ -133,6 +133,8 @@ UniVI/
         └── torch_utils.py                 # PyTorch utilities (device, tensor helpers)
 
 ```
+
+---
 
 ## Generated outputs
 
@@ -284,22 +286,161 @@ See the notebooks under `notebooks/` for end-to-end preprocessing examples for C
 
 ---
 
-## Training modes & example recipes (v1 vs v2/lite + optional label head)
+## Training modes & example recipes (v1 vs v2/lite + supervised options)
 
 UniVI supports two training regimes:
 
-* **UniVI v1**: paired/pseudo-paired batches + all-vs-all cross-modal reconstruction (e.g., RNA→ADT and ADT→RNA; and for K modalities, K·(K−1) ordered recon terms) + posterior alignment across modality posteriors.
+* **UniVI v1**: per-modality posteriors + reconstruction terms controlled by `v1_recon` (cross/self/avg/etc.) + posterior alignment across modality posteriors.
 * **UniVI-lite / v2**: fused latent posterior (precision-weighted MoE/PoE style) + per-modality reconstruction + β·KL(q_fused||p) + γ·pairwise alignment between modality posteriors. Scales cleanly to 3+ modalities and is the recommended default.
 
-### Optional classification head
+### Which supervised option should I use?
 
-You can add a categorical decoder head on the latent `z` by initializing the model with:
+Use labels to “shape” the latent in one of three ways:
+
+1. **Classification head (decoder-only)** — `p(y|z)` (**recommended default**)
+   *Works for `loss_mode="lite"` and `loss_mode="v1"`.*
+   Best if you want the latent to be predictive/separable without changing how modalities reconstruct.
+
+2. **Label expert injected into fusion (encoder-side)** — `q(z|y)` (**lite/v2 only**)
+   *Works only for `loss_mode="lite"` / `v2`.*
+   Best for semi-supervised settings where labels should directly influence the **fused posterior**.
+
+3. **Labels as a full categorical “modality”** — `"celltype"` modality with likelihood `"categorical"`
+   *Best with `loss_mode="lite"`.*
+   Useful when you want cell types to behave like a first-class modality (encode/decode/reconstruct), but avoid `v1` cross-reconstruction unless you really know you want it.
+
+---
+
+## Supervised labels (three supported patterns)
+
+### A) Latent classification head (decoder-only): `p(y|z)` ✅ (works in **lite/v2** and **v1**)
+
+This is the simplest way to shape the latent. UniVI attaches a categorical head to the latent `z` and adds:
+
+[
+\mathcal{L} ;+=; \lambda \cdot \mathrm{CE}(\text{logits}(z), y)
+]
+
+**How to enable:** initialize the model with:
 
 * `n_label_classes > 0`
-* `label_loss_weight` (default 1.0)
+* `label_loss_weight` (default `1.0`)
+* `label_ignore_index` (default `-1`, used to mask unlabeled rows)
 
-If your dataset yields `(x_dict, y)` batches, UniVI adds:
-`+ label_loss_weight · CE(class_logits(z), y)` to the per-sample loss.
+```python
+import numpy as np
+import torch
+
+from univi import UniVIMultiModalVAE, UniVIConfig, ModalityConfig
+
+# Example labels (0..C-1) from AnnData
+y_codes = rna.obs["celltype"].astype("category").cat.codes.to_numpy()
+n_classes = int(y_codes.max() + 1)
+
+univi_cfg = UniVIConfig(
+    latent_dim=40,
+    beta=5.0,
+    gamma=40.0,
+    modalities=[
+        ModalityConfig("rna", rna.n_vars, [1024, 512], [512, 1024], likelihood="nb"),
+        ModalityConfig("adt", adt.n_vars, [256, 128],  [128, 256],  likelihood="nb"),
+    ],
+)
+
+model = UniVIMultiModalVAE(
+    univi_cfg,
+    loss_mode="lite",            # OR "v1"
+    n_label_classes=n_classes,
+    label_loss_weight=1.0,
+    label_ignore_index=-1,
+    classify_from_mu=True,
+).to("cuda")
+```
+
+During training your batch should provide `y`, and your loop should call:
+
+```python
+out = model(x_dict, y=y, epoch=epoch)
+loss = out["loss"]
+```
+
+Unlabeled cells are supported: set `y=-1` and CE is automatically masked.
+
+---
+
+### B) Label expert injected into fusion: `q(z|y)` (**lite/v2 only**)
+
+In **lite/v2**, UniVI can optionally add a **label encoder** as an additional expert into MoE fusion. Labeled cells get an extra “expert vote” in the fused posterior; unlabeled cells ignore it automatically.
+
+```python
+model = UniVIMultiModalVAE(
+    univi_cfg,
+    loss_mode="lite",
+
+    # Optional: keep the decoder-side classification head too
+    n_label_classes=n_classes,
+    label_loss_weight=1.0,
+
+    # Encoder-side label expert injected into fusion
+    use_label_encoder=True,
+    label_moe_weight=1.0,      # >1 => labels influence fusion more
+    unlabeled_logvar=20.0,     # very high => tiny precision => ignored in fusion
+    label_encoder_warmup=5,    # wait N epochs before injecting labels into fusion
+    label_ignore_index=-1,
+).to("cuda")
+```
+
+**Notes**
+
+* This pathway is **only used in `loss_mode="lite"` / `v2`**, because it is implemented as an extra expert inside fusion.
+* Unlabeled cells (`y=-1`) are automatically ignored in fusion via a huge log-variance.
+
+---
+
+### C) Treat labels as a categorical “modality” (best with **lite/v2**)
+
+Instead of providing `y` separately, you can represent labels as another modality (e.g. `"celltype"`) with likelihood `"categorical"`. This makes labels a first-class modality with its own encoder/decoder.
+
+**Recommended representation:** one-hot matrix `(B, C)` stored in `.X`.
+
+```python
+import numpy as np
+from anndata import AnnData
+
+# y codes (0..C-1)
+y_codes = rna.obs["celltype"].astype("category").cat.codes.to_numpy()
+C = int(y_codes.max() + 1)
+
+Y = np.eye(C, dtype=np.float32)[y_codes]  # (B, C) one-hot
+
+celltype = AnnData(X=Y)
+celltype.obs_names = rna.obs_names.copy()  # MUST match paired modalities
+celltype.var_names = [f"class_{i}" for i in range(C)]
+
+adata_dict = {"rna": rna, "adt": adt, "celltype": celltype}
+
+univi_cfg = UniVIConfig(
+    latent_dim=40,
+    beta=5.0,
+    gamma=40.0,
+    modalities=[
+        ModalityConfig("rna",      rna.n_vars, [1024, 512], [512, 1024], likelihood="nb"),
+        ModalityConfig("adt",      adt.n_vars, [256, 128],  [128, 256],  likelihood="nb"),
+        ModalityConfig("celltype", C,          [128],       [128],       likelihood="categorical"),
+    ],
+)
+
+model = UniVIMultiModalVAE(univi_cfg, loss_mode="lite").to("cuda")
+```
+
+**Important caveat for `loss_mode="v1"`**
+`v1` can perform cross-reconstruction across all modalities. If you include `"celltype"` as a modality, you typically **do not** want cross-recon terms like `celltype → RNA`. If you must run `v1` with label-as-modality, prefer:
+
+```python
+model = UniVIMultiModalVAE(univi_cfg, loss_mode="v1", v1_recon="self").to("cuda")
+```
+
+If you want full `v1` cross-reconstruction and label shaping, prefer **Pattern A (classification head)** instead.
 
 ---
 
@@ -307,9 +448,9 @@ If your dataset yields `(x_dict, y)` batches, UniVI adds:
 
 ### 0) Choose the training objective (`loss_mode`) in your config JSON
 
-In `parameter_files/*.json`, set a single switch that controls the objective:
+In `parameter_files/*.json`, set a single switch that controls the objective.
 
-**Paper objective (v1; "avg" trains with 50% weight on self-reconstruction and 50% weight on cross-reconstruction, with weights automatically adjusted so this stays true for any number of modalities):**
+**Paper objective (v1; `"avg"` trains with 50% weight on self-reconstruction and 50% weight on cross-reconstruction, with weights automatically adjusted so this stays true for any number of modalities):**
 
 ```json5
 {
@@ -333,6 +474,55 @@ In `parameter_files/*.json`, set a single switch that controls the objective:
 
 > **Note**
 > `loss_mode: "lite"` is an alias for `loss_mode: "v2"` (they run the same objective in the current code).
+
+### 0b) (Optional) Enable supervised labels from config JSON
+
+**Classification head (decoder-only):**
+
+```json5
+{
+  "model": {
+    "loss_mode": "lite",
+    "n_label_classes": 30,
+    "label_loss_weight": 1.0,
+    "label_ignore_index": -1,
+    "classify_from_mu": true
+  }
+}
+```
+
+**Lite + label expert injected into fusion (encoder-side):**
+
+```json5
+{
+  "model": {
+    "loss_mode": "lite",
+    "n_label_classes": 30,
+    "label_loss_weight": 1.0,
+
+    "use_label_encoder": true,
+    "label_moe_weight": 1.0,
+    "unlabeled_logvar": 20.0,
+    "label_encoder_warmup": 5,
+    "label_ignore_index": -1
+  }
+}
+```
+
+**Labels as a categorical modality:** add an additional `"celltype"` modality in `"data.modalities"` and provide a matching AnnData on disk (or build it in Python).
+
+```json5
+{
+  "model": { "loss_mode": "lite" },
+  "data": {
+    "modalities": [
+      { "name": "rna",      "likelihood": "nb",          "X_key": "X", "layer": "counts" },
+      { "name": "adt",      "likelihood": "nb",          "X_key": "X", "layer": "counts" },
+      { "name": "celltype", "likelihood": "categorical", "X_key": "X", "layer": null }
+    ]
+  }
+}
+```
 
 ### 1) Normalization / representation switch (counts vs continuous)
 
@@ -376,7 +566,7 @@ Correct pattern:
 * Use `.layers["counts"]` when you want NB/ZINB/Poisson decoders.
 * Use continuous `.X` or `.obsm["X_lsi"]` when you want Gaussian/MSE decoders.
 
-> Jupyter Notebooks in this repository (UniVI/notebooks/) show recommended preprocessing per dataset for different data types and analyses. Depending on your research goals, you can use several different methods of preprocessing. The model is quite robust when it comes to learning underlying biology regardless of input data processing method used; the main key is that the decoder likelihood should roughly match the input distribution per-modality.
+> Jupyter notebooks in this repository (UniVI/notebooks/) show recommended preprocessing per dataset for different data types and analyses. Depending on your research goals, you can use several different methods of preprocessing. The model is robust when it comes to learning underlying biology regardless of preprocessing; the key is that the decoder likelihood should roughly match the input distribution per-modality.
 
 ### 2) Train (CLI)
 
@@ -411,7 +601,7 @@ python scripts/train_univi.py \
   --data-root /path/to/your/data
 ```
 
-**UniVI-lite** (fixed argument order)
+**UniVI-lite**
 
 ```bash
 python scripts/train_univi.py \
@@ -440,7 +630,9 @@ python scripts/train_univi.py \
   --data-root /path/to/your/data
 ```
 
-### 3) Quickstart: run UniVI from Python / Jupyter
+---
+
+## Quickstart: run UniVI from Python / Jupyter
 
 If you prefer to stay inside a notebook or a Python script instead of calling the CLI, you can build the configs, model, and trainer directly.
 
@@ -463,7 +655,7 @@ from univi.data import MultiModalDataset, align_paired_obs_names
 from univi.trainer import UniVITrainer
 ```
 
-#### 1) Load preprocessed AnnData (paired cells)
+### 1) Load preprocessed AnnData (paired cells)
 
 ```python
 rna = sc.read_h5ad("path/to/rna_citeseq.h5ad")
@@ -473,7 +665,7 @@ adata_dict = {"rna": rna, "adt": adt}
 adata_dict = align_paired_obs_names(adata_dict)  # ensures same obs_names/order
 ```
 
-#### 2) Build `MultiModalDataset` and DataLoaders (unsupervised)
+### 2) Build `MultiModalDataset` and DataLoaders (unsupervised)
 
 ```python
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -501,9 +693,9 @@ train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_wor
 val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
 ```
 
-#### (Optional) Supervised batches for the label head
+### 2b) (Optional) Supervised batches for Pattern A/B (`(x_dict, y)`)
 
-If you add `labels=` to the dataset, each item yields `(x_dict, y)`, and you should supply a `collate_fn`:
+If you use the classification head and/or label expert injection, supply `y` as integer class indices and mask unlabeled with `-1`.
 
 ```python
 y_codes = rna.obs["celltype"].astype("category").cat.codes.to_numpy()
@@ -519,7 +711,7 @@ def collate_xy(batch):
 train_loader = DataLoader(dataset_sup, batch_size=batch_size, shuffle=True, collate_fn=collate_xy)
 ```
 
-#### 3) Define UniVI configs (v1 vs UniVI-lite)
+### 3) Define UniVI configs (v1 vs UniVI-lite)
 
 ```python
 univi_cfg = UniVIConfig(
@@ -556,31 +748,47 @@ train_cfg = TrainingConfig(
 )
 ```
 
-#### 4) Choose the objective + (optional) classification head
+### 4) Choose the objective + supervised option
 
 ```python
-# Option A: UniVI v1
+# Option A: UniVI v1 (unsupervised)
 model = UniVIMultiModalVAE(
     univi_cfg,
     loss_mode="v1",
-    v1_recon="cross",
+    v1_recon="avg",
     v1_recon_mix=0.0,
     normalize_v1_terms=True,
 ).to(device)
 
-# Option B: UniVI-lite / v2
+# Option B: UniVI-lite / v2 (unsupervised)
 # model = UniVIMultiModalVAE(univi_cfg, loss_mode="lite").to(device)
 
-# Optional: add a classification head (decoder-only)
+# Option C: Add classification head (Pattern A; works in lite/v2 AND v1)
+# n_classes = int(y_codes.max() + 1)
 # model = UniVIMultiModalVAE(
 #     univi_cfg,
 #     loss_mode="lite",
-#     n_label_classes=int(np.max(y_codes) + 1),
+#     n_label_classes=n_classes,
 #     label_loss_weight=1.0,
+#     label_ignore_index=-1,
+#     classify_from_mu=True,
+# ).to(device)
+
+# Option D: Add label expert injection into fusion (Pattern B; lite/v2 ONLY)
+# model = UniVIMultiModalVAE(
+#     univi_cfg,
+#     loss_mode="lite",
+#     n_label_classes=n_classes,
+#     label_loss_weight=1.0,
+#     use_label_encoder=True,
+#     label_moe_weight=1.0,
+#     unlabeled_logvar=20.0,
+#     label_encoder_warmup=5,
+#     label_ignore_index=-1,
 # ).to(device)
 ```
 
-#### 5) Train inside Python / Jupyter
+### 5) Train inside Python / Jupyter
 
 ```python
 trainer = UniVITrainer(
@@ -594,7 +802,7 @@ trainer = UniVITrainer(
 history = trainer.fit()
 ```
 
-#### 6) Write latent `z` into AnnData `.obsm["X_univi"]`
+### 6) Write latent `z` into AnnData `.obsm["X_univi"]`
 
 ```python
 from univi import write_univi_latent
@@ -781,4 +989,5 @@ Typical evaluation outputs include:
 
 For richer, exploratory workflows (TEA-seq tri-modal integration, Multiome RNA+ATAC, non-paired matching, etc.), see the notebooks in `notebooks/`.
 
+---
 

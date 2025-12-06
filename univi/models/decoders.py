@@ -213,16 +213,28 @@ class CategoricalDecoder(nn.Module):
 
 
 DECODER_REGISTRY = {
+    # gaussian
     "gaussian": GaussianDecoder,
+    "normal": GaussianDecoder,
+
     "gaussian_diag": GaussianDiagDecoder,
+
+    # bernoulli/poisson
     "bernoulli": BernoulliDecoder,
     "poisson": PoissonDecoder,
+
+    # count models
     "nb": NegativeBinomialDecoder,
     "negative_binomial": NegativeBinomialDecoder,
     "zinb": ZeroInflatedNegativeBinomialDecoder,
     "zero_inflated_negative_binomial": ZeroInflatedNegativeBinomialDecoder,
+
+    # compositions / discrete
     "logistic_normal": LogisticNormalDecoder,
     "categorical": CategoricalDecoder,
+    "cat": CategoricalDecoder,
+    "ce": CategoricalDecoder,
+    "cross_entropy": CategoricalDecoder,
 }
 
 

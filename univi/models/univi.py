@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 from ..config import UniVIConfig, ModalityConfig
 from .mlp import build_mlp
-from .decoders import DecoderConfig, build_decoder  # optional categorical head
+from .decoders import DecoderConfig, build_decoder
 
 
 class UniVIMultiModalVAE(nn.Module):
@@ -37,6 +37,11 @@ class UniVIMultiModalVAE(nn.Module):
       - "avg_z" / "mean_z": decode from the *averaged* modality latents z̄ into each target
       - "moe": decode from a fused latent sample (from mixture_of_experts) into each target
       - "src:<name>": use one chosen source modality latent to reconstruct all targets
+
+    Optional supervised shaping:
+      - label_decoder: p(y|z) categorical head (always available if n_label_classes>0)
+      - label_encoder: q(z|y) label expert (optional) that can be injected into v2 MoE fusion
+        (masked for unlabeled; ignored via huge logvar).
     """
 
     LOGVAR_MIN = -10.0
@@ -51,10 +56,16 @@ class UniVIMultiModalVAE(nn.Module):
         v1_recon: str = "cross",
         v1_recon_mix: float = 0.0,
         normalize_v1_terms: bool = True,
-
-        # optional label head (decoder-only)
+        # ---- label head (decoder-side): p(y|z) ----
         n_label_classes: int = 0,
         label_loss_weight: float = 1.0,
+        # ---- label expert (encoder-side): q(z|y) injected into v2 fusion ----
+        use_label_encoder: bool = False,
+        label_moe_weight: float = 1.0,
+        unlabeled_logvar: float = 20.0,
+        label_encoder_warmup: int = 0,
+        label_ignore_index: int = -1,
+        classify_from_mu: bool = True,
     ):
         super().__init__()
         self.cfg = cfg
@@ -76,16 +87,11 @@ class UniVIMultiModalVAE(nn.Module):
         self.encoder_heads = nn.ModuleDict()
         self.decoders = nn.ModuleDict()
 
-        # Likelihood-specific parameters (simple, per-feature)
-        self.nb_log_theta = nn.ParameterDict()   # per-feature log(theta)
-        self.zinb_logit_pi = nn.ParameterDict()  # per-feature logit(pi)
-
         for m in cfg.modalities:
             if not isinstance(m, ModalityConfig):
                 raise TypeError(f"cfg.modalities must contain ModalityConfig, got {type(m)}")
 
-            # Encoder: x_m -> (mu_m, logvar_m)
-            enc = build_mlp(
+            self.encoders[m.name] = build_mlp(
                 in_dim=m.input_dim,
                 hidden_dims=m.encoder_hidden,
                 out_dim=self.latent_dim * 2,
@@ -93,39 +99,47 @@ class UniVIMultiModalVAE(nn.Module):
                 dropout=float(cfg.encoder_dropout),
                 batchnorm=bool(cfg.encoder_batchnorm),
             )
-            self.encoders[m.name] = enc
             self.encoder_heads[m.name] = nn.Identity()
 
-            # Decoder: z -> raw outputs (interpreted by _recon_loss)
-            dec_hidden = m.decoder_hidden if m.decoder_hidden else [max(64, self.latent_dim)]
-            dec = build_mlp(
-                in_dim=self.latent_dim,
+            # Decoder via registry
+            dec_hidden = list(m.decoder_hidden) if m.decoder_hidden else [max(64, self.latent_dim)]
+            dec_cfg = DecoderConfig(
+                output_dim=int(m.input_dim),
                 hidden_dims=dec_hidden,
-                out_dim=m.input_dim,
-                activation=nn.ReLU(),
                 dropout=float(cfg.decoder_dropout),
                 batchnorm=bool(cfg.decoder_batchnorm),
             )
-            self.decoders[m.name] = dec
 
-            likelihood = (m.likelihood or "gaussian").lower()
-            if likelihood in ("nb", "negative_binomial", "zinb"):
-                init_log_theta = math.log(1.0)
-                self.nb_log_theta[m.name] = nn.Parameter(
-                    torch.full((m.input_dim,), init_log_theta, dtype=torch.float32)
+            lk = (m.likelihood or "gaussian").lower().strip()
+
+            # Only pass NB/ZINB kwargs to the NB/ZINB decoders (others won't accept them)
+            decoder_kwargs: Dict[str, Any] = {}
+            if lk in ("nb", "negative_binomial", "zinb", "zero_inflated_negative_binomial"):
+                dispersion = getattr(m, "dispersion", "gene")
+                init_log_theta = float(getattr(m, "init_log_theta", 0.0))
+                decoder_kwargs = dict(
+                    dispersion=dispersion,
+                    init_log_theta=init_log_theta,
+                    eps=self.EPS,
                 )
-            if likelihood == "zinb":
-                self.zinb_logit_pi[m.name] = nn.Parameter(
-                    torch.full((m.input_dim,), 0.0, dtype=torch.float32)
-                )
+
+            self.decoders[m.name] = build_decoder(
+                lk,
+                cfg=dec_cfg,
+                latent_dim=self.latent_dim,
+                **decoder_kwargs,
+            )
 
         # Shared prior N(0, I)
         self.register_buffer("prior_mu", torch.zeros(self.latent_dim))
         self.register_buffer("prior_logvar", torch.zeros(self.latent_dim))
 
-        # Optional label head: categorical decoder on z only (decoder-only supervision)
+        # ---- label decoder head: p(y|z) ----
         self.n_label_classes = int(n_label_classes) if n_label_classes is not None else 0
         self.label_loss_weight = float(label_loss_weight)
+        self.label_ignore_index = int(label_ignore_index)
+        self.classify_from_mu = bool(classify_from_mu)
+
         if self.n_label_classes > 0:
             dec_cfg = DecoderConfig(
                 output_dim=self.n_label_classes,
@@ -136,6 +150,24 @@ class UniVIMultiModalVAE(nn.Module):
             self.label_decoder = build_decoder("categorical", cfg=dec_cfg, latent_dim=self.latent_dim)
         else:
             self.label_decoder = None
+
+        # ---- label encoder expert: q(z|y) ----
+        self.use_label_encoder = bool(use_label_encoder)
+        self.label_moe_weight = float(label_moe_weight)
+        self.unlabeled_logvar = float(unlabeled_logvar)
+        self.label_encoder_warmup = int(label_encoder_warmup)
+
+        if self.n_label_classes > 0 and self.use_label_encoder:
+            self.label_encoder = build_mlp(
+                in_dim=self.n_label_classes,
+                hidden_dims=[max(64, self.latent_dim)],
+                out_dim=self.latent_dim * 2,
+                activation=nn.ReLU(),
+                dropout=float(cfg.encoder_dropout),
+                batchnorm=bool(cfg.encoder_batchnorm),
+            )
+        else:
+            self.label_encoder = None
 
     # ----------------------------- helpers -----------------------------
 
@@ -196,61 +228,237 @@ class UniVIMultiModalVAE(nn.Module):
         log_prob = torch.where(is_zero, log_prob_zero, log_prob_pos)
         return -log_prob
 
-    def _recon_loss(self, x: torch.Tensor, raw_dec_out: torch.Tensor, likelihood: str, mod_name: str) -> torch.Tensor:
-        likelihood = (likelihood or "gaussian").lower()
+    # -------------------- decoder-output unwrapping --------------------
 
-        if likelihood in ("gaussian", "normal"):
-            return ((x - raw_dec_out) ** 2).sum(dim=-1)
+    def _unwrap_decoder_out(self, dec_out: Any) -> Any:
+        """
+        Normalize decoder outputs so recon loss can handle common conventions.
 
-        if likelihood == "mse":
-            return ((x - raw_dec_out) ** 2).mean(dim=-1)
+        Accepts:
+          - Tensor: returned as-is
+          - dict: returned as-is (but lightly normalized for common aliases)
+          - (dict,) / [dict] or (tensor,) / [tensor]: unwrap singleton containers
+        """
+        if isinstance(dec_out, (tuple, list)):
+            if len(dec_out) != 1:
+                raise TypeError(
+                    f"Unsupported decoder output container of length {len(dec_out)}: {type(dec_out)!r}"
+                )
+            dec_out = dec_out[0]
 
+        if torch.is_tensor(dec_out):
+            return dec_out
+
+        if isinstance(dec_out, dict):
+            out = dict(dec_out)
+            # gentle alias support
+            if "mu" not in out and "mean" in out:
+                out["mu"] = out["mean"]
+            return out
+
+        raise TypeError(f"Unsupported decoder output type: {type(dec_out)!r}")
+
+    # -------------------- categorical modality helpers --------------------
+
+    @staticmethod
+    def _is_categorical_likelihood(likelihood: Optional[str]) -> bool:
+        lk = (likelihood or "").lower()
+        return lk in ("categorical", "cat", "ce", "cross_entropy")
+
+    def _categorical_targets_and_mask(
+        self,
+        x: torch.Tensor,
+        *,
+        n_classes: int,
+        ignore_index: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if x.dim() == 2 and x.size(1) == 1:
+            x = x[:, 0]
+
+        if x.dim() == 2:
+            mask = x.sum(dim=-1) > 0.5
+            y = x.argmax(dim=-1).long()
+            if mask.any() and ((y[mask] < 0) | (y[mask] >= n_classes)).any():
+                bad = y[mask][((y[mask] < 0) | (y[mask] >= n_classes))][:10].detach().cpu().tolist()
+                raise ValueError(f"Categorical targets out of range [0,{n_classes-1}]: e.g. {bad}")
+            return y, mask
+
+        y = x.view(-1)
+        if y.dtype.is_floating_point:
+            y = y.round()
+        y = y.long()
+
+        invalid = (y != int(ignore_index)) & ((y < 0) | (y >= n_classes))
+        if invalid.any():
+            bad = y[invalid][:10].detach().cpu().tolist()
+            raise ValueError(f"Categorical targets out of range [0,{n_classes-1}] (non-ignore): e.g. {bad}")
+
+        mask = (y != int(ignore_index))
+        return y, mask
+
+    def _encode_categorical_input_if_needed(self, mod_name: str, x: torch.Tensor) -> torch.Tensor:
+        m_cfg = self.mod_cfg_by_name[mod_name]
+        if not self._is_categorical_likelihood(m_cfg.likelihood):
+            return x
+
+        C = int(m_cfg.input_dim)
+        ignore_index = int(getattr(m_cfg, "ignore_index", self.label_ignore_index))
+
+        if x.dim() == 2 and x.size(1) == 1:
+            x = x[:, 0]
+
+        if x.dim() == 2:
+            return x.float()
+
+        y, mask = self._categorical_targets_and_mask(x, n_classes=C, ignore_index=ignore_index)
+        B = y.shape[0]
+        x_oh = torch.zeros((B, C), device=y.device, dtype=torch.float32)
+        if mask.any():
+            x_oh[mask] = F.one_hot(y[mask], num_classes=C).float()
+        return x_oh
+
+    # -------------------- reconstruction loss --------------------
+
+    def _recon_loss(self, x: torch.Tensor, raw_dec_out: Any, likelihood: str, mod_name: str) -> torch.Tensor:
+        likelihood = (likelihood or "gaussian").lower().strip()
+        dec_out = self._unwrap_decoder_out(raw_dec_out)
+
+        # categorical
+        if self._is_categorical_likelihood(likelihood):
+            m_cfg = self.mod_cfg_by_name[mod_name]
+            C = int(m_cfg.input_dim)
+            ignore_index = int(getattr(m_cfg, "ignore_index", self.label_ignore_index))
+
+            logits = dec_out["logits"] if isinstance(dec_out, dict) else dec_out
+            y, mask = self._categorical_targets_and_mask(x, n_classes=C, ignore_index=ignore_index)
+
+            nll = torch.zeros(y.shape[0], device=logits.device)
+            if mask.any():
+                nll[mask] = F.cross_entropy(logits[mask], y[mask], reduction="none")
+            return nll
+
+        # gaussian / gaussian_diag / mse
+        if likelihood in ("gaussian", "normal", "mse", "gaussian_diag"):
+            if isinstance(dec_out, dict) and ("mean" in dec_out) and ("logvar" in dec_out):
+                mean = dec_out["mean"]
+                logvar = dec_out["logvar"].clamp(self.LOGVAR_MIN, self.LOGVAR_MAX)
+                var = torch.exp(logvar)
+                nll = 0.5 * (logvar + (x - mean) ** 2 / (var + self.EPS))
+                return nll.sum(dim=-1)
+
+            pred = dec_out["mean"] if isinstance(dec_out, dict) and ("mean" in dec_out) else dec_out
+            if likelihood == "mse":
+                return ((x - pred) ** 2).mean(dim=-1)
+            return ((x - pred) ** 2).sum(dim=-1)
+
+        # bernoulli
+        if likelihood == "bernoulli":
+            logits = dec_out["logits"] if isinstance(dec_out, dict) else dec_out
+            nll = F.binary_cross_entropy_with_logits(logits, x, reduction="none")
+            return nll.sum(dim=-1)
+
+        # poisson
+        if likelihood == "poisson":
+            log_rate = dec_out["log_rate"] if isinstance(dec_out, dict) and "log_rate" in dec_out else dec_out
+            nll = F.poisson_nll_loss(log_rate, x, log_input=True, full=False, reduction="none")
+            return nll.sum(dim=-1)
+
+        # negative binomial
         if likelihood in ("nb", "negative_binomial"):
-            mu = F.softplus(raw_dec_out) + self.EPS
-            theta = torch.exp(self.nb_log_theta[mod_name]).unsqueeze(0).expand_as(mu)
+            if not isinstance(dec_out, dict) or ("mu" not in dec_out) or ("log_theta" not in dec_out):
+                raise ValueError(f"NB recon expects dict with keys ('mu','log_theta'); got {type(dec_out)}")
+            mu = dec_out["mu"]
+            theta = torch.exp(dec_out["log_theta"])
+            if theta.dim() == 1:
+                theta = theta.unsqueeze(0).expand_as(mu)
             return self._nb_nll(x, mu, theta, eps=self.EPS).sum(dim=-1)
 
-        if likelihood == "zinb":
-            mu = F.softplus(raw_dec_out) + self.EPS
-            theta = torch.exp(self.nb_log_theta[mod_name]).unsqueeze(0).expand_as(mu)
-            logit_pi = self.zinb_logit_pi[mod_name].unsqueeze(0).expand_as(mu)
+        # ZINB
+        if likelihood in ("zinb", "zero_inflated_negative_binomial"):
+            if not isinstance(dec_out, dict) or ("mu" not in dec_out) or ("log_theta" not in dec_out) or ("logit_pi" not in dec_out):
+                raise ValueError(f"ZINB recon expects dict with keys ('mu','log_theta','logit_pi'); got {type(dec_out)}")
+            mu = dec_out["mu"]
+            theta = torch.exp(dec_out["log_theta"])
+            logit_pi = dec_out["logit_pi"]
+
+            if theta.dim() == 1:
+                theta = theta.unsqueeze(0).expand_as(mu)
+            if logit_pi.dim() == 1:
+                logit_pi = logit_pi.unsqueeze(0).expand_as(mu)
+
             return self._zinb_nll(x, mu, theta, logit_pi, eps=self.EPS).sum(dim=-1)
 
-        return ((x - raw_dec_out) ** 2).sum(dim=-1)
+        # fallback
+        pred = dec_out["mean"] if isinstance(dec_out, dict) and ("mean" in dec_out) else dec_out
+        return ((x - pred) ** 2).sum(dim=-1)
+
+    # -------------------- alignment loss --------------------
 
     def _alignment_loss_l2mu(self, mu_per_mod: Dict[str, torch.Tensor]) -> torch.Tensor:
         names = list(mu_per_mod.keys())
         if len(names) < 2:
-            # safe even if empty (though callers ensure non-empty)
             if len(names) == 0:
                 return torch.tensor(0.0, device=next(self.parameters()).device).expand(1)
             k = names[0]
             return torch.zeros(mu_per_mod[k].size(0), device=mu_per_mod[k].device)
+
         losses = []
         for i in range(len(names)):
             for j in range(i + 1, len(names)):
                 losses.append(((mu_per_mod[names[i]] - mu_per_mod[names[j]]) ** 2).sum(dim=-1))
         return torch.stack(losses, dim=0).mean(dim=0)
 
+    # -------------------- label expert --------------------
+
+    def _encode_labels_as_expert(
+        self,
+        y: torch.Tensor,
+        B: int,
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        mu_y = torch.zeros(B, self.latent_dim, device=device)
+        logvar_y = torch.full((B, self.latent_dim), float(self.unlabeled_logvar), device=device)
+
+        if self.label_encoder is None or y is None:
+            return mu_y, logvar_y
+
+        y = y.long()
+        mask = (y >= 0) & (y != self.label_ignore_index)
+        if not mask.any():
+            return mu_y, logvar_y
+
+        y_oh = F.one_hot(y[mask], num_classes=self.n_label_classes).float()
+        h = self.label_encoder(y_oh)
+        mu_l, logvar_l = self._split_mu_logvar(h)
+
+        w = float(self.label_moe_weight)
+        if w != 1.0:
+            logvar_l = logvar_l - math.log(max(w, 1e-8))
+
+        mu_y[mask] = mu_l
+        logvar_y[mask] = logvar_l
+        return mu_y, logvar_y
+
     # -------------------------- encode/decode/fuse --------------------------
 
     def encode_modalities(self, x_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         mu_dict: Dict[str, torch.Tensor] = {}
         logvar_dict: Dict[str, torch.Tensor] = {}
+
         for m in self.modality_names:
             if m not in x_dict or x_dict[m] is None:
                 continue
-            h = self.encoder_heads[m](self.encoders[m](x_dict[m]))
+
+            x_in = self._encode_categorical_input_if_needed(m, x_dict[m])
+
+            h = self.encoder_heads[m](self.encoders[m](x_in))
             mu, logvar = self._split_mu_logvar(h)
             mu_dict[m] = mu
             logvar_dict[m] = logvar
+
         return mu_dict, logvar_dict
 
-    def mixture_of_experts(
-        self,
-        mu_dict: Dict[str, torch.Tensor],
-        logvar_dict: Dict[str, torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def mixture_of_experts(self, mu_dict: Dict[str, torch.Tensor], logvar_dict: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         mus = list(mu_dict.values())
         logvars = list(logvar_dict.values())
         precisions = [torch.exp(-lv) for lv in logvars]
@@ -261,17 +469,12 @@ class UniVIMultiModalVAE(nn.Module):
         logvar_comb = torch.log(var_comb + 1e-8)
         return mu_comb, logvar_comb
 
-    def decode_modalities(self, z: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def decode_modalities(self, z: torch.Tensor) -> Dict[str, Any]:
         return {m: self.decoders[m](z) for m in self.modality_names}
 
     # ------------------------------ forward ------------------------------
 
-    def forward(
-        self,
-        x_dict: Dict[str, torch.Tensor],
-        epoch: int = 0,
-        y: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
+    def forward(self, x_dict: Dict[str, torch.Tensor], epoch: int = 0, y: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         mode = (self.loss_mode or "v2").lower()
         if mode in ("v1", "paper", "cross"):
             return self._forward_v1(x_dict=x_dict, epoch=epoch, y=y)
@@ -284,17 +487,30 @@ class UniVIMultiModalVAE(nn.Module):
         if len(mu_dict) == 0:
             raise ValueError("At least one modality must be present in x_dict.")
 
+        # Inject label expert into fusion (optional)
+        if self.label_encoder is not None and y is not None and epoch >= self.label_encoder_warmup:
+            B = next(iter(mu_dict.values())).shape[0]
+            device = next(iter(mu_dict.values())).device
+            mu_y, logvar_y = self._encode_labels_as_expert(y=y, B=B, device=device)
+            mu_dict["__label__"] = mu_y
+            logvar_dict["__label__"] = logvar_y
+
         mu_z, logvar_z = self.mixture_of_experts(mu_dict, logvar_dict)
         z = self._reparameterize(mu_z, logvar_z)
         xhat_dict = self.decode_modalities(z)
 
-        recon_losses: Dict[str, torch.Tensor] = {}
         recon_total: Optional[torch.Tensor] = None
+        recon_losses: Dict[str, torch.Tensor] = {}
 
         for name, m_cfg in self.mod_cfg_by_name.items():
             if name not in x_dict or x_dict[name] is None:
                 continue
-            loss_m = self._recon_loss(x=x_dict[name], raw_dec_out=xhat_dict[name], likelihood=m_cfg.likelihood, mod_name=name)
+            loss_m = self._recon_loss(
+                x=x_dict[name],
+                raw_dec_out=xhat_dict[name],
+                likelihood=m_cfg.likelihood,
+                mod_name=name,
+            )
             recon_losses[name] = loss_m
             recon_total = loss_m if recon_total is None else (recon_total + loss_m)
 
@@ -305,22 +521,30 @@ class UniVIMultiModalVAE(nn.Module):
         logvar_p = self.prior_logvar.expand_as(logvar_z)
         kl = self._kl_gaussian(mu_z, logvar_z, mu_p, logvar_p)
 
-        align_loss = self._alignment_loss_l2mu(mu_dict)
+        align_loss = self._alignment_loss_l2mu({k: v for k, v in mu_dict.items() if not k.startswith("__")})
 
         beta = self._anneal_weight(epoch, self.cfg.kl_anneal_start, self.cfg.kl_anneal_end, self.beta_max)
         gamma = self._anneal_weight(epoch, self.cfg.align_anneal_start, self.cfg.align_anneal_end, self.gamma_max)
 
         loss = recon_total + beta * kl + gamma * align_loss
 
-        # optional label head
+        # label decoder head (optional)
         class_loss = None
         class_logits = None
-        if self.label_decoder is not None and y is not None:
-            y = y.long()
-            dec_out = self.label_decoder(z)
+        if self.label_decoder is not None:
+            z_for_cls = mu_z if self.classify_from_mu else z
+            dec_out = self.label_decoder(z_for_cls)
             class_logits = dec_out["logits"] if isinstance(dec_out, dict) and "logits" in dec_out else dec_out
-            class_loss = F.cross_entropy(class_logits, y, reduction="none")
-            loss = loss + self.label_loss_weight * class_loss
+
+            if y is not None:
+                B = loss.shape[0]
+                y = y.long()
+                mask = (y >= 0) & (y != self.label_ignore_index)
+                per_cell = torch.zeros(B, device=loss.device)
+                if mask.any():
+                    per_cell[mask] = F.cross_entropy(class_logits[mask], y[mask], reduction="none")
+                class_loss = per_cell
+                loss = loss + self.label_loss_weight * class_loss
 
         out: Dict[str, Any] = {
             "loss": loss.mean(),
@@ -344,13 +568,6 @@ class UniVIMultiModalVAE(nn.Module):
         return out
 
     def _forward_v1(self, x_dict: Dict[str, torch.Tensor], epoch: int = 0, y: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
-        """
-        TRUE v1:
-          - one posterior per modality: q_m(z|x_m)
-          - one latent sample per modality: z_m
-          - recon terms depend on v1_recon (see class docstring)
-          - KL(q_m||p) and cross_kl = mean_{i!=j} KL(q_i||q_j) (ordered pairs)
-        """
         mu_dict, logvar_dict = self.encode_modalities(x_dict)
         if len(mu_dict) == 0:
             raise ValueError("At least one modality must be present in x_dict.")
@@ -358,11 +575,9 @@ class UniVIMultiModalVAE(nn.Module):
         present = list(mu_dict.keys())
         K = len(present)
 
-        # for reporting only (fused latent)
         mu_moe, logvar_moe = self.mixture_of_experts(mu_dict, logvar_dict)
         z_moe = self._reparameterize(mu_moe, logvar_moe)
 
-        # modality-specific latents
         z_mod = {m: self._reparameterize(mu_dict[m], logvar_dict[m]) for m in present}
 
         def recon_from_z_to_target(z_src: torch.Tensor, target_mod: str) -> torch.Tensor:
@@ -393,7 +608,6 @@ class UniVIMultiModalVAE(nn.Module):
 
         v1_recon = self.v1_recon
 
-        # aliases for "equal parts self + cross"
         if v1_recon in ("avg", "both", "paper", "self+cross", "self_cross", "hybrid"):
             if K <= 1:
                 tgt = present[0]
@@ -402,11 +616,9 @@ class UniVIMultiModalVAE(nn.Module):
                 w_self = 0.5 / float(K)
                 w_cross = 0.5 / float(K * (K - 1))
 
-                # self terms
                 for tgt in present:
                     add_term(w_self * recon_from_z_to_target(z_mod[tgt], tgt), tgt=tgt)
 
-                # ordered cross terms
                 for src in present:
                     for tgt in present:
                         if src == tgt:
@@ -428,14 +640,13 @@ class UniVIMultiModalVAE(nn.Module):
             z_avg = torch.stack([z_mod[m] for m in present], dim=0).mean(dim=0)
             for tgt in present:
                 add_term(recon_from_z_to_target(z_avg, tgt), tgt=tgt)
-            z_moe = z_avg  # for reporting
+            z_moe = z_avg
 
         elif v1_recon in ("moe", "poe", "fused"):
             for tgt in present:
                 add_term(recon_from_z_to_target(z_moe, tgt), tgt=tgt)
 
         else:
-            # DEFAULT: FULL CROSS for any K>=2 (ordered pairs src!=tgt)
             if K >= 2:
                 for src in present:
                     for tgt in present:
@@ -446,7 +657,6 @@ class UniVIMultiModalVAE(nn.Module):
                 tgt = present[0]
                 add_term(recon_from_z_to_target(z_mod[tgt], tgt), tgt=tgt)
 
-            # optional extra "mix" term from average latent (small stabilizer)
             if self.v1_recon_mix > 0.0 and K >= 2:
                 mix = float(self.v1_recon_mix)
                 z_avg = torch.stack([z_mod[m] for m in present], dim=0).mean(dim=0)
@@ -456,19 +666,15 @@ class UniVIMultiModalVAE(nn.Module):
         if recon_total is None or n_terms == 0:
             raise RuntimeError("v1 reconstruction produced no loss terms.")
 
-        # normalize recon_total by number of terms ONLY for the unweighted modes.
-        # For the "avg/both/paper" weighted mode, recon_total is already scale-stable.
         weighted_mode = v1_recon in ("avg", "both", "paper", "self+cross", "self_cross", "hybrid")
         if self.normalize_v1_terms and (not weighted_mode):
             recon_total = recon_total / float(n_terms)
 
-        # recon_per_target: average *per target* over its own term count (more interpretable)
         recon_per_target_mean: Dict[str, torch.Tensor] = {}
         for tgt in present:
             ct = max(int(recon_counts[tgt]), 1)
             recon_per_target_mean[tgt] = recon_per_target[tgt] / float(ct)
 
-        # KL(q_m || p)
         mu_p = self.prior_mu.expand_as(mu_dict[present[0]])
         logvar_p = self.prior_logvar.expand_as(logvar_dict[present[0]])
         kl_terms = [self._kl_gaussian(mu_dict[m], logvar_dict[m], mu_p, logvar_p) for m in present]
@@ -476,7 +682,6 @@ class UniVIMultiModalVAE(nn.Module):
         if self.normalize_v1_terms:
             kl = kl / float(max(K, 1))
 
-        # cross KL(q_i || q_j) over ordered pairs i!=j
         if K < 2:
             cross_kl = torch.zeros_like(kl)
         else:
@@ -497,24 +702,29 @@ class UniVIMultiModalVAE(nn.Module):
 
         loss = recon_total + beta * kl + gamma * cross_kl
 
-        # optional label head (decoder-only)
         class_loss = None
         class_logits = None
-        if self.label_decoder is not None and y is not None:
-            y = y.long()
-            dec_out = self.label_decoder(z_moe)
+        if self.label_decoder is not None:
+            z_for_cls = mu_moe if self.classify_from_mu else z_moe
+            dec_out = self.label_decoder(z_for_cls)
             class_logits = dec_out["logits"] if isinstance(dec_out, dict) and "logits" in dec_out else dec_out
-            class_loss = F.cross_entropy(class_logits, y, reduction="none")
-            loss = loss + self.label_loss_weight * class_loss
 
-        # for convenience, decode from fused z for "xhat" visualization
+            if y is not None:
+                y = y.long()
+                mask = (y >= 0) & (y != self.label_ignore_index)
+                per_cell = torch.zeros(B, device=loss.device)
+                if mask.any():
+                    per_cell[mask] = F.cross_entropy(class_logits[mask], y[mask], reduction="none")
+                class_loss = per_cell
+                loss = loss + self.label_loss_weight * class_loss
+
         xhat_dict = self.decode_modalities(z_moe)
 
         out: Dict[str, Any] = {
             "loss": loss.mean(),
             "recon_total": recon_total.mean(),
             "kl": kl.mean(),
-            "align": cross_kl.mean(),          # keep legacy key name
+            "align": cross_kl.mean(),
             "cross_kl": cross_kl.mean(),
             "mu_z": mu_moe,
             "logvar_z": logvar_moe,
@@ -544,4 +754,133 @@ class UniVIMultiModalVAE(nn.Module):
             return float(max_val)
         frac = (epoch - start) / float(end - start)
         return float(max_val) * float(frac)
+
+    # --------------------------- convenience API ---------------------------
+
+    def _infer_batch_size(self, x_dict: Dict[str, torch.Tensor]) -> int:
+        for v in x_dict.values():
+            if v is not None:
+                return int(v.shape[0])
+        raise ValueError("x_dict has no non-None tensors; cannot infer batch size.")
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.parameters()).device
+
+    @torch.no_grad()
+    def encode_fused(
+        self,
+        x_dict: Dict[str, torch.Tensor],
+        *,
+        epoch: int = 0,
+        y: Optional[torch.Tensor] = None,
+        use_mean: bool = True,
+        inject_label_expert: bool = True,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        mu_dict, logvar_dict = self.encode_modalities(x_dict)
+        if len(mu_dict) == 0:
+            raise ValueError("At least one modality must be present in x_dict.")
+
+        if (
+            inject_label_expert
+            and (self.label_encoder is not None)
+            and (y is not None)
+            and (epoch >= self.label_encoder_warmup)
+        ):
+            B = next(iter(mu_dict.values())).shape[0]
+            dev = next(iter(mu_dict.values())).device
+            mu_y, logvar_y = self._encode_labels_as_expert(y=y, B=B, device=dev)
+            mu_dict["__label__"] = mu_y
+            logvar_dict["__label__"] = logvar_y
+
+        mu_z, logvar_z = self.mixture_of_experts(mu_dict, logvar_dict)
+        z = mu_z if use_mean else self._reparameterize(mu_z, logvar_z)
+        return mu_z, logvar_z, z
+
+    @torch.no_grad()
+    def encode_per_modality(self, x_dict: Dict[str, torch.Tensor], *, use_mean: bool = True) -> Dict[str, torch.Tensor]:
+        mu_dict, logvar_dict = self.encode_modalities(x_dict)
+        z_mod: Dict[str, torch.Tensor] = {}
+        for m, mu in mu_dict.items():
+            z_mod[m] = mu if use_mean else self._reparameterize(mu, logvar_dict[m])
+        return z_mod
+
+    @torch.no_grad()
+    def reconstruct_from_z(self, z: torch.Tensor) -> Dict[str, Any]:
+        return self.decode_modalities(z)
+
+    @torch.no_grad()
+    def reconstruct(
+        self,
+        x_dict: Dict[str, torch.Tensor],
+        *,
+        epoch: int = 0,
+        y: Optional[torch.Tensor] = None,
+        use_mean: bool = True,
+        inject_label_expert: bool = True,
+    ) -> Dict[str, Any]:
+        mu_z, logvar_z, z = self.encode_fused(
+            x_dict,
+            epoch=epoch,
+            y=y,
+            use_mean=use_mean,
+            inject_label_expert=inject_label_expert,
+        )
+        xhat = self.decode_modalities(z)
+        return {"mu_z": mu_z, "logvar_z": logvar_z, "z": z, "xhat": xhat}
+
+    @torch.no_grad()
+    def predict_labels(
+        self,
+        x_dict: Dict[str, torch.Tensor],
+        *,
+        epoch: int = 0,
+        y: Optional[torch.Tensor] = None,
+        use_mean: bool = True,
+        inject_label_expert: bool = True,
+        return_probs: bool = True,
+    ) -> Optional[torch.Tensor]:
+        if self.label_decoder is None:
+            return None
+
+        mu_z, logvar_z, z = self.encode_fused(
+            x_dict,
+            epoch=epoch,
+            y=y,
+            use_mean=use_mean,
+            inject_label_expert=inject_label_expert,
+        )
+        z_for_cls = mu_z if self.classify_from_mu else z
+        dec_out = self.label_decoder(z_for_cls)
+        logits = dec_out["logits"] if isinstance(dec_out, dict) and "logits" in dec_out else dec_out
+        return logits if not return_probs else F.softmax(logits, dim=-1)
+
+    @torch.no_grad()
+    def sample_prior(self, n: int, *, device: Optional[torch.device] = None) -> torch.Tensor:
+        dev = device if device is not None else self.device
+        return torch.randn(int(n), self.latent_dim, device=dev)
+
+    @torch.no_grad()
+    def generate(
+        self,
+        n: int,
+        *,
+        device: Optional[torch.device] = None,
+        z: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        if z is None:
+            z = self.sample_prior(n, device=device)
+        xhat = self.decode_modalities(z)
+        return {"z": z, "xhat": xhat}
+
+    def freeze_modality(self, modality: str, freeze: bool = True) -> None:
+        if modality not in self.encoders or modality not in self.decoders:
+            raise ValueError(f"Unknown modality {modality!r}. Known={list(self.encoders.keys())}")
+
+        for p in self.encoders[modality].parameters():
+            p.requires_grad = not freeze
+        for p in self.encoder_heads[modality].parameters():
+            p.requires_grad = not freeze
+        for p in self.decoders[modality].parameters():
+            p.requires_grad = not freeze
 
