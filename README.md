@@ -290,15 +290,17 @@ See the notebooks under `notebooks/` for end-to-end preprocessing examples for C
 
 UniVI supports two training regimes:
 
-* **UniVI v1**: per-modality posteriors + reconstruction terms controlled by `v1_recon` (cross/self/avg/etc.) + posterior alignment across modality posteriors.
-* **UniVI-lite / v2**: fused latent posterior (precision-weighted MoE/PoE style) + per-modality reconstruction + β·KL(q_fused||p) + γ·pairwise alignment between modality posteriors. Scales cleanly to 3+ modalities and is the recommended default.
+* **UniVI v1**: Method largely used in the manuscript - per-modality posteriors + reconstruction terms controlled by `v1_recon` (cross/self/avg/etc.) + posterior alignment across modality posteriors. UniVI v1 is the recommended default for paired multimodal data.
+* **UniVI-lite / v2**: fused latent posterior (precision-weighted MoE/PoE style) + per-modality reconstruction + β·KL(q_fused||p) + γ·pairwise alignment between modality posteriors. Scales cleanly to 3+ modalities. This is the recommended default for more loosely-paired or artificially paired data.
 
 ### Should I use prior label-informed supervision/which supervised option should I use?
+* Prior label-informed supervised modelling is not necessarily suitable for all research tasks - especially since the latent space can learn a robust biologically-relevant latent space in a label-agnostic training objective.
+* If your research goals include either shaping the latent space given labels to inform specific goals or using mapping latent samples back to cell types, the supervised classification methods may be for you.
 
-Use labels to “shape” the latent in one of three ways:
+If desired, you can use labels to “shape” the latent in one of three ways:
 
 1. **Classification head (decoder-only)** — `p(y|z)` (**recommended default**)
-   *Works for `loss_mode="lite"` and `loss_mode="v1"`.*
+   *Works for either `loss_mode="v1"` and `loss_mode="lite"`.*
    Best if you want the latent to be predictive/separable without changing how modalities reconstruct.
 
 2. **Label expert injected into fusion (encoder-side)** — `q(z|y)` (**lite/v2 only**)
@@ -306,13 +308,8 @@ Use labels to “shape” the latent in one of three ways:
    Best for semi-supervised settings where labels should directly influence the **fused posterior**.
 
 3. **Labels as a full categorical “modality”** — `"celltype"` modality with likelihood `"categorical"`
-   *Best with `loss_mode="lite"`.*
+   *Works for either `loss_mode="v1"` and `loss_mode="lite"`.*
    Useful when you want cell types to behave like a first-class modality (encode/decode/reconstruct), but avoid `v1` cross-reconstruction unless you really know you want it.
-
-**Notes**
-
-* Prior label-informed supervised modelling is not necessarily suitable for all research tasks - especially since the latent space can learn a robust biologically-relevant latent space in a label-agnostic training objective.
-* If your research goals include either shaping the latent space given labels to inform specific goals or using mapping latent samples back to cell types, the supervised classification methods may be for you.
 
 ---
 
