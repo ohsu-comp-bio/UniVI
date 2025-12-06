@@ -319,6 +319,7 @@ This is the simplest way to shape the latent. UniVI attaches a categorical head 
 
 ```math
 \mathcal{L} \;+=\; \lambda \cdot \mathrm{CE}(\mathrm{logits}(z), y)
+```
 
 **How to enable:** initialize the model with:
 
