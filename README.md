@@ -291,7 +291,7 @@ See the notebooks under `notebooks/` for end-to-end preprocessing examples for C
 UniVI supports two main training regimes:
 
 * **UniVI v1**: per-modality posteriors + reconstruction terms controlled by `v1_recon` (cross/self/avg/etc.) + posterior alignment across modality posteriors. UniVI v1 is the recommended default for paired multimodal data of most configurations and is the main method used in the manuscript.
-* **UniVI-lite / v2**: fused latent posterior (precision-weighted MoE/PoE style) + per-modality reconstruction + β·KL(q_fused||p) + γ·pairwise alignment between modality posteriors. Scales cleanly to 3+ modalities. This is the recommended default for more loosely-paired or artificially paired data.
+* **UniVI-lite / v2**: fused latent posterior (precision-weighted MoE/PoE style) + per-modality reconstruction + β·KL(`q_fused||p`) + γ·pairwise alignment between modality posteriors. Scales cleanly to 3+ modalities. This is the recommended default for more loosely-paired or artificially paired data.
 
 ### Should I use prior label-informed supervision/which supervised option should I use?
 * Prior label-informed supervised modelling is not necessarily suitable for all research tasks - especially since the latent space can learn a robust biologically-relevant latent space in a label-agnostic training objective.
