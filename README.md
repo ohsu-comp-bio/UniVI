@@ -1155,6 +1155,28 @@ This is how you get “RNA→ADT” or “ADT→RNA” performance summaries for
 * Use **`modality_mean`** when computing *pairwise* alignment metrics or debugging a specific modality’s latent.
 * Use **sampling** (`*_sample`) only when you explicitly want stochastic behavior.
 
+
+### 7) Evaluating a trained model via CLI scripts
+
+After training, you can run evaluation to compute alignment metrics and generate UMAPs:
+
+```bash
+python scripts/evaluate_univi.py \
+  --config parameter_files/defaults_cite_seq.json \
+  --model-checkpoint saved_models/citeseq_run1/best_model.pt \
+  --outdir figures/citeseq_run1
+```
+
+Typical evaluation outputs include:
+
+* FOSCTTM (alignment quality)
+* Modality mixing scores
+* kNN label transfer accuracy
+* UMAPs colored by cell type and modality
+* Cross-modal reconstruction summaries
+
+For richer, exploratory workflows (TEA-seq tri-modal integration, Multiome RNA+ATAC, non-paired matching, etc.), see the notebooks in `notebooks/`.
+
 ---
 
 ## Hyperparameter tuning (optional)
@@ -1292,27 +1314,3 @@ df_atac, best_result_atac, best_cfg_atac = run_atac_hparam_search(
 ```
 
 ---
-
-## Evaluating a trained model
-
-After training, you can run evaluation to compute alignment metrics and generate UMAPs:
-
-```bash
-python scripts/evaluate_univi.py \
-  --config parameter_files/defaults_cite_seq.json \
-  --model-checkpoint saved_models/citeseq_run1/best_model.pt \
-  --outdir figures/citeseq_run1
-```
-
-Typical evaluation outputs include:
-
-* FOSCTTM (alignment quality)
-* Modality mixing scores
-* kNN label transfer accuracy
-* UMAPs colored by cell type and modality
-* Cross-modal reconstruction summaries
-
-For richer, exploratory workflows (TEA-seq tri-modal integration, Multiome RNA+ATAC, non-paired matching, etc.), see the notebooks in `notebooks/`.
-
----
-
