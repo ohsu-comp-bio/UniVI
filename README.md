@@ -1168,8 +1168,6 @@ Typical evaluation outputs include:
 * UMAPs colored by cell type and modality
 * Cross-modal reconstruction summaries
 
-For richer, exploratory workflows (TEA-seq tri-modal integration, Multiome RNA+ATAC, non-paired matching, etc.), see the notebooks in `notebooks/`.
-
 ---
 
 ### 7) Recommended workflow cheat-sheet
@@ -1313,5 +1311,8 @@ df_atac, best_result_atac, best_cfg_atac = run_atac_hparam_search(
     seed=0,
 )
 ```
+---
+
+For richer, exploratory workflows (TEA-seq tri-modal integration, Multiome RNA+ATAC, non-paired matching, etc.), see the notebooks in `notebooks/`.
 
 ---
