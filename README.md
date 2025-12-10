@@ -673,7 +673,7 @@ train_cfg = TrainingConfig(
 )
 ```
 
- + supervised options
+ + This step is altered if you want to use supervised options - see below for those configurations.
 
 ### Should I use prior label-informed supervision/which supervised option should I use?
 
