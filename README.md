@@ -1,14 +1,14 @@
 # UniVI
 
 [![PyPI version](https://img.shields.io/pypi/v/univi)](https://pypi.org/project/univi/)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.2.5)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.2.6)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.5/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.6/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.5/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.2.6/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
@@ -42,7 +42,7 @@ If you use UniVI in your work, please cite:
 > *bioRxiv* (2025). doi: [10.1101/2025.02.28.640429](https://www.biorxiv.org/content/10.1101/2025.02.28.640429v1.full)
 
 ```bibtex
-@article{ashford2025univi,
+@article{Ashford2025UniVI,
   title   = {Unifying Multimodal Single-Cell Data Using a Mixture of Experts β-Variational Autoencoder-Based Framework},
   author  = {Ashford, Andrew J. and Enright, Trevor and Nikolova, Olga and Demir, Emek},
   journal = {bioRxiv},
@@ -50,7 +50,7 @@ If you use UniVI in your work, please cite:
   doi     = {10.1101/2025.02.28.640429},
   url     = {https://www.biorxiv.org/content/10.1101/2025.02.28.640429v1}
 }
-```
+````
 
 ---
 
@@ -294,6 +294,7 @@ UniVI supports two main training regimes:
 * **UniVI-lite / v2**: fused latent posterior (precision-weighted MoE/PoE style) + per-modality reconstruction + β·KL(`q_fused||p`) + γ·pairwise alignment between modality posteriors. Scales cleanly to 3+ modalities. This is the recommended default for more loosely-paired or artificially paired data.
 
 ### Should I use prior label-informed supervision/which supervised option should I use?
+
 * Prior label-informed supervised modelling is not necessarily suitable for all research tasks - especially since the latent space can learn a robust biologically-relevant latent space in a label-agnostic training objective.
 * If your research goals include either shaping the latent space given labels to inform specific goals or using mapping latent samples back to cell types, the supervised classification methods may be useful.
 
@@ -446,6 +447,87 @@ If you want full `v1` cross-reconstruction and label shaping, prefer **Pattern A
 
 ---
 
+## Multiple classification decoder heads (multi-target supervision)
+
+If you want to learn **multiple categorical predictors at once** (e.g. `celltype`, `patient`, `mutation_status`), the recommended pattern is to add **multiple categorical label modalities**, one per target. Each label modality corresponds to its own categorical decoder head (and optionally its own encoder), and UniVI learns them jointly with the molecular modalities.
+
+This works cleanly for **lite/v2**. For **v1**, prefer `v1_recon="self"` when label modalities are present.
+
+### Example: cell type + patient + TP53 status
+
+```python
+import numpy as np
+from anndata import AnnData
+
+# --- build integer codes per target ---
+celltype_code = rna.obs["celltype"].astype("category").cat.codes.to_numpy()
+patient_code  = rna.obs["patient_id"].astype("category").cat.codes.to_numpy()
+
+# TP53_status should be {0, 1} for known labels, and -1 for unknown/unlabeled
+# Example: rna.obs["TP53_status"] already holds values in {0,1,-1}
+tp53_code = rna.obs["TP53_status"].to_numpy()
+
+C_celltype = int(celltype_code.max() + 1)
+C_patient  = int(patient_code.max() + 1)
+C_tp53     = 2
+
+# --- one-hot for known labels, and all-zeros for unknown labels ---
+def one_hot_with_unknown(codes, n_classes, unknown_val=-1):
+    Y = np.zeros((len(codes), n_classes), dtype=np.float32)
+    mask = (codes != unknown_val)
+    Y[mask] = np.eye(n_classes, dtype=np.float32)[codes[mask]]
+    return Y
+
+Y_celltype = one_hot_with_unknown(celltype_code, C_celltype, unknown_val=-1)
+Y_patient  = one_hot_with_unknown(patient_code,  C_patient,  unknown_val=-1)
+Y_tp53     = one_hot_with_unknown(tp53_code,     C_tp53,     unknown_val=-1)
+
+celltype = AnnData(X=Y_celltype)
+patient  = AnnData(X=Y_patient)
+tp53     = AnnData(X=Y_tp53)
+
+for a in (celltype, patient, tp53):
+    a.obs_names = rna.obs_names.copy()
+
+celltype.var_names = [f"class_{i}" for i in range(C_celltype)]
+patient.var_names  = [f"class_{i}" for i in range(C_patient)]
+tp53.var_names     = [f"class_{i}" for i in range(C_tp53)]
+
+adata_dict = {
+    "rna": rna,
+    "adt": adt,                 # optional
+    "celltype": celltype,
+    "patient": patient,
+    "TP53": tp53,
+}
+
+univi_cfg = UniVIConfig(
+    latent_dim=40,
+    beta=5.0,
+    gamma=40.0,
+    modalities=[
+        ModalityConfig("rna",      rna.n_vars, [1024, 512], [512, 1024], likelihood="nb"),
+        ModalityConfig("adt",      adt.n_vars, [256, 128],  [128, 256],  likelihood="nb"),
+        ModalityConfig("celltype", C_celltype, [128],       [128],       likelihood="categorical"),
+        ModalityConfig("patient",  C_patient,  [128],       [128],       likelihood="categorical"),
+        ModalityConfig("TP53",     C_tp53,     [64],        [64],        likelihood="categorical"),
+    ],
+)
+
+# For lite/v2 this is the simplest choice for multi-target labels
+model = UniVIMultiModalVAE(univi_cfg, loss_mode="lite").to("cuda")
+
+# For v1, use self-recon if label modalities are present
+# model = UniVIMultiModalVAE(univi_cfg, loss_mode="v1", v1_recon="self").to("cuda")
+```
+
+**Notes**
+
+* This is the most direct way to get multiple “classification heads” without packing everything into a single label space.
+* Unknown/unlabeled entries can be represented as all-zeros one-hot rows (as above). This avoids forcing a dummy class into the label space.
+
+---
+
 ## Running a minimal training script (UniVI v1 vs UniVI-lite)
 
 ### 0) Choose the training objective (`loss_mode`) in your config JSON
@@ -511,7 +593,7 @@ In `parameter_files/*.json`, set a single switch that controls the objective.
 }
 ```
 
-**Labels as a categorical modality:** add an additional `"celltype"` modality in `"data.modalities"` and provide a matching AnnData on disk (or build it in Python).
+**Labels as categorical modalities (single or multiple heads):** add one or more categorical modalities in `"data.modalities"` and provide matching AnnData on disk (or build them in Python).
 
 ```json5
 {
@@ -520,7 +602,8 @@ In `parameter_files/*.json`, set a single switch that controls the objective.
     "modalities": [
       { "name": "rna",      "likelihood": "nb",          "X_key": "X", "layer": "counts" },
       { "name": "adt",      "likelihood": "nb",          "X_key": "X", "layer": "counts" },
-      { "name": "celltype", "likelihood": "categorical", "X_key": "X", "layer": null }
+      { "name": "celltype", "likelihood": "categorical", "X_key": "X", "layer": null },
+      { "name": "patient",  "likelihood": "categorical", "X_key": "X", "layer": null }
     ]
   }
 }
@@ -653,8 +736,13 @@ from univi import (
     UniVIConfig,
     TrainingConfig,
 )
-from univi.data import MultiModalDataset, align_paired_obs_names
+from univi.data import (
+    MultiModalDataset,
+    align_paired_obs_names,
+    collate_multimodal_xy,   # optional convenience collate for supervised batches
+)
 from univi.trainer import UniVITrainer
+from univi.utils.io import save_anndata_splits
 ```
 
 ### 1) Load preprocessed AnnData (paired cells)
@@ -711,7 +799,75 @@ def collate_xy(batch):
     return x, y
 
 train_loader = DataLoader(dataset_sup, batch_size=batch_size, shuffle=True, collate_fn=collate_xy)
+
+# If you prefer using the package helper:
+# train_loader = DataLoader(dataset_sup, batch_size=batch_size, shuffle=True, collate_fn=collate_multimodal_xy)
 ```
+
+### 2c) Persisting and reusing train/val/test splits (split_map.json)
+
+For reproducibility (and to ensure the exact same cell membership across modalities and reruns), UniVI can write:
+
+* `{prefix}_train.h5ad`, `{prefix}_val.h5ad`, `{prefix}_test.h5ad`
+* `{prefix}_split_map.json` containing split membership (stored using `obs_names`)
+
+**Save splits once (from any one modality, typically RNA):**
+
+```python
+test_idx = np.array([], dtype=int)  # optional; include if you have a test set
+
+save_anndata_splits(
+    rna,
+    outdir="splits/citeseq_demo",
+    prefix="citeseq_rna",
+    split_map={
+        "train": train_idx.tolist(),
+        "val":   val_idx.tolist(),
+        "test":  test_idx.tolist(),
+    },
+    save_split_map=True,
+)
+```
+
+**Later: load the split_map and apply to any paired modality using `obs_names`:**
+
+```python
+import json
+
+with open("splits/citeseq_demo/citeseq_rna_split_map.json") as f:
+    sm = json.load(f)
+
+train_names = sm["train"]
+val_names   = sm["val"]
+test_names  = sm.get("test", [])
+
+rna_train = rna[train_names].copy()
+adt_train = adt[train_names].copy()
+
+rna_val = rna[val_names].copy()
+adt_val = adt[val_names].copy()
+```
+
+**If you need integer indices for `torch.utils.data.Subset`:**
+
+```python
+obs = dataset.obs_names  # canonical ordering used by the dataset
+
+train_idx2 = obs.get_indexer(train_names)
+val_idx2   = obs.get_indexer(val_names)
+
+if (train_idx2 < 0).any() or (val_idx2 < 0).any():
+    raise ValueError("Some split_map obs_names are missing from the dataset.")
+
+train_ds = Subset(dataset, train_idx2)
+val_ds   = Subset(dataset, val_idx2)
+```
+
+This pattern lets you:
+
+* reproduce the same split exactly across runs,
+* apply the same split membership to other modalities (ADT/ATAC) or derived datasets,
+* and recover `Subset` indices deterministically.
 
 ### 3) Define UniVI configs (v1 vs UniVI-lite)
 
@@ -803,6 +959,18 @@ trainer = UniVITrainer(
 
 history = trainer.fit()
 ```
+
+### Checkpoint format (trainer.save / restore)
+
+`UniVITrainer.save(...)` writes a single `.pt` checkpoint containing:
+
+* model weights
+* optimizer state
+* AMP scaler state (if enabled)
+* trainer state (history, best epoch, etc.)
+* optional config / extra metadata
+
+When restoring, the loader checks key compatibility (e.g., label dimensions / head counts) to avoid silent mismatches.
 
 ### 6) Write latent `z` into AnnData `.obsm["X_univi"]`
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, List
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 
 # Eager (fast/light) public API
 from .config import ModalityConfig, UniVIConfig, TrainingConfig
@@ -21,16 +21,20 @@ __all__ = [
     "UniVIMultiModalVAE",
     # lightweight module
     "matching",
-    # Lazy exports
+    # model state
+    "save_checkpoint",
+    "load_checkpoint",
+    "restore_checkpoint",
+    # lazy exports
     "UniVITrainer",
     "write_univi_latent",
     "MultiModalDataset",
     "pipeline",
     "diagnostics",
-    # Modules
+    # modules
     "evaluation",
     "plotting",
-    # Eval convenience (optional)
+    # eval convenience (optional)
     "encode_adata",
     "evaluate_alignment",
 ]
@@ -54,6 +58,11 @@ def __getattr__(name: str) -> Any:
     if name == "MultiModalDataset":
         from .data import MultiModalDataset
         return MultiModalDataset
+
+    # ---- model state ----
+    if name in {"save_checkpoint", "load_checkpoint", "restore_checkpoint"}:
+        from .utils.io import save_checkpoint, load_checkpoint, restore_checkpoint
+        return {"save_checkpoint": save_checkpoint, "load_checkpoint": load_checkpoint, "restore_checkpoint": restore_checkpoint}[name]
 
     # ---- modules (return module objects) ----
     if name == "pipeline":

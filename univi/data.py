@@ -16,43 +16,30 @@ from torch.utils.data import Dataset
 
 from .config import ModalityConfig
 
-# -----------------------------
-# Types
-# -----------------------------
 LayerSpec = Union[None, str, Mapping[str, Optional[str]]]
 XKeySpec = Union[str, Mapping[str, str]]
+LabelSpec = Union[
+    np.ndarray,
+    torch.Tensor,
+    Sequence[int],
+    Mapping[str, Union[np.ndarray, torch.Tensor, Sequence[int]]],
+]
 
 
-# -----------------------------
-# Likelihood helpers
-# -----------------------------
 def _is_categorical_likelihood(lk: Optional[str]) -> bool:
     lk = (lk or "").lower().strip()
     return lk in ("categorical", "cat", "ce", "cross_entropy", "multinomial", "softmax")
 
 
-# -----------------------------
-# Matrix selection helpers
-# -----------------------------
 def _get_matrix(adata_obj: AnnData, *, layer: Optional[str], X_key: str):
-    """
-    Resolve a 2D matrix from an AnnData according to:
-      - If X_key != "X": use adata.obsm[X_key]
-      - Else if layer is not None: use adata.layers[layer]
-      - Else: use adata.X
-    """
     if X_key != "X":
         if X_key not in adata_obj.obsm:
-            raise KeyError(
-                "X_key=%r not found in adata.obsm. Keys=%s" % (X_key, list(adata_obj.obsm.keys()))
-            )
+            raise KeyError("X_key=%r not found in adata.obsm. Keys=%s" % (X_key, list(adata_obj.obsm.keys())))
         return adata_obj.obsm[X_key]
 
     if layer is not None:
         if layer not in adata_obj.layers:
-            raise KeyError(
-                "layer=%r not found in adata.layers. Keys=%s" % (layer, list(adata_obj.layers.keys()))
-            )
+            raise KeyError("layer=%r not found in adata.layers. Keys=%s" % (layer, list(adata_obj.layers.keys())))
         return adata_obj.layers[layer]
 
     return adata_obj.X
@@ -65,9 +52,6 @@ def infer_input_dim(adata_obj: AnnData, *, layer: Optional[str], X_key: str) -> 
     return int(X.shape[1])
 
 
-# -----------------------------
-# Pairing / alignment helpers
-# -----------------------------
 def align_paired_obs_names(
     adata_dict: Dict[str, AnnData],
     how: str = "intersection",
@@ -75,10 +59,6 @@ def align_paired_obs_names(
     sort: bool = True,
     copy: bool = True,
 ) -> Dict[str, AnnData]:
-    """
-    Align modalities on shared obs_names (by intersection).
-    Returns a NEW dict with each AnnData subset/reordered to the shared index.
-    """
     if not adata_dict:
         raise ValueError("adata_dict is empty")
     if how != "intersection":
@@ -101,7 +81,6 @@ def align_paired_obs_names(
 
     out: Dict[str, AnnData] = {}
     for nm in names:
-        #slc = adata_dict[nm].loc[shared]
         slc = adata_dict[nm][shared, :]
         out[nm] = slc.copy() if copy else slc
     return out
@@ -112,9 +91,6 @@ def _as_modality_map(
     adata_dict: Dict[str, AnnData],
     kind: str,
 ) -> Dict[str, Any]:
-    """
-    Normalize a scalar or mapping spec to a per-modality dict.
-    """
     if isinstance(spec, Mapping):
         out = dict(spec)
     else:
@@ -126,22 +102,19 @@ def _as_modality_map(
     return out
 
 
-# -----------------------------
-# Dataset
-# -----------------------------
 class MultiModalDataset(Dataset):
     """
-    A simple multi-modal AnnData-backed torch Dataset.
+    Multi-modal AnnData-backed torch Dataset.
 
     Returns:
       - x_dict: Dict[modality -> FloatTensor]
-      - (x_dict, y) if labels are provided (y is LongTensor)
+      - (x_dict, y) if labels are provided, where y is:
+          * LongTensor scalar (back-compat), OR
+          * dict[str -> LongTensor scalar] (multi-head)
 
-    Categorical modality support
-    ----------------------------
-    If you pass modality_cfgs and a modality is categorical with input_kind="obs",
-    then x_dict[modality] will be a (D=1,) float tensor holding an integer code.
-    Your model code can convert it to one-hot for encoding and to Long targets for CE.
+    Categorical modality support:
+      - If modality_cfgs marks a modality as categorical with input_kind="obs",
+        x_dict[modality] is a (1,) float tensor holding an integer code.
     """
 
     def __init__(
@@ -151,7 +124,7 @@ class MultiModalDataset(Dataset):
         X_key: XKeySpec = "X",
         paired: bool = True,
         device: Optional[torch.device] = None,
-        labels: Optional[Union[np.ndarray, torch.Tensor, Sequence[int]]] = None,
+        labels: Optional[LabelSpec] = None,
         dtype: torch.dtype = torch.float32,
         modality_cfgs: Optional[List[ModalityConfig]] = None,
     ):
@@ -171,12 +144,10 @@ class MultiModalDataset(Dataset):
         if modality_cfgs is not None:
             self.mod_cfg_by_name = {m.name: m for m in modality_cfgs}
 
-        # Cache sizes / obs_names from first modality (canonical)
         first = next(iter(adata_dict.values()))
         self._n_cells: int = int(first.n_obs)
         self._obs_names = first.obs_names
 
-        # Validate pairedness
         if self.paired:
             for nm, adata_obj in self.adata_dict.items():
                 if int(adata_obj.n_obs) != self._n_cells:
@@ -190,19 +161,32 @@ class MultiModalDataset(Dataset):
                         "Tip: use dataset_from_anndata_dict(..., align_obs=True)." % nm
                     )
 
-        # Labels (optional)
-        self.labels: Optional[torch.Tensor] = None
+        # Labels (optional): either a single vector or a dict of vectors
+        self.labels: Optional[Union[torch.Tensor, Dict[str, torch.Tensor]]] = None
         if labels is not None:
-            y = labels if torch.is_tensor(labels) else torch.as_tensor(labels)
-            if y.ndim != 1:
-                y = y.reshape(-1)
-            if int(y.shape[0]) != self._n_cells:
-                raise ValueError(f"labels length ({int(y.shape[0])}) must equal n_cells ({self._n_cells})")
-
-            y = y.long()
-            if self.device is not None:
-                y = y.to(self.device)
-            self.labels = y
+            if isinstance(labels, Mapping):
+                yd: Dict[str, torch.Tensor] = {}
+                for hk, hv in labels.items():
+                    t = hv if torch.is_tensor(hv) else torch.as_tensor(hv)
+                    if t.ndim != 1:
+                        t = t.reshape(-1)
+                    if int(t.shape[0]) != self._n_cells:
+                        raise ValueError(f"labels[{hk!r}] length ({int(t.shape[0])}) must equal n_cells ({self._n_cells})")
+                    t = t.long()
+                    if self.device is not None:
+                        t = t.to(self.device)
+                    yd[str(hk)] = t
+                self.labels = yd
+            else:
+                y = labels if torch.is_tensor(labels) else torch.as_tensor(labels)
+                if y.ndim != 1:
+                    y = y.reshape(-1)
+                if int(y.shape[0]) != self._n_cells:
+                    raise ValueError(f"labels length ({int(y.shape[0])}) must equal n_cells ({self._n_cells})")
+                y = y.long()
+                if self.device is not None:
+                    y = y.to(self.device)
+                self.labels = y
 
     @property
     def n_cells(self) -> int:
@@ -215,7 +199,6 @@ class MultiModalDataset(Dataset):
     def __len__(self) -> int:
         return self._n_cells
 
-    # ---- row extraction ----
     def _get_X_row(self, adata_obj: AnnData, idx: int, layer: Optional[str], X_key: str) -> np.ndarray:
         X = _get_matrix(adata_obj, layer=layer, X_key=X_key)
         row = X[idx]
@@ -224,10 +207,6 @@ class MultiModalDataset(Dataset):
         return np.asarray(row).reshape(-1).astype(np.float32, copy=False)
 
     def _get_obs_label_row(self, adata_obj: AnnData, idx: int, obs_key: str) -> np.ndarray:
-        """
-        Read a single label code from adata.obs[obs_key] and return it as (1,) float32.
-        We expect integer codes already. If you have strings, encode them first.
-        """
         if obs_key not in adata_obj.obs:
             raise KeyError(f"obs_key={obs_key!r} not found in adata.obs columns.")
 
@@ -241,7 +220,6 @@ class MultiModalDataset(Dataset):
         if isinstance(v, (np.integer, int)):
             return np.asarray([int(v)], dtype=np.float32)
         if isinstance(v, (np.floating, float)):
-            # allow float that is integer-valued (e.g. 3.0)
             return np.asarray([float(v)], dtype=np.float32)
 
         raise TypeError(
@@ -255,7 +233,6 @@ class MultiModalDataset(Dataset):
         for name, adata_obj in self.adata_dict.items():
             mcfg = self.mod_cfg_by_name.get(name, None)
 
-            # If this modality is categorical and configured to come from .obs, do that.
             if (
                 mcfg is not None
                 and _is_categorical_likelihood(mcfg.likelihood)
@@ -276,30 +253,26 @@ class MultiModalDataset(Dataset):
 
         if self.labels is None:
             return x_dict
+
+        if isinstance(self.labels, dict):
+            y_out: Dict[str, torch.Tensor] = {k: v[idx] for k, v in self.labels.items()}
+            return x_dict, y_out
+
         return x_dict, self.labels[idx]
 
 
-# -----------------------------
-# Factory helpers
-# -----------------------------
 def dataset_from_anndata_dict(
     adata_dict: Dict[str, AnnData],
     layer: LayerSpec = None,
     X_key: XKeySpec = "X",
     paired: bool = True,
     align_obs: bool = True,
-    labels: Optional[Union[np.ndarray, torch.Tensor, Sequence[int]]] = None,
+    labels: Optional[LabelSpec] = None,
     device: Optional[torch.device] = None,
     dtype: torch.dtype = torch.float32,
     copy_aligned: bool = True,
     modality_cfgs: Optional[List[ModalityConfig]] = None,
 ) -> Tuple[MultiModalDataset, Dict[str, AnnData]]:
-    """
-    Convenience wrapper to optionally align obs_names then build MultiModalDataset.
-
-    Returns:
-      (dataset, (possibly aligned) adata_dict)
-    """
     if align_obs and paired:
         adata_dict = align_paired_obs_names(adata_dict, how="intersection", copy=copy_aligned)
 
@@ -320,12 +293,6 @@ def load_anndata_dict_from_config(
     modality_cfgs: List[Dict[str, Any]],
     data_root: Optional[str] = None,
 ) -> Dict[str, AnnData]:
-    """
-    Load a modality->AnnData dict from a list of config dicts.
-    Expected keys per modality:
-      - "name"
-      - "h5ad_path"
-    """
     out: Dict[str, AnnData] = {}
     for m in modality_cfgs:
         if "name" not in m or "h5ad_path" not in m:
@@ -347,19 +314,32 @@ def load_anndata_dict_from_config(
 
 def collate_multimodal_xy(batch):
     """
-    Explicit collate:
+    Collate:
       - works for [x_dict, ...] or [(x_dict, y), ...]
       - stacks per-modality tensors into (B, D)
-
-    For categorical-from-obs modalities, D will be 1 (so batch -> (B,1)).
+      - supports y as:
+          * scalar tensor/int
+          * dict[str -> scalar tensor/int]
     """
     if isinstance(batch[0], (tuple, list)) and len(batch[0]) == 2:
         xs, ys = zip(*batch)
-        y = torch.as_tensor(ys, dtype=torch.long)
+
+        y0 = ys[0]
+        if isinstance(y0, Mapping):
+            y_out: Dict[str, torch.Tensor] = {}
+            keys = list(y0.keys())
+            for k in keys:
+                y_out[str(k)] = torch.stack(
+                    [torch.as_tensor(yy[k], dtype=torch.long) for yy in ys], dim=0
+                )
+            y = y_out
+        else:
+            y = torch.stack([torch.as_tensor(yy, dtype=torch.long) for yy in ys], dim=0)
     else:
         xs, y = batch, None
 
     keys = xs[0].keys()
     x = {k: torch.stack([d[k] for d in xs], dim=0) for k in keys}
     return x if y is None else (x, y)
+
 

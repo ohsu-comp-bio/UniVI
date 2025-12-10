@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Literal
+from typing import Dict, List, Optional, Literal
 
 
 @dataclass
@@ -33,14 +33,29 @@ class ModalityConfig:
     likelihood: str = "gaussian"
 
     # ---- categorical modality support ----
-    # unlabeled sentinel (masked in CE and can map to all-zeros one-hot for encoders)
     ignore_index: int = -1
-
-    # how to read this modality from AnnData in the dataset
-    # - "matrix": read from X/layers/obsm (normal pathway)
-    # - "obs": read from adata.obs[obs_key] as integer label codes (returned as (B,1))
     input_kind: Literal["matrix", "obs"] = "matrix"
     obs_key: Optional[str] = None
+
+
+@dataclass
+class ClassHeadConfig:
+    """
+    Configuration for an auxiliary supervised classification head p(y_h | z).
+
+    Notes
+    -----
+    - This is NOT a modality; it is a supervised head attached to the fused latent.
+    - Use ignore_index to mask unknown labels (e.g. -1).
+    - from_mu=True means classify from mu_z (more stable), else from sampled z.
+    - warmup: epoch before enabling this head's loss.
+    """
+    name: str
+    n_classes: int
+    loss_weight: float = 1.0
+    ignore_index: int = -1
+    from_mu: bool = True
+    warmup: int = 0
 
 
 @dataclass
@@ -60,6 +75,13 @@ class UniVIConfig:
     kl_anneal_end: int = 0
     align_anneal_start: int = 0
     align_anneal_end: int = 0
+
+    # ---- NEW: multiple supervised heads (dict y) ----
+    class_heads: Optional[List[ClassHeadConfig]] = None
+
+    # If you use the built-in label_encoder expert injection, this indicates which y key to use
+    # when y is a dict (default "label" for backwards compatibility).
+    label_head_name: str = "label"
 
     def validate(self) -> None:
         """
@@ -85,7 +107,21 @@ class UniVIConfig:
                 if m.input_kind == "obs" and not m.obs_key:
                     raise ValueError(f"Categorical modality {m.name!r}: input_kind='obs' requires obs_key.")
 
-        # anneal sanity (not strict, just prevent obvious negatives)
+        # class head sanity
+        if self.class_heads is not None:
+            hn = [h.name for h in self.class_heads]
+            if len(set(hn)) != len(hn):
+                dupes = sorted({n for n in hn if hn.count(n) > 1})
+                raise ValueError(f"Duplicate class head names in cfg.class_heads: {dupes}")
+            for h in self.class_heads:
+                if int(h.n_classes) < 2:
+                    raise ValueError(f"Class head {h.name!r}: n_classes must be >= 2.")
+                if float(h.loss_weight) < 0:
+                    raise ValueError(f"Class head {h.name!r}: loss_weight must be >= 0.")
+                if int(h.warmup) < 0:
+                    raise ValueError(f"Class head {h.name!r}: warmup must be >= 0.")
+
+        # anneal sanity
         for k in ("kl_anneal_start", "kl_anneal_end", "align_anneal_start", "align_anneal_end"):
             v = int(getattr(self, k))
             if v < 0:

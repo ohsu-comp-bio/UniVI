@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Mapping
 
 import numpy as np
 import torch
@@ -11,11 +11,15 @@ from torch import nn, optim
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 import scipy.sparse as sp
+import contextlib
+import anndata as ad
 
 from .config import TrainingConfig
 from .utils.logging import get_logger
+from .utils.io import save_checkpoint, restore_checkpoint
 
-BatchType = Union[Dict[str, torch.Tensor], Tuple[Dict[str, torch.Tensor], torch.Tensor]]
+YType = Union[torch.Tensor, Dict[str, torch.Tensor]]
+BatchType = Union[Dict[str, torch.Tensor], Tuple[Dict[str, torch.Tensor], YType]]
 
 
 class UniVITrainer:
@@ -114,13 +118,75 @@ class UniVITrainer:
 
         return self.history
 
+    # ------------------------------ model state handling ------------------------------
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            "history": self.history,
+            "best_val_loss": float(self.best_val_loss),
+            "best_epoch": self.best_epoch,
+            "epochs_no_improve": int(self.epochs_no_improve),
+        }
+
+    def save(self, path: str, *, extra: Optional[Dict[str, Any]] = None, save_best: bool = False) -> None:
+        model_state = self.best_state_dict if (save_best and self.best_state_dict is not None) else self.model.state_dict()
+
+        scaler_state = None
+        if self._scaler is not None and self._scaler.is_enabled():
+            try:
+                scaler_state = self._scaler.state_dict()
+            except Exception:
+                scaler_state = None
+
+        save_checkpoint(
+            path,
+            model_state=model_state,
+            optimizer_state=self.optimizer.state_dict(),
+            extra=extra,
+            model=self.model,
+            trainer_state=self.state_dict(),
+            scaler_state=scaler_state,
+        )
+
+    def load(
+        self,
+        path: str,
+        *,
+        map_location: Union[str, torch.device, None] = "cpu",
+        strict: bool = True,
+        restore_label_names: bool = True,
+        enforce_label_compat: bool = True,
+    ) -> Dict[str, Any]:
+        payload = restore_checkpoint(
+            path,
+            model=self.model,
+            optimizer=self.optimizer,
+            scaler=self._scaler,
+            map_location=map_location,
+            strict=strict,
+            restore_label_names=restore_label_names,
+            enforce_label_compat=enforce_label_compat,
+        )
+
+        ts = payload.get("trainer_state", None)
+        if isinstance(ts, dict):
+            self.history = ts.get("history", self.history)
+            self.best_val_loss = float(ts.get("best_val_loss", self.best_val_loss))
+            self.best_epoch = ts.get("best_epoch", self.best_epoch)
+            self.epochs_no_improve = int(ts.get("epochs_no_improve", self.epochs_no_improve))
+
+        self.model.to(self.device)
+        return payload
+
     # ------------------------------ batch handling ------------------------------
 
-    def _split_batch(self, batch: BatchType) -> Tuple[Dict[str, torch.Tensor], Optional[torch.Tensor]]:
+    def _split_batch(self, batch: BatchType) -> Tuple[Dict[str, torch.Tensor], Optional[YType]]:
         """
         Accepts either:
           - x_dict
-          - (x_dict, y)
+          - (x_dict, y) where y is either:
+              * LongTensor (B,)  [back-compat]
+              * dict[str -> LongTensor(B,)]  [multi-head]
 
         Moves tensors to device. Does NOT force-cast x modalities (keeps float32, float16, etc).
         Ensures y is long if provided.
@@ -138,24 +204,34 @@ class UniVITrainer:
             if v is None:
                 x_out[k] = None
                 continue
-
             if torch.is_tensor(v):
                 x_out[k] = v.to(self.device, non_blocking=True)
             else:
-                # fallback: assume array-like; keep float32
                 x_out[k] = torch.as_tensor(v, dtype=torch.float32, device=self.device)
 
+        y_out: Optional[YType] = None
         if y is not None:
-            if not torch.is_tensor(y):
-                y = torch.as_tensor(y)
-            y = y.long().to(self.device, non_blocking=True)
+            if isinstance(y, Mapping):
+                yd: Dict[str, torch.Tensor] = {}
+                for hk, hv in y.items():
+                    if hv is None:
+                        yd[str(hk)] = None  # type: ignore[assignment]
+                        continue
+                    if not torch.is_tensor(hv):
+                        hv = torch.as_tensor(hv)
+                    yd[str(hk)] = hv.long().to(self.device, non_blocking=True)
+                y_out = yd
+            else:
+                if not torch.is_tensor(y):
+                    y = torch.as_tensor(y)
+                y_out = y.long().to(self.device, non_blocking=True)
 
-        return x_out, y
+        return x_out, y_out
 
     # ------------------------------ forward wrappers ------------------------------
 
-    def _forward_model(self, x_dict: Dict[str, torch.Tensor], epoch: int, y: Optional[torch.Tensor]):
-        # Prefer newest signature
+    def _forward_model(self, x_dict: Dict[str, torch.Tensor], epoch: int, y: Optional[YType]):
+        # Prefer newest signature (y can be tensor or dict)
         try:
             return self.model(x_dict, epoch=epoch, y=y)
         except TypeError:
@@ -189,8 +265,7 @@ class UniVITrainer:
 
     def _amp_context(self):
         if not (self.use_amp and torch.cuda.is_available() and str(self.device).startswith("cuda")):
-            return torch.autocast(device_type="cuda", enabled=False)
-
+            return contextlib.nullcontext()
         dtype = torch.float16 if self.amp_dtype == "fp16" else torch.bfloat16
         return torch.autocast(device_type="cuda", dtype=dtype, enabled=True)
 
@@ -220,7 +295,7 @@ class UniVITrainer:
             with torch.set_grad_enabled(train):
                 with self._amp_context():
                     out = self._forward_model(x_dict, epoch=epoch, y=y)
-                    loss = out["loss"]
+                    loss = out["loss"] if train else out.get("loss_fixed", out["loss"])
 
                 if train:
                     if self._scaler is not None and self._scaler.is_enabled():
@@ -237,8 +312,8 @@ class UniVITrainer:
                         self.optimizer.step()
 
             total_loss += float(loss.detach().cpu().item())
-            total_beta += self._as_float(out.get("beta", 0.0))
-            total_gamma += self._as_float(out.get("gamma", 0.0))
+            total_beta += self._as_float(out.get("beta_used", out.get("beta", 0.0)))
+            total_gamma += self._as_float(out.get("gamma_used", out.get("gamma", 0.0)))
             n_batches += 1
 
         avg_loss = total_loss / max(1, n_batches)
@@ -278,7 +353,7 @@ class UniVITrainer:
 
     def encode_modality(
         self,
-        adata: AnnData,
+        adata: ad.AnnData,
         modality: str,
         layer: Optional[str] = None,
         X_key: str = "X",
@@ -287,10 +362,6 @@ class UniVITrainer:
     ) -> np.ndarray:
         """
         Encode a single modality AnnData into latent means (mu_z).
-
-        Supports:
-          - matrix modalities via X/layers/obsm (default, using layer/X_key)
-          - categorical-from-obs modalities if obs_key is provided (returns (B,1) codes)
         """
         names = getattr(self.model, "modality_names", None)
         if names is not None and modality not in names:
@@ -298,7 +369,6 @@ class UniVITrainer:
 
         self.model.eval()
 
-        # Pull features
         if obs_key is not None:
             if obs_key not in adata.obs:
                 raise KeyError(f"obs_key={obs_key!r} not found in adata.obs.")
@@ -337,4 +407,5 @@ class UniVITrainer:
         self.logger.info("TrainingConfig:")
         for k, v in cfg_dict.items():
             self.logger.info("  %s: %r" % (k, v))
+
 
