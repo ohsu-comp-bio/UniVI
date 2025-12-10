@@ -1149,14 +1149,7 @@ This is how you get “RNA→ADT” or “ADT→RNA” performance summaries for
 
 ---
 
-### 6) Recommended workflow cheat-sheet
-
-* Use **`moe_mean`** for your “final embedding” (`.obsm["X_univi"]`) and downstream clustering/UMAP.
-* Use **`modality_mean`** when computing *pairwise* alignment metrics or debugging a specific modality’s latent.
-* Use **sampling** (`*_sample`) only when you explicitly want stochastic behavior.
-
-
-### 7) Evaluating a trained model via CLI scripts
+### 6) Evaluating a trained model via CLI scripts
 
 After training, you can run evaluation to compute alignment metrics and generate UMAPs:
 
@@ -1176,6 +1169,14 @@ Typical evaluation outputs include:
 * Cross-modal reconstruction summaries
 
 For richer, exploratory workflows (TEA-seq tri-modal integration, Multiome RNA+ATAC, non-paired matching, etc.), see the notebooks in `notebooks/`.
+
+---
+
+### 7) Recommended workflow cheat-sheet
+
+* Use **`moe_mean`** for your “final embedding” (`.obsm["X_univi"]`) and downstream clustering/UMAP.
+* Use **`modality_mean`** when computing *pairwise* alignment metrics or debugging a specific modality’s latent.
+* Use **sampling** (`*_sample`) only when you explicitly want stochastic behavior.
 
 ---
 
