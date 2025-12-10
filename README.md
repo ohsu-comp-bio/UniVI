@@ -286,12 +286,394 @@ See the notebooks under `notebooks/` for end-to-end preprocessing examples for C
 
 ---
 
-## Training modes & example recipes (v1 vs v2/lite + supervised options)
+## Training modes & example recipes (v1 vs v2/lite)
 
 UniVI supports two main training regimes:
 
 * **UniVI v1**: per-modality posteriors + reconstruction terms controlled by `v1_recon` (cross/self/avg/etc.) + posterior alignment across modality posteriors. UniVI v1 is the recommended default for paired multimodal data of most configurations and is the main method used in the manuscript.
 * **UniVI-lite / v2**: fused latent posterior (precision-weighted MoE/PoE style) + per-modality reconstruction + β·KL(`q_fused||p`) + γ·pairwise alignment between modality posteriors. Scales cleanly to 3+ modalities. This is the recommended default for more loosely-paired or artificially paired data.
+
+---
+
+## Running a minimal training script (UniVI v1 vs UniVI-lite)
+
+### 0) Choose the training objective (`loss_mode`) in your config JSON
+
+In `parameter_files/*.json`, set a single switch that controls the objective.
+
+**Paper objective (v1; `"avg"` trains with 50% weight on self-reconstruction and 50% weight on cross-reconstruction, with weights automatically adjusted so this stays true for any number of modalities):**
+
+```json5
+{
+  "model": {
+    "loss_mode": "v1",
+    "v1_recon": "avg",
+    "normalize_v1_terms": true
+  }
+}
+```
+
+**UniVI-lite objective (v2; lightweight / fusion-based):**
+
+```json5
+{
+  "model": {
+    "loss_mode": "lite"
+  }
+}
+```
+
+> **Note**
+> `loss_mode: "lite"` is an alias for `loss_mode: "v2"` (they run the same objective in the current code).
+
+### 0b) (Optional) Enable supervised labels from config JSON
+
+**Classification head (decoder-only):**
+
+```json5
+{
+  "model": {
+    "loss_mode": "lite",
+    "n_label_classes": 30,
+    "label_loss_weight": 1.0,
+    "label_ignore_index": -1,
+    "classify_from_mu": true
+  }
+}
+```
+
+**Lite + label expert injected into fusion (encoder-side):**
+
+```json5
+{
+  "model": {
+    "loss_mode": "lite",
+    "n_label_classes": 30,
+    "label_loss_weight": 1.0,
+
+    "use_label_encoder": true,
+    "label_moe_weight": 1.0,
+    "unlabeled_logvar": 20.0,
+    "label_encoder_warmup": 5,
+    "label_ignore_index": -1
+  }
+}
+```
+
+**Labels as categorical modalities (single or multiple heads):** add one or more categorical modalities in `"data.modalities"` and provide matching AnnData on disk (or build them in Python).
+
+```json5
+{
+  "model": { "loss_mode": "lite" },
+  "data": {
+    "modalities": [
+      { "name": "rna",      "likelihood": "nb",          "X_key": "X", "layer": "counts" },
+      { "name": "adt",      "likelihood": "nb",          "X_key": "X", "layer": "counts" },
+      { "name": "celltype", "likelihood": "categorical", "X_key": "X", "layer": null },
+      { "name": "patient",  "likelihood": "categorical", "X_key": "X", "layer": null }
+    ]
+  }
+}
+```
+
+### 1) Normalization / representation switch (counts vs continuous)
+
+**Important note on selectors:**
+
+* `layer` selects `.layers[layer]` (if `X_key == "X"`).
+* `X_key == "X"` selects `.X`/`.layers[layer]`; otherwise `X_key` selects `.obsm[X_key]`.
+
+Correct pattern:
+
+```json5
+{
+  "data": {
+    "modalities": [
+      {
+        "name": "rna",
+        "layer": "log1p",        // uses adata.layers["log1p"] (since X_key=="X")
+        "X_key": "X",
+        "assume_log1p": true,
+        "likelihood": "gaussian"
+      },
+      {
+        "name": "adt",
+        "layer": "counts",       // uses adata.layers["counts"] (since X_key=="X")
+        "X_key": "X",
+        "assume_log1p": false,
+        "likelihood": "zinb"
+      },
+      {
+        "name": "atac",
+        "layer": null,           // ignored because X_key != "X"
+        "X_key": "X_lsi",        // uses adata.obsm["X_lsi"]
+        "assume_log1p": false,
+        "likelihood": "gaussian"
+      }
+    ]
+  }
+}
+```
+
+* Use `.layers["counts"]` when you want NB/ZINB/Poisson decoders.
+* Use continuous `.X` or `.obsm["X_lsi"]` when you want Gaussian/MSE decoders.
+
+> Jupyter notebooks in this repository (UniVI/notebooks/) show recommended preprocessing per dataset for different data types and analyses. Depending on your research goals, you can use several different methods of preprocessing. The model is robust when it comes to learning underlying biology regardless of preprocessing; the key is that the decoder likelihood should roughly match the input distribution per-modality.
+
+### 2) Train (CLI)
+
+Example: **CITE-seq (RNA + ADT)**
+
+**UniVI v1**
+
+```bash
+python scripts/train_univi.py \
+  --config parameter_files/defaults_cite_seq_scaled_gaussian_v1.json \
+  --outdir saved_models/citeseq_v1_run1 \
+  --data-root /path/to/your/data
+```
+
+**UniVI-lite**
+
+```bash
+python scripts/train_univi.py \
+  --config parameter_files/defaults_cite_seq_scaled_gaussian_lite.json \
+  --outdir saved_models/citeseq_lite_run1 \
+  --data-root /path/to/your/data
+```
+
+Example: **Multiome (RNA + ATAC)**
+
+**UniVI v1**
+
+```bash
+python scripts/train_univi.py \
+  --config parameter_files/defaults_multiome_v1.json \
+  --outdir saved_models/multiome_v1_run1 \
+  --data-root /path/to/your/data
+```
+
+**UniVI-lite**
+
+```bash
+python scripts/train_univi.py \
+  --config parameter_files/defaults_multiome_lite.json \
+  --outdir saved_models/multiome_lite_run1 \
+  --data-root /path/to/your/data
+```
+
+Example: **TEA-seq (RNA + ADT + ATAC)**
+
+**UniVI v1**
+
+```bash
+python scripts/train_univi.py \
+  --config parameter_files/defaults_tea_seq_v1.json \
+  --outdir saved_models/teaseq_v1_run1 \
+  --data-root /path/to/your/data
+```
+
+**UniVI-lite**
+
+```bash
+python scripts/train_univi.py \
+  --config parameter_files/defaults_tea_seq_lite.json \
+  --outdir saved_models/teaseq_lite_run1 \
+  --data-root /path/to/your/data
+```
+
+---
+
+## Quickstart: run UniVI from Python / Jupyter + supervised classification options (if desired)
+
+If you prefer to stay inside a notebook or a Python script instead of calling the CLI, you can build the configs, model, and trainer directly.
+
+Below is a minimal **CITE-seq (RNA + ADT)** example using paired AnnData objects.
+
+```python
+import numpy as np
+import scanpy as sc
+import torch
+
+from torch.utils.data import DataLoader, Subset
+
+from univi import (
+    UniVIMultiModalVAE,
+    ModalityConfig,
+    UniVIConfig,
+    TrainingConfig,
+)
+from univi.data import (
+    MultiModalDataset,
+    align_paired_obs_names,
+    collate_multimodal_xy,   # optional convenience collate for supervised batches
+)
+from univi.trainer import UniVITrainer
+from univi.utils.io import save_anndata_splits
+```
+
+### 1) Load preprocessed AnnData (paired cells)
+
+```python
+rna = sc.read_h5ad("path/to/rna_citeseq.h5ad")
+adt = sc.read_h5ad("path/to/adt_citeseq.h5ad")
+
+adata_dict = {"rna": rna, "adt": adt}
+adata_dict = align_paired_obs_names(adata_dict)  # ensures same obs_names/order
+```
+
+### 2) Build `MultiModalDataset` and DataLoaders (unsupervised)
+
+```python
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+dataset = MultiModalDataset(
+    adata_dict=adata_dict,
+    X_key="X",
+    device=None,  # "cpu" or "cuda"
+)
+
+n_cells = rna.n_obs
+idx = np.arange(n_cells)
+rng = np.random.default_rng(0)
+rng.shuffle(idx)
+
+split = int(0.8 * n_cells)
+train_idx, val_idx = idx[:split], idx[split:]
+
+train_ds = Subset(dataset, train_idx)
+val_ds   = Subset(dataset, val_idx)
+
+batch_size = 256
+
+train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
+```
+
+### 2b) (Optional) Supervised batches for Pattern A/B (`(x_dict, y)`)
+
+If you use the classification head and/or label expert injection, supply `y` as integer class indices and mask unlabeled with `-1`.
+
+```python
+y_codes = rna.obs["celltype"].astype("category").cat.codes.to_numpy()
+
+dataset_sup = MultiModalDataset(adata_dict=adata_dict, X_key="X", labels=y_codes)
+
+def collate_xy(batch):
+    xs, ys = zip(*batch)
+    x = {k: torch.stack([d[k] for d in xs], 0) for k in xs[0].keys()}
+    y = torch.as_tensor(ys, dtype=torch.long)
+    return x, y
+
+train_loader = DataLoader(dataset_sup, batch_size=batch_size, shuffle=True, collate_fn=collate_xy)
+
+# If you prefer using the package helper:
+# train_loader = DataLoader(dataset_sup, batch_size=batch_size, shuffle=True, collate_fn=collate_multimodal_xy)
+```
+
+### 2c) Persisting and reusing train/val/test splits (split_map.json)
+
+For reproducibility (and to ensure the exact same cell membership across modalities and reruns), UniVI can write:
+
+* `{prefix}_train.h5ad`, `{prefix}_val.h5ad`, `{prefix}_test.h5ad`
+* `{prefix}_split_map.json` containing split membership (stored using `obs_names`)
+
+**Save splits once (from any one modality, typically RNA):**
+
+```python
+test_idx = np.array([], dtype=int)  # optional; include if you have a test set
+
+save_anndata_splits(
+    rna,
+    outdir="splits/citeseq_demo",
+    prefix="citeseq_rna",
+    split_map={
+        "train": train_idx.tolist(),
+        "val":   val_idx.tolist(),
+        "test":  test_idx.tolist(),
+    },
+    save_split_map=True,
+)
+```
+
+**Later: load the split_map and apply to any paired modality using `obs_names`:**
+
+```python
+import json
+
+with open("splits/citeseq_demo/citeseq_rna_split_map.json") as f:
+    sm = json.load(f)
+
+train_names = sm["train"]
+val_names   = sm["val"]
+test_names  = sm.get("test", [])
+
+rna_train = rna[train_names].copy()
+adt_train = adt[train_names].copy()
+
+rna_val = rna[val_names].copy()
+adt_val = adt[val_names].copy()
+```
+
+**If you need integer indices for `torch.utils.data.Subset`:**
+
+```python
+obs = dataset.obs_names  # canonical ordering used by the dataset
+
+train_idx2 = obs.get_indexer(train_names)
+val_idx2   = obs.get_indexer(val_names)
+
+if (train_idx2 < 0).any() or (val_idx2 < 0).any():
+    raise ValueError("Some split_map obs_names are missing from the dataset.")
+
+train_ds = Subset(dataset, train_idx2)
+val_ds   = Subset(dataset, val_idx2)
+```
+
+This pattern lets you:
+
+* reproduce the same split exactly across runs,
+* apply the same split membership to other modalities (ADT/ATAC) or derived datasets,
+* and recover `Subset` indices deterministically.
+
+### 3) Define UniVI configs (v1 vs UniVI-lite)
+
+```python
+univi_cfg = UniVIConfig(
+    latent_dim=40,
+    beta=5.0,
+    gamma=40.0,
+    encoder_dropout=0.1,
+    decoder_dropout=0.0,
+    encoder_batchnorm=True,
+    decoder_batchnorm=False,
+    kl_anneal_start=0,
+    kl_anneal_end=25,
+    align_anneal_start=0,
+    align_anneal_end=25,
+    modalities=[
+        ModalityConfig("rna", rna.n_vars, [1024, 512], [512, 1024], likelihood="nb"),
+        ModalityConfig("adt", adt.n_vars, [256, 128],  [128, 256],  likelihood="nb"),
+    ],
+)
+
+train_cfg = TrainingConfig(
+    n_epochs=200,
+    batch_size=batch_size,
+    lr=1e-3,
+    weight_decay=1e-4,
+    device=device,
+    log_every=10,
+    grad_clip=5.0,
+    num_workers=0,
+    seed=42,
+    early_stopping=True,
+    patience=25,
+    min_delta=0.0,
+)
+```
+
+ + supervised options
 
 ### Should I use prior label-informed supervision/which supervised option should I use?
 
@@ -525,386 +907,6 @@ model = UniVIMultiModalVAE(univi_cfg, loss_mode="lite").to("cuda")
 
 * This is the most direct way to get multiple “classification heads” without packing everything into a single label space.
 * Unknown/unlabeled entries can be represented as all-zeros one-hot rows (as above). This avoids forcing a dummy class into the label space.
-
----
-
-## Running a minimal training script (UniVI v1 vs UniVI-lite)
-
-### 0) Choose the training objective (`loss_mode`) in your config JSON
-
-In `parameter_files/*.json`, set a single switch that controls the objective.
-
-**Paper objective (v1; `"avg"` trains with 50% weight on self-reconstruction and 50% weight on cross-reconstruction, with weights automatically adjusted so this stays true for any number of modalities):**
-
-```json5
-{
-  "model": {
-    "loss_mode": "v1",
-    "v1_recon": "avg",
-    "normalize_v1_terms": true
-  }
-}
-```
-
-**UniVI-lite objective (v2; lightweight / fusion-based):**
-
-```json5
-{
-  "model": {
-    "loss_mode": "lite"
-  }
-}
-```
-
-> **Note**
-> `loss_mode: "lite"` is an alias for `loss_mode: "v2"` (they run the same objective in the current code).
-
-### 0b) (Optional) Enable supervised labels from config JSON
-
-**Classification head (decoder-only):**
-
-```json5
-{
-  "model": {
-    "loss_mode": "lite",
-    "n_label_classes": 30,
-    "label_loss_weight": 1.0,
-    "label_ignore_index": -1,
-    "classify_from_mu": true
-  }
-}
-```
-
-**Lite + label expert injected into fusion (encoder-side):**
-
-```json5
-{
-  "model": {
-    "loss_mode": "lite",
-    "n_label_classes": 30,
-    "label_loss_weight": 1.0,
-
-    "use_label_encoder": true,
-    "label_moe_weight": 1.0,
-    "unlabeled_logvar": 20.0,
-    "label_encoder_warmup": 5,
-    "label_ignore_index": -1
-  }
-}
-```
-
-**Labels as categorical modalities (single or multiple heads):** add one or more categorical modalities in `"data.modalities"` and provide matching AnnData on disk (or build them in Python).
-
-```json5
-{
-  "model": { "loss_mode": "lite" },
-  "data": {
-    "modalities": [
-      { "name": "rna",      "likelihood": "nb",          "X_key": "X", "layer": "counts" },
-      { "name": "adt",      "likelihood": "nb",          "X_key": "X", "layer": "counts" },
-      { "name": "celltype", "likelihood": "categorical", "X_key": "X", "layer": null },
-      { "name": "patient",  "likelihood": "categorical", "X_key": "X", "layer": null }
-    ]
-  }
-}
-```
-
-### 1) Normalization / representation switch (counts vs continuous)
-
-**Important note on selectors:**
-
-* `layer` selects `.layers[layer]` (if `X_key == "X"`).
-* `X_key == "X"` selects `.X`/`.layers[layer]`; otherwise `X_key` selects `.obsm[X_key]`.
-
-Correct pattern:
-
-```json5
-{
-  "data": {
-    "modalities": [
-      {
-        "name": "rna",
-        "layer": "log1p",        // uses adata.layers["log1p"] (since X_key=="X")
-        "X_key": "X",
-        "assume_log1p": true,
-        "likelihood": "gaussian"
-      },
-      {
-        "name": "adt",
-        "layer": "counts",       // uses adata.layers["counts"] (since X_key=="X")
-        "X_key": "X",
-        "assume_log1p": false,
-        "likelihood": "zinb"
-      },
-      {
-        "name": "atac",
-        "layer": null,           // ignored because X_key != "X"
-        "X_key": "X_lsi",        // uses adata.obsm["X_lsi"]
-        "assume_log1p": false,
-        "likelihood": "gaussian"
-      }
-    ]
-  }
-}
-```
-
-* Use `.layers["counts"]` when you want NB/ZINB/Poisson decoders.
-* Use continuous `.X` or `.obsm["X_lsi"]` when you want Gaussian/MSE decoders.
-
-> Jupyter notebooks in this repository (UniVI/notebooks/) show recommended preprocessing per dataset for different data types and analyses. Depending on your research goals, you can use several different methods of preprocessing. The model is robust when it comes to learning underlying biology regardless of preprocessing; the key is that the decoder likelihood should roughly match the input distribution per-modality.
-
-### 2) Train (CLI)
-
-Example: **CITE-seq (RNA + ADT)**
-
-**UniVI v1**
-
-```bash
-python scripts/train_univi.py \
-  --config parameter_files/defaults_cite_seq_scaled_gaussian_v1.json \
-  --outdir saved_models/citeseq_v1_run1 \
-  --data-root /path/to/your/data
-```
-
-**UniVI-lite**
-
-```bash
-python scripts/train_univi.py \
-  --config parameter_files/defaults_cite_seq_scaled_gaussian_lite.json \
-  --outdir saved_models/citeseq_lite_run1 \
-  --data-root /path/to/your/data
-```
-
-Example: **Multiome (RNA + ATAC)**
-
-**UniVI v1**
-
-```bash
-python scripts/train_univi.py \
-  --config parameter_files/defaults_multiome_v1.json \
-  --outdir saved_models/multiome_v1_run1 \
-  --data-root /path/to/your/data
-```
-
-**UniVI-lite**
-
-```bash
-python scripts/train_univi.py \
-  --config parameter_files/defaults_multiome_lite.json \
-  --outdir saved_models/multiome_lite_run1 \
-  --data-root /path/to/your/data
-```
-
-Example: **TEA-seq (RNA + ADT + ATAC)**
-
-**UniVI v1**
-
-```bash
-python scripts/train_univi.py \
-  --config parameter_files/defaults_tea_seq_v1.json \
-  --outdir saved_models/teaseq_v1_run1 \
-  --data-root /path/to/your/data
-```
-
-**UniVI-lite**
-
-```bash
-python scripts/train_univi.py \
-  --config parameter_files/defaults_tea_seq_lite.json \
-  --outdir saved_models/teaseq_lite_run1 \
-  --data-root /path/to/your/data
-```
-
----
-
-## Quickstart: run UniVI from Python / Jupyter
-
-If you prefer to stay inside a notebook or a Python script instead of calling the CLI, you can build the configs, model, and trainer directly.
-
-Below is a minimal **CITE-seq (RNA + ADT)** example using paired AnnData objects.
-
-```python
-import numpy as np
-import scanpy as sc
-import torch
-
-from torch.utils.data import DataLoader, Subset
-
-from univi import (
-    UniVIMultiModalVAE,
-    ModalityConfig,
-    UniVIConfig,
-    TrainingConfig,
-)
-from univi.data import (
-    MultiModalDataset,
-    align_paired_obs_names,
-    collate_multimodal_xy,   # optional convenience collate for supervised batches
-)
-from univi.trainer import UniVITrainer
-from univi.utils.io import save_anndata_splits
-```
-
-### 1) Load preprocessed AnnData (paired cells)
-
-```python
-rna = sc.read_h5ad("path/to/rna_citeseq.h5ad")
-adt = sc.read_h5ad("path/to/adt_citeseq.h5ad")
-
-adata_dict = {"rna": rna, "adt": adt}
-adata_dict = align_paired_obs_names(adata_dict)  # ensures same obs_names/order
-```
-
-### 2) Build `MultiModalDataset` and DataLoaders (unsupervised)
-
-```python
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-dataset = MultiModalDataset(
-    adata_dict=adata_dict,
-    X_key="X",
-    device=None,  # "cpu" or "cuda"
-)
-
-n_cells = rna.n_obs
-idx = np.arange(n_cells)
-rng = np.random.default_rng(0)
-rng.shuffle(idx)
-
-split = int(0.8 * n_cells)
-train_idx, val_idx = idx[:split], idx[split:]
-
-train_ds = Subset(dataset, train_idx)
-val_ds   = Subset(dataset, val_idx)
-
-batch_size = 256
-
-train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
-val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
-```
-
-### 2b) (Optional) Supervised batches for Pattern A/B (`(x_dict, y)`)
-
-If you use the classification head and/or label expert injection, supply `y` as integer class indices and mask unlabeled with `-1`.
-
-```python
-y_codes = rna.obs["celltype"].astype("category").cat.codes.to_numpy()
-
-dataset_sup = MultiModalDataset(adata_dict=adata_dict, X_key="X", labels=y_codes)
-
-def collate_xy(batch):
-    xs, ys = zip(*batch)
-    x = {k: torch.stack([d[k] for d in xs], 0) for k in xs[0].keys()}
-    y = torch.as_tensor(ys, dtype=torch.long)
-    return x, y
-
-train_loader = DataLoader(dataset_sup, batch_size=batch_size, shuffle=True, collate_fn=collate_xy)
-
-# If you prefer using the package helper:
-# train_loader = DataLoader(dataset_sup, batch_size=batch_size, shuffle=True, collate_fn=collate_multimodal_xy)
-```
-
-### 2c) Persisting and reusing train/val/test splits (split_map.json)
-
-For reproducibility (and to ensure the exact same cell membership across modalities and reruns), UniVI can write:
-
-* `{prefix}_train.h5ad`, `{prefix}_val.h5ad`, `{prefix}_test.h5ad`
-* `{prefix}_split_map.json` containing split membership (stored using `obs_names`)
-
-**Save splits once (from any one modality, typically RNA):**
-
-```python
-test_idx = np.array([], dtype=int)  # optional; include if you have a test set
-
-save_anndata_splits(
-    rna,
-    outdir="splits/citeseq_demo",
-    prefix="citeseq_rna",
-    split_map={
-        "train": train_idx.tolist(),
-        "val":   val_idx.tolist(),
-        "test":  test_idx.tolist(),
-    },
-    save_split_map=True,
-)
-```
-
-**Later: load the split_map and apply to any paired modality using `obs_names`:**
-
-```python
-import json
-
-with open("splits/citeseq_demo/citeseq_rna_split_map.json") as f:
-    sm = json.load(f)
-
-train_names = sm["train"]
-val_names   = sm["val"]
-test_names  = sm.get("test", [])
-
-rna_train = rna[train_names].copy()
-adt_train = adt[train_names].copy()
-
-rna_val = rna[val_names].copy()
-adt_val = adt[val_names].copy()
-```
-
-**If you need integer indices for `torch.utils.data.Subset`:**
-
-```python
-obs = dataset.obs_names  # canonical ordering used by the dataset
-
-train_idx2 = obs.get_indexer(train_names)
-val_idx2   = obs.get_indexer(val_names)
-
-if (train_idx2 < 0).any() or (val_idx2 < 0).any():
-    raise ValueError("Some split_map obs_names are missing from the dataset.")
-
-train_ds = Subset(dataset, train_idx2)
-val_ds   = Subset(dataset, val_idx2)
-```
-
-This pattern lets you:
-
-* reproduce the same split exactly across runs,
-* apply the same split membership to other modalities (ADT/ATAC) or derived datasets,
-* and recover `Subset` indices deterministically.
-
-### 3) Define UniVI configs (v1 vs UniVI-lite)
-
-```python
-univi_cfg = UniVIConfig(
-    latent_dim=40,
-    beta=5.0,
-    gamma=40.0,
-    encoder_dropout=0.1,
-    decoder_dropout=0.0,
-    encoder_batchnorm=True,
-    decoder_batchnorm=False,
-    kl_anneal_start=0,
-    kl_anneal_end=25,
-    align_anneal_start=0,
-    align_anneal_end=25,
-    modalities=[
-        ModalityConfig("rna", rna.n_vars, [1024, 512], [512, 1024], likelihood="nb"),
-        ModalityConfig("adt", adt.n_vars, [256, 128],  [128, 256],  likelihood="nb"),
-    ],
-)
-
-train_cfg = TrainingConfig(
-    n_epochs=200,
-    batch_size=batch_size,
-    lr=1e-3,
-    weight_decay=1e-4,
-    device=device,
-    log_every=10,
-    grad_clip=5.0,
-    num_workers=0,
-    seed=42,
-    early_stopping=True,
-    patience=25,
-    min_delta=0.0,
-)
-```
 
 ### 4) Choose the objective + supervised option
 
