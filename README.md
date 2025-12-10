@@ -988,19 +988,172 @@ print("Embedding shape:", Z.shape)
 
 ---
 
-## Evaluating / encoding: choosing the latent representation
+## Evaluating / encoding: choosing the latent representation (and what you can do with it)
 
-Some utilities (e.g., `encode_adata`) support selecting what embedding to return:
+UniVI exposes a few “one-liner” helpers that make it easy to (i) pick *which* latent you want (per-modality vs fused), (ii) write embeddings back into AnnData, and (iii) run common evaluation metrics without re-plumbing your training code.
 
-* `"moe_mean"` / `"moe_sample"`: fused latent (MoE/PoE)
-* `"modality_mean"` / `"modality_sample"`: per-modality latent
+### 1) Picking the latent: modality-specific vs fused (MoE/PoE)
+
+Most workflows boil down to one choice:
+
+* **Per-modality latent** (`q(z | x_m)`): best when you want to inspect each modality’s view of the same cells, or compute cross-modality pairing/alignment metrics.
+* **Fused latent** (`q(z | x_1, x_2, …)`): best as your “final” integrated embedding for downstream UMAP, neighbors, clustering, label transfer, etc.
+
+`encode_adata` supports both, plus mean vs sampling:
+
+* `"modality_mean"` / `"modality_sample"`: per-modality posterior mean or samples
+* `"moe_mean"` / `"moe_sample"`: fused posterior mean or samples (MoE/PoE fusion in lite/v2; consistent fused behavior in current API)
 
 ```python
 from univi.evaluation import encode_adata
 
-Z_rna = encode_adata(model, rna, modality="rna", device=device, layer="counts", latent="modality_mean")
-Z_moe = encode_adata(model, rna, modality="rna", device=device, layer="counts", latent="moe_mean")
+# Per-modality latent (RNA-only view)
+Z_rna = encode_adata(
+    model, rna,
+    modality="rna",
+    device=device,
+    layer="counts",
+    latent="modality_mean",
+)
+
+# Fused latent (integrated embedding)
+Z_fused = encode_adata(
+    model, rna,               # any paired modality AnnData works here (obs_names define rows)
+    modality="rna",
+    device=device,
+    layer="counts",
+    latent="moe_mean",
+)
 ```
+
+Tip: prefer `*_mean` for plotting/UMAP (deterministic). Use `*_sample` when you explicitly want stochasticity (e.g., generative behavior, uncertainty-aware downstream work).
+
+---
+
+### 2) Writing embeddings back into AnnData (for Scanpy workflows)
+
+If you want clean Scanpy interoperability, write the embedding into `.obsm[...]` and proceed with neighbors/UMAP/leiden as usual.
+
+```python
+from univi import write_univi_latent
+
+# Writes fused mean embedding to each AnnData in the dict by default
+Z = write_univi_latent(
+    model,
+    adata_dict={"rna": rna, "adt": adt},
+    obsm_key="X_univi",
+    device=device,
+    use_mean=True,
+)
+print(Z.shape)  # (n_cells, latent_dim)
+```
+
+Then:
+
+```python
+import scanpy as sc
+
+sc.pp.neighbors(rna, use_rep="X_univi", n_neighbors=15)
+sc.tl.umap(rna)
+sc.tl.leiden(rna, resolution=0.6)
+```
+
+---
+
+### 3) Cross-modality alignment metrics (quick sanity checks)
+
+Once you have latents, the standard “is this actually aligned?” checks are:
+
+* **FOSCTTM**: how often non-matching cells are closer than the true match (lower is better).
+* **Modality mixing**: kNN neighborhood mixing across modalities (higher usually better).
+* **Label transfer**: kNN transfer accuracy across modalities (higher is better).
+
+A common pattern is: compute per-modality latents, then evaluate.
+
+```python
+import numpy as np
+from univi.evaluation import encode_adata, compute_foscttm, modality_mixing_score, label_transfer_knn
+
+Z_rna = encode_adata(model, rna, modality="rna", device=device, layer="counts", latent="modality_mean")
+Z_adt = encode_adata(model, adt, modality="adt", device=device, layer="counts", latent="modality_mean")
+
+foscttm = compute_foscttm(Z_rna, Z_adt, metric="euclidean")
+print("FOSCTTM (RNA vs ADT):", float(foscttm))
+
+mix_fused = modality_mixing_score(
+    Z=np.vstack([Z_rna, Z_adt]),
+    batch=np.array(["rna"] * Z_rna.shape[0] + ["adt"] * Z_adt.shape[0]),
+    k=20,
+)
+print("Mixing (k=20):", float(mix_fused))
+
+labels_rna = rna.obs["cell_type"].astype(str).to_numpy()
+labels_adt = adt.obs["cell_type"].astype(str).to_numpy()
+
+pred, acc, cm = label_transfer_knn(
+    Z_source=Z_rna, labels_source=labels_rna,
+    Z_target=Z_adt, labels_target=labels_adt,
+    k=15,
+)
+print("Label transfer acc (RNA→ADT):", float(acc))
+```
+
+(For multi-modal setups you can compute these pairwise across any modality pair.)
+
+---
+
+### 4) “Cool stuff”: multiple classification decoder heads (multi-task labels)
+
+If you enabled the newer multi-head classification support (e.g., `cell_type`, `donor`, `batch`, `mutation_status`, etc.), you can train and later query multiple label predictions from the same latent.
+
+Conceptually: UniVI learns `z`, then each head models `p(y_h | z)` with its own loss weight and masking.
+
+Example (illustrative) inference-time usage pattern:
+
+```python
+# Forward pass can return logits for each head when configured
+out = model(x_dict, y=y_dict, epoch=epoch)
+
+# Typical keys you may expose in your implementation:
+# out["label_logits"] = {"cell_type": ..., "donor": ..., ...}
+logits = out.get("label_logits", {})
+for head, L in logits.items():
+    yhat = L.argmax(-1).detach().cpu().numpy()
+    print(head, yhat[:10])
+```
+
+Practical uses:
+
+* Train a single latent that’s simultaneously predictive of **cell type** and robust to **batch/donor**
+* Add a head for a biological attribute (e.g., **mutation**, **tumor/normal**) while keeping integration objective intact
+* Compare separability in `z` with vs without each head (ablation-friendly)
+
+---
+
+### 5) Cross-modal prediction / reconstruction (imputation-style use)
+
+For paired multimodal data, UniVI can be used as a cross-modal predictor: encode with one modality, decode into another.
+
+At a high level:
+
+* Encode: `x_rna → z`
+* Decode: `z → \hat{x}_adt` (or `\hat{x}_atac`)
+
+Depending on your codepath, this may be exposed via model forward options or helper utilities. The nice workflow is:
+
+* generate predictions
+* aggregate by cell type
+* score feature-wise correlation / NLL
+
+This is how you get “RNA→ADT” or “ADT→RNA” performance summaries for marker recovery plots.
+
+---
+
+### 6) Recommended workflow cheat-sheet
+
+* Use **`moe_mean`** for your “final embedding” (`.obsm["X_univi"]`) and downstream clustering/UMAP.
+* Use **`modality_mean`** when computing *pairwise* alignment metrics or debugging a specific modality’s latent.
+* Use **sampling** (`*_sample`) only when you explicitly want stochastic behavior.
 
 ---
 
