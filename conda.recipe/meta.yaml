@@ -1,26 +1,27 @@
 {% set name = "univi" %}
-{% set version = "0.2.6" %}
+{% set version = "0.2.7" %}
 
 package:
   name: {{ name }}
   version: {{ version }}
 
 source:
-  # While still developing, build directly from GitHub repo:
-  git_url: https://github.com/Ashford-A/UniVI.git
-  git_rev: main
-
-  # AFTER publish to PyPI, can switch to the sdist instead:
-  # url: https://pypi.io/packages/source/u/{{ name }}/{{ name }}-{{ version }}.tar.gz
+  # Use the PyPI sdist for released versions
+  url: https://pypi.io/packages/source/u/{{ name }}/{{ name }}-{{ version }}.tar.gz
+  # optional but recommended once you look it up:
+  # sha256: 310ba41df051c1c1c7592114344279e284dce659fdfd8108d74bc320d1b9968
 
 build:
   noarch: python
-  script: {{ PYTHON }} -m pip install . --no-deps --ignore-installed -vv
+  # IMPORTANT: no-build-isolation so pip uses the conda host env (with setuptools/wheel)
+  script: {{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
 
 requirements:
   host:
     - python >=3.10
     - pip
+    - setuptools
+    - wheel
 
   run:
     - python >=3.10
@@ -62,9 +63,11 @@ test:
 about:
   home: https://github.com/Ashford-A/UniVI
   summary: "UniVI: a scalable multi-modal variational autoencoder toolkit for seamless integration and analysis of multimodal single-cell data."
-  license: BSD-3-Clause      # or whatever we decide for in LICENSE file
-  license_file: LICENSE
+  license: MIT
+  # LICENSE is at repo root (../ from conda.recipe/)
+  license_file: ../LICENSE
 
 extra:
   recipe-maintainers:
     - Ashford-A
+
