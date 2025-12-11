@@ -16,6 +16,23 @@ from .decoders import DecoderConfig, build_decoder
 YType = Union[torch.Tensor, Dict[str, torch.Tensor]]
 
 
+class _GradReverseFn(torch.autograd.Function):
+    """
+    Gradient reversal layer:
+      forward: identity
+      backward: -lambda * grad_output
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, lambd: float):
+        ctx.lambd = float(lambd)
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        return -ctx.lambd * grad_output, None
+
+
 class UniVIMultiModalVAE(nn.Module):
     """
     Multi-modal β-VAE with per-modality encoders and decoders.
@@ -27,6 +44,7 @@ class UniVIMultiModalVAE(nn.Module):
     Supervision:
       - Back-compat: single label_decoder head (p(y|z)) with optional label_encoder expert
       - NEW: multiple supervised heads via cfg.class_heads and y as dict[str -> labels]
+      - NEW: adversarial heads (e.g. tech/domain) via gradient reversal.
     """
 
     LOGVAR_MIN = -10.0
@@ -86,6 +104,7 @@ class UniVIMultiModalVAE(nn.Module):
                 dropout=float(cfg.encoder_dropout),
                 batchnorm=bool(cfg.encoder_batchnorm),
             )
+            # Slot for per-modality encoder heads, if you ever want them.
             self.encoder_heads[m.name] = nn.Identity()
 
             dec_hidden = list(m.decoder_hidden) if m.decoder_hidden else [max(64, self.latent_dim)]
@@ -97,7 +116,6 @@ class UniVIMultiModalVAE(nn.Module):
             )
 
             lk = (m.likelihood or "gaussian").lower().strip()
-
             decoder_kwargs: Dict[str, Any] = {}
             if lk in ("nb", "negative_binomial", "zinb", "zero_inflated_negative_binomial"):
                 dispersion = getattr(m, "dispersion", "gene")
@@ -159,10 +177,10 @@ class UniVIMultiModalVAE(nn.Module):
         else:
             self.label_encoder = None
 
-        # ---- NEW: multi-head supervised decoders ----
+        # ---- NEW: multi-head supervised decoders (incl. adversarial heads) ----
         self.class_heads = nn.ModuleDict()
         self.class_heads_cfg: Dict[str, Dict[str, Any]] = {}
-        self.head_label_names: Dict[str, List[str]] = {}          # optional
+        self.head_label_names: Dict[str, List[str]] = {}           # optional
         self.head_label_name_to_id: Dict[str, Dict[str, int]] = {}  # optional
 
         if cfg.class_heads:
@@ -186,6 +204,9 @@ class UniVIMultiModalVAE(nn.Module):
                     "ignore_index": int(h.ignore_index),
                     "from_mu": bool(h.from_mu),
                     "warmup": int(h.warmup),
+                    # NEW adversarial flags
+                    "adversarial": bool(getattr(h, "adversarial", False)),
+                    "adv_lambda": float(getattr(h, "adv_lambda", 1.0)),
                 }
 
     # ----------------------------- label name utilities -----------------------------
@@ -538,6 +559,10 @@ class UniVIMultiModalVAE(nn.Module):
             return v.long() if v is not None else None
         return y.long()
 
+    def _grad_reverse(self, x: torch.Tensor, lambd: float = 1.0) -> torch.Tensor:
+        """Apply gradient reversal (used for adversarial heads)."""
+        return _GradReverseFn.apply(x, float(lambd))
+
     def _apply_multihead_losses(
         self,
         *,
@@ -552,6 +577,8 @@ class UniVIMultiModalVAE(nn.Module):
         """
         Apply NEW multi-head supervised losses if y is a dict and cfg.class_heads was provided.
         Returns updated losses and (head_logits, head_loss_means).
+
+        Supports both standard supervised heads and adversarial (gradient-reversal) heads.
         """
         head_logits: Dict[str, torch.Tensor] = {}
         head_loss_means: Dict[str, torch.Tensor] = {}
@@ -573,6 +600,10 @@ class UniVIMultiModalVAE(nn.Module):
 
             y_h = y_h.long()
             z_in = mu_z if bool(cfg_h["from_mu"]) else z
+
+            # Adversarial / tech head: use gradient reversal on the encoder side.
+            if bool(cfg_h.get("adversarial", False)):
+                z_in = self._grad_reverse(z_in, cfg_h.get("adv_lambda", 1.0))
 
             dec_out = head(z_in)
             logits = dec_out["logits"] if isinstance(dec_out, dict) and "logits" in dec_out else dec_out
@@ -683,7 +714,7 @@ class UniVIMultiModalVAE(nn.Module):
                 loss_annealed = loss_annealed + self.label_loss_weight * class_loss
                 loss_fixed = loss_fixed + self.label_loss_weight * class_loss
 
-        # NEW multi-head supervised losses (dict y)
+        # NEW multi-head supervised losses (dict y, including adversarial heads)
         loss, loss_annealed, loss_fixed, head_logits, head_loss_means = self._apply_multihead_losses(
             mu_z=mu_z,
             z=z,
@@ -887,7 +918,7 @@ class UniVIMultiModalVAE(nn.Module):
                 loss_annealed = loss_annealed + self.label_loss_weight * class_loss
                 loss_fixed = loss_fixed + self.label_loss_weight * class_loss
 
-        # NEW multi-head supervised losses (dict y)
+        # NEW multi-head supervised losses (dict y, including adversarial heads)
         loss, loss_annealed, loss_fixed, head_logits, head_loss_means = self._apply_multihead_losses(
             mu_z=mu_moe,
             z=z_moe,
@@ -1013,12 +1044,14 @@ class UniVIMultiModalVAE(nn.Module):
         )
         out: Dict[str, torch.Tensor] = {}
 
+        # Legacy single head
         if self.label_decoder is not None:
             z_for_cls = mu_z if self.classify_from_mu else z
             dec_out = self.label_decoder(z_for_cls)
             logits = dec_out["logits"] if isinstance(dec_out, dict) and "logits" in dec_out else dec_out
             out[self.label_head_name] = logits if not return_probs else F.softmax(logits, dim=-1)
 
+        # Multi-head heads (including adversarial heads; no GRL at inference)
         for name, head in self.class_heads.items():
             cfg_h = self.class_heads_cfg[name]
             z_in = mu_z if bool(cfg_h["from_mu"]) else z
@@ -1057,7 +1090,10 @@ class UniVIMultiModalVAE(nn.Module):
         # string single
         if isinstance(y, str):
             if name_map is None:
-                raise ValueError("Got string label but no label_name_to_id mapping is set. Call model.set_label_names(...).")
+                raise ValueError(
+                    "Got string label but no label_name_to_id mapping is set. "
+                    "Call model.set_label_names(...)."
+                )
             if n is None:
                 raise ValueError("If y is a single string, you must pass n (number of samples).")
             key = y if y in name_map else " ".join(y.strip().lower().split())
@@ -1068,7 +1104,10 @@ class UniVIMultiModalVAE(nn.Module):
         # list of strings
         if isinstance(y, (list, tuple)) and len(y) > 0 and isinstance(y[0], str):
             if name_map is None:
-                raise ValueError("Got string labels but no label_name_to_id mapping is set. Call model.set_label_names(...).")
+                raise ValueError(
+                    "Got string labels but no label_name_to_id mapping is set. "
+                    "Call model.set_label_names(...)."
+                )
 
             def norm(s: str) -> str:
                 return " ".join(str(s).strip().lower().split())

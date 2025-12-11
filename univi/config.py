@@ -45,10 +45,12 @@ class ClassHeadConfig:
 
     Notes
     -----
-    - This is NOT a modality; it is a supervised head attached to the fused latent.
+    - This is NOT a modality; it is a supervised head attached to the latent.
     - Use ignore_index to mask unknown labels (e.g. -1).
     - from_mu=True means classify from mu_z (more stable), else from sampled z.
     - warmup: epoch before enabling this head's loss.
+    - adversarial=True turns this into a gradient-reversal domain/tech adversary.
+      In that case, adv_lambda scales the reversed gradient.
     """
     name: str
     n_classes: int
@@ -56,6 +58,10 @@ class ClassHeadConfig:
     ignore_index: int = -1
     from_mu: bool = True
     warmup: int = 0
+
+    # ---- NEW: adversarial / domain-confusion support ----
+    adversarial: bool = False
+    adv_lambda: float = 1.0
 
 
 @dataclass
@@ -120,6 +126,9 @@ class UniVIConfig:
                     raise ValueError(f"Class head {h.name!r}: loss_weight must be >= 0.")
                 if int(h.warmup) < 0:
                     raise ValueError(f"Class head {h.name!r}: warmup must be >= 0.")
+                # adversarial sanity
+                if float(getattr(h, "adv_lambda", 1.0)) < 0.0:
+                    raise ValueError(f"Class head {h.name!r}: adv_lambda must be >= 0.")
 
         # anneal sanity
         for k in ("kl_anneal_start", "kl_anneal_end", "align_anneal_start", "align_anneal_end"):
@@ -143,4 +152,5 @@ class TrainingConfig:
     early_stopping: bool = False
     patience: int = 20
     min_delta: float = 0.0
+
 
