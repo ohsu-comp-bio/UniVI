@@ -211,7 +211,7 @@ This makes the `univi` package importable in your scripts and notebooks while ke
 
 ### 3. (Optional) Install via conda / mamba
 
-If UniVI is available on a conda channel (e.g. `conda-forge` or a dedicated channel), you can install with:
+If UniVI is available on a conda channel (e.g. `conda-forge`), you can install with:
 
 ```bash
 # Using conda
@@ -219,6 +219,16 @@ conda install -c conda-forge univi
 
 # Using mamba
 mamba install -c conda-forge univi
+```
+
+UniVI is currently available on my custom conda channel and is installable with:
+
+```bash
+# Using conda
+conda install ashford-a::univi
+
+# Using mamba
+mamba install ashford-a::univi
 ```
 
 To create a fresh environment:
