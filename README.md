@@ -610,34 +610,34 @@ val_ds   = Subset(dataset, val_idx2)
 ```python
 univi_cfg = UniVIConfig(
     latent_dim=40,
-    beta=5.0,
-    gamma=40.0,
+    beta=1.5,
+    gamma=2.5,
     encoder_dropout=0.1,
     decoder_dropout=0.0,
     encoder_batchnorm=True,
     decoder_batchnorm=False,
     kl_anneal_start=0,
-    kl_anneal_end=25,
-    align_anneal_start=0,
-    align_anneal_end=25,
+    kl_anneal_end=50,
+    align_anneal_start=25,
+    align_anneal_end=75,
     modalities=[
-        ModalityConfig("rna", rna.n_vars, [1024, 512], [512, 1024], likelihood="nb"),
-        ModalityConfig("adt", adt.n_vars, [256, 128],  [128, 256],  likelihood="nb"),
+        ModalityConfig("rna", rna.n_vars, [512, 256, 128], [128, 256, 512], likelihood="nb"),
+        ModalityConfig("adt", adt.n_vars, [128, 64],  [64, 128],  likelihood="nb"),
     ],
 )
 
 train_cfg = TrainingConfig(
-    n_epochs=200,
+    n_epochs=1000,
     batch_size=batch_size,
     lr=1e-3,
     weight_decay=1e-4,
     device=device,
-    log_every=10,
+    log_every=20,
     grad_clip=5.0,
     num_workers=0,
     seed=42,
     early_stopping=True,
-    patience=25,
+    patience=50,
     min_delta=0.0,
 )
 ```
@@ -705,6 +705,8 @@ history = trainer.fit()
 * optimizer state
 * AMP scaler state (if enabled)
 * trainer state (history, best epoch, etc.)
+* train/val/test split indices used
+* features used
 * optional config / extra metadata
 
 When restoring, the loader checks key compatibility (e.g., label dimensions / head counts) to avoid silent mismatches.
@@ -801,11 +803,11 @@ adata_dict = {"rna": rna, "adt": adt, "celltype": celltype}
 
 univi_cfg = UniVIConfig(
     latent_dim=40,
-    beta=5.0,
-    gamma=40.0,
+    beta=1.5,
+    gamma=2.5,
     modalities=[
-        ModalityConfig("rna",      rna.n_vars, [1024, 512], [512, 1024], likelihood="nb"),
-        ModalityConfig("adt",      adt.n_vars, [256, 128],  [128, 256],  likelihood="nb"),
+        ModalityConfig("rna",      rna.n_vars, [512, 256, 128], [128, 256, 512], likelihood="nb"),
+        ModalityConfig("adt",      adt.n_vars, [128, 64],  [64, 128],  likelihood="nb"),
         ModalityConfig("celltype", C,          [128],       [128],       likelihood="categorical"),
     ],
 )
@@ -873,11 +875,11 @@ adata_dict = {
 
 univi_cfg = UniVIConfig(
     latent_dim=40,
-    beta=5.0,
-    gamma=40.0,
+    beta=1.5,
+    gamma=2.5,
     modalities=[
-        ModalityConfig("rna",      rna.n_vars, [1024, 512], [512, 1024], likelihood="nb"),
-        ModalityConfig("adt",      adt.n_vars, [256, 128],  [128, 256],  likelihood="nb"),
+        ModalityConfig("rna",      rna.n_vars, [512, 256, 128], [128, 256, 512], likelihood="nb"),
+        ModalityConfig("adt",      adt.n_vars, [128, 64],  [64, 128],  likelihood="nb"),
         ModalityConfig("celltype", C_celltype, [128],       [128],       likelihood="categorical"),
         ModalityConfig("patient",  C_patient,  [128],       [128],       likelihood="categorical"),
         ModalityConfig("TP53",     C_tp53,     [64],        [64],        likelihood="categorical"),
@@ -1150,19 +1152,19 @@ from univi.config import TransformerConfig, TokenizerConfig
 
 univi_cfg = UniVIConfig(
     latent_dim=40,
-    beta=5.0,
-    gamma=40.0,
+    beta=1.5,
+    gamma=2.5,
     modalities=[
         ModalityConfig(
             name="rna",
             input_dim=rna.n_vars,
-            encoder_hidden=[1024, 512],   # unused by transformer encoders, kept for compatibility
-            decoder_hidden=[512, 1024],
+            encoder_hidden=[512, 256, 128],   # unused by transformer encoders, kept for compatibility
+            decoder_hidden=[128, 256, 512],
             likelihood="nb",
             encoder_type="transformer",
             tokenizer=TokenizerConfig(
-                mode="topk_scalar",     # cheap attention path (F -> T)
-                n_tokens=256,           # number of tokens T
+                mode="topk_scalar",           # cheap attention path (F -> T)
+                n_tokens=256,                 # number of tokens T
                 add_cls_token=False,
             ),
             transformer=TransformerConfig(
@@ -1173,8 +1175,8 @@ univi_cfg = UniVIConfig(
                 dropout=0.1,
                 attn_dropout=0.1,
                 activation="gelu",
-                pooling="mean",         # "mean" or "cls"
-                max_tokens=None,        # optional; if None, UniVI sets it from the tokenizer
+                pooling="mean",               # "mean" or "cls"
+                max_tokens=None,              # optional; if None, UniVI sets it from the tokenizer
             ),
         ),
         ModalityConfig(
@@ -1183,7 +1185,7 @@ univi_cfg = UniVIConfig(
             encoder_hidden=[256, 128],
             decoder_hidden=[128, 256],
             likelihood="nb",
-            encoder_type="mlp",        # default
+            encoder_type="mlp",               # default
         ),
     ],
 )
