@@ -1189,9 +1189,9 @@ univi_cfg = UniVIConfig(
         ),
     ],
 )
-```
 
 # Everything else is the same: dataset -> dataloaders -> trainer -> fit()
+```
 
 ---
 
