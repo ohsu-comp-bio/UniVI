@@ -1123,19 +1123,26 @@ df_atac, best_result_atac, best_cfg_atac = run_atac_hparam_search(
 
 ---
 
-## Optional: using Transformer encoders (new)
+## Optional: Using Transformer encoders (advanced)
 
-Transformer encoders are **opt-in per modality**. If you do nothing, UniVI uses the classic **MLP encoders** and your existing workflow continues to work.
+By default, UniVI uses **MLP encoders** (`encoder_type="mlp"`). That means **all existing workflows continue to work unchanged**.
 
-### How to enable a transformer encoder for a modality
+If you want to experiment with the new Transformer-based modality encoders, you can switch a modality to:
 
-In your `ModalityConfig`, set:
+- `encoder_type="transformer"`
+- provide a `TokenizerConfig` (how `(B,F)` becomes `(B,T,D_in)`)
+- provide a `TransformerConfig` (attention depth/width, pooling, dropout, etc.)
 
-* `encoder_type="transformer"`
-* `transformer=TransformerConfig(...)`
-* `tokenizer=TokenizerConfig(...)`
+### Why use a transformer encoder?
 
-Minimal example: RNA uses a transformer, ADT stays as MLP.
+Transformer encoders can be useful when:
+- you want a more expressive encoder than an MLP,
+- you suspect feature interactions matter more than simple feed-forward mixing,
+- you can afford the compute cost (attention scales with token count).
+
+For **very large feature dimensions** (e.g., RNA genes), prefer tokenizers that reduce tokens (smaller `n_tokens`) rather than treating each feature as a token.
+
+### Example: Transformer encoder for RNA, MLP for ADT (CITE-seq)
 
 ```python
 from univi import UniVIConfig, ModalityConfig
@@ -1149,11 +1156,15 @@ univi_cfg = UniVIConfig(
         ModalityConfig(
             name="rna",
             input_dim=rna.n_vars,
-            encoder_hidden=[1024, 512],      # kept for backward compatibility (unused by transformer)
+            encoder_hidden=[1024, 512],   # unused by transformer encoders, kept for compatibility
             decoder_hidden=[512, 1024],
             likelihood="nb",
-
             encoder_type="transformer",
+            tokenizer=TokenizerConfig(
+                mode="topk_scalar",     # cheap attention path (F -> T)
+                n_tokens=256,           # number of tokens T
+                add_cls_token=False,
+            ),
             transformer=TransformerConfig(
                 d_model=256,
                 num_heads=8,
@@ -1162,13 +1173,8 @@ univi_cfg = UniVIConfig(
                 dropout=0.1,
                 attn_dropout=0.1,
                 activation="gelu",
-                pooling="mean",
-                max_tokens=None,  # if None, will be set based on tokenizer output length
-            ),
-            tokenizer=TokenizerConfig(
-                mode="topk_scalar",
-                n_tokens=256,
-                add_cls_token=False,
+                pooling="mean",         # "mean" or "cls"
+                max_tokens=None,        # optional; if None, UniVI sets it from the tokenizer
             ),
         ),
         ModalityConfig(
@@ -1177,18 +1183,12 @@ univi_cfg = UniVIConfig(
             encoder_hidden=[256, 128],
             decoder_hidden=[128, 256],
             likelihood="nb",
-            encoder_type="mlp",
+            encoder_type="mlp",        # default
         ),
     ],
 )
-```
 
-Practical notes:
-
-* Start with `mode="topk_scalar"` and `n_tokens=128–512`.
-* Keep `d_model` modest (e.g. 128–512) unless you have a lot of GPU headroom.
-* If you switch pooling to `"cls"`, set `add_cls_token=True` in the tokenizer config (if/when you implement CLS token insertion in your tokenizer path).
-* You can enable transformers independently per modality (you don’t need to convert everything at once).
+# Everything else is the same: dataset -> dataloaders -> trainer -> fit()
 
 ---
 
