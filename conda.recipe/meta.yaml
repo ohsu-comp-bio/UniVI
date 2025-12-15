@@ -1,5 +1,5 @@
 {% set name = "univi" %}
-{% set version = "0.2.9" %}
+{% set version = "0.3.0" %}
 
 package:
   name: {{ name }}
