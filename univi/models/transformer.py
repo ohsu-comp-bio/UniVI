@@ -32,6 +32,16 @@ def _act(name: str):
 
 
 class TransformerBlock(nn.Module):
+    """
+    Single pre-norm style block:
+      x -> MHA -> residual -> LN
+        -> FFN -> residual -> LN
+
+    If return_attn=True:
+      returns (x, attn_w) where attn_w is:
+        - (B, T, T) if attn_average_heads=True
+        - (B, H, T, T) if attn_average_heads=False
+    """
     def __init__(self, cfg: TransformerConfig):
         super().__init__()
         self.cfg = cfg
@@ -61,20 +71,29 @@ class TransformerBlock(nn.Module):
         *,
         key_padding_mask: Optional[torch.Tensor] = None,
         return_attn: bool = False,
+        attn_average_heads: bool = True,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        # x: (B,T,D)
+        # x: (B, T, D)
+        need_weights = bool(return_attn)
+
         attn_out, attn_w = self.attn(
             x, x, x,
-            key_padding_mask=key_padding_mask,
-            need_weights=bool(return_attn),
-            average_attn_weights=False,  # keep per-head weights when returning
+            key_padding_mask=key_padding_mask,        # (B, T) True = PAD
+            need_weights=need_weights,
+            average_attn_weights=bool(attn_average_heads),
         )
+        # Shapes:
+        #  - if need_weights=False: attn_w is None (ignored)
+        #  - if average_attn_weights=True:  attn_w is (B, T, T)
+        #  - if average_attn_weights=False: attn_w is (B, H, T, T)
+
         x = self.ln1(x + self.attn_drop(attn_out))
         ff_out = self.ff(x)
         x = self.ln2(x + self.ff_drop(ff_out))
 
         if return_attn:
-            # attn_w: (B, H, T, T)
+            if attn_w is None:
+                raise RuntimeError("Expected attn_w when return_attn=True, got None.")
             return x, attn_w
         return x
 
@@ -86,6 +105,9 @@ class TransformerEncoder(nn.Module):
 
     If return_attn=True:
       returns (pooled_out, [attn_layer0, attn_layer1, ...])
+    where each attn_layer is:
+      - (B, T, T) if attn_average_heads=True
+      - (B, H, T, T) if attn_average_heads=False
     """
     def __init__(
         self,
@@ -116,21 +138,24 @@ class TransformerEncoder(nn.Module):
                 raise ValueError("use_positional_encoding=True requires cfg.max_tokens to be set.")
             max_tokens = int(cfg.max_tokens)
             self.pos_emb = nn.Parameter(torch.zeros(1, max_tokens, d_model))
+            # A small init helps stabilize early training a bit
+            nn.init.normal_(self.pos_emb, mean=0.0, std=0.02)
 
     def _pool(
         self,
-        x: torch.Tensor,  # (B,T,D)
+        x: torch.Tensor,  # (B, T, D)
         *,
         key_padding_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         if self.pooling == "cls":
+            # assumes caller prepended CLS token at position 0
             return x[:, 0, :]
 
         # mean pooling (mask-aware)
         if key_padding_mask is None:
             return x.mean(dim=1)
 
-        keep = (~key_padding_mask).to(dtype=x.dtype)  # (B,T)
+        keep = (~key_padding_mask).to(dtype=x.dtype)  # (B, T)
         denom = keep.sum(dim=1, keepdim=True).clamp_min(1.0)
         return (x * keep.unsqueeze(-1)).sum(dim=1) / denom
 
@@ -140,8 +165,9 @@ class TransformerEncoder(nn.Module):
         *,
         key_padding_mask: Optional[torch.Tensor] = None,
         return_attn: bool = False,
+        attn_average_heads: bool = True,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
-        # tokens: (B,T,D_in)
+        # tokens: (B, T, D_in)
         x = self.input_proj(tokens)
 
         if self.use_positional_encoding:
@@ -156,10 +182,20 @@ class TransformerEncoder(nn.Module):
         attn_all: List[torch.Tensor] = []
         for blk in self.blocks:
             if return_attn:
-                x, aw = blk(x, key_padding_mask=key_padding_mask, return_attn=True)
+                x, aw = blk(
+                    x,
+                    key_padding_mask=key_padding_mask,
+                    return_attn=True,
+                    attn_average_heads=attn_average_heads,
+                )
                 attn_all.append(aw)
             else:
-                x = blk(x, key_padding_mask=key_padding_mask, return_attn=False)
+                x = blk(
+                    x,
+                    key_padding_mask=key_padding_mask,
+                    return_attn=False,
+                    attn_average_heads=attn_average_heads,  # ignored when return_attn=False
+                )
 
         pooled = self._pool(x, key_padding_mask=key_padding_mask)
         out = self.out_proj(pooled)

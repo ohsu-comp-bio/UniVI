@@ -269,10 +269,39 @@ class TransformerGaussianEncoder(GaussianEncoder):
             use_positional_encoding=bool(use_positional_encoding),
         )
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        tokens, key_padding_mask = self.vec2tok(x)
-        h = self.encoder(tokens, key_padding_mask=key_padding_mask)
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        return_attn: bool = False,
+        attn_average_heads: bool = True,
+        return_token_meta: bool = False,
+    ):
+        if return_token_meta:
+            tokens, key_padding_mask, meta = self.vec2tok(x, return_indices=True)
+        else:
+            tokens, key_padding_mask = self.vec2tok(x, return_indices=False)
+            meta = None
+
+        if return_attn:
+            h, attn_all = self.encoder(
+                tokens,
+                key_padding_mask=key_padding_mask,
+                return_attn=True,
+                attn_average_heads=attn_average_heads,
+            )
+        else:
+            h = self.encoder(tokens, key_padding_mask=key_padding_mask, return_attn=False)
+            attn_all = None
+
         mu, logvar = torch.chunk(h, 2, dim=-1)
+
+        if return_attn and return_token_meta:
+            return mu, logvar, attn_all, meta
+        if return_attn:
+            return mu, logvar, attn_all
+        if return_token_meta:
+            return mu, logvar, meta
         return mu, logvar
 
 
@@ -351,14 +380,18 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
         x_dict: Dict[str, torch.Tensor],
         *,
         return_token_meta: bool = False,
-    ) -> Union[
-        Tuple[torch.Tensor, torch.Tensor],
-        Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]],
-    ]:
+        return_attn: bool = False,
+        attn_average_heads: bool = True,
+    ):
         tokens_list: List[torch.Tensor] = []
         masks_list: List[Optional[torch.Tensor]] = []
 
-        meta: Dict[str, Any] = {"modalities": self.modalities, "slices": {}}
+        meta: Dict[str, Any] = {
+            "modalities": self.modalities,
+            "slices": {},              # modality -> (start, end) in CONCAT TOKEN SPACE (excluding global CLS)
+            "has_global_cls": bool(self.use_global_cls),
+            "cls_index": 0 if self.use_global_cls else None,
+        }
         t_cursor = 0
 
         for m in self.modalities:
@@ -387,7 +420,7 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
         if any(m is not None for m in masks_list):
             B = tokens.shape[0]
             built: List[torch.Tensor] = []
-            for i in range(len(self.modalities)):
+            for i, mname in enumerate(self.modalities):
                 mask = masks_list[i]
                 if mask is None:
                     Tm = tokens_list[i].shape[1]
@@ -396,17 +429,39 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
                     built.append(mask.to(dtype=torch.bool))
             key_padding_mask = torch.cat(built, dim=1)
 
+        # Prepend ONE global CLS if pooling="cls"
         if self.use_global_cls:
             assert self.cls_token is not None
-            cls = self.cls_token.expand(tokens.shape[0], -1, -1)
+            cls = self.cls_token.expand(tokens.shape[0], -1, -1)  # (B,1,D)
             tokens = torch.cat([cls, tokens], dim=1)
+
+            # shift slice indices by +1 since we inserted CLS at position 0
+            meta["slices_with_cls"] = {k: (a + 1, b + 1) for k, (a, b) in meta["slices"].items()}
+
             if key_padding_mask is not None:
                 cls_mask = torch.zeros((tokens.shape[0], 1), device=tokens.device, dtype=torch.bool)
                 key_padding_mask = torch.cat([cls_mask, key_padding_mask], dim=1)
+        else:
+            meta["slices_with_cls"] = dict(meta["slices"])
 
-        h = self.encoder(tokens, key_padding_mask=key_padding_mask)
+        # Run transformer (+ optional attn collection)
+        if return_attn:
+            h, attn_all = self.encoder(
+                tokens,
+                key_padding_mask=key_padding_mask,
+                return_attn=True,
+                attn_average_heads=attn_average_heads,
+            )
+        else:
+            h = self.encoder(tokens, key_padding_mask=key_padding_mask, return_attn=False)
+            attn_all = None
+
         mu, logvar = torch.chunk(h, 2, dim=-1)
 
+        if return_attn and return_token_meta:
+            return mu, logvar, attn_all, meta
+        if return_attn:
+            return mu, logvar, attn_all
         if return_token_meta:
             return mu, logvar, meta
         return mu, logvar
