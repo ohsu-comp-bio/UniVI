@@ -108,6 +108,7 @@ UniVI/
     │   ├── encoders.py                    # Modality encoders
     │   ├── decoders.py                    # Likelihood-specific decoders (NB, ZINB, Gaussian, etc.)
     │   ├── transformer.py                 # Transformer blocks + encoder
+    │   ├── tokenizer.py                   # Handles token i/o for transformer blocks
     │   └── univi.py                       # Core UniVI multi-modal VAE
     ├── hyperparam_optimization/           # Hyperparameter search scripts
     │   ├── __init__.py
@@ -336,6 +337,80 @@ trainer = UniVITrainer(
 
 history = trainer.fit()
 ```
+
+---
+
+## Optional classification head addition
+
+UniVI can be used purely unsupervised **or** you can attach lightweight supervised heads for tasks like:
+
+* harmonized cell type annotation (bridge → unimodal projection labels)
+* patient / batch prediction (sanity checks, domain effects)
+* binary mutation flags, response labels, etc.
+
+Two common patterns are below.
+
+### A) Train a simple classifier *on top of frozen UniVI latents* (easy + robust)
+
+This is the “least magic” option: train UniVI unsupervised as usual, then train a classifier on the latent means.
+
+```python
+import numpy as np
+import torch
+from sklearn.linear_model import LogisticRegression
+
+# Example: labels live in RNA AnnData
+# (since modalities are aligned, RNA labels index the same cells as ADT/ATAC)
+y_cat = rna.obs["celltype"].astype("category")
+y = y_cat.cat.codes.to_numpy()  # (n,)
+
+# Encode latents for ALL cells (use your favorite split logic)
+model.eval()
+Z_all = []
+
+with torch.no_grad():
+    for batch in DataLoader(dataset, batch_size=512, shuffle=False):
+        x_dict = {k: v.to(device) for k, v in batch.items()}
+        mu_z, logvar_z, z = model.encode_fused(x_dict, use_mean=True)
+        Z_all.append(mu_z.detach().cpu().numpy())
+
+Z_all = np.concatenate(Z_all, axis=0)  # (n, latent_dim)
+
+# Fit classifier on train split (example)
+clf = LogisticRegression(max_iter=2000, n_jobs=1)
+clf.fit(Z_all[train_idx], y[train_idx])
+
+# Predict on val/test
+yhat = clf.predict(Z_all[val_idx])
+```
+
+Notes:
+
+* This gives you a clean “latent classifier” that is easy to audit and compare across models.
+* For coarse labels, logistic regression is often surprisingly strong; for many classes you can swap in a linear SVM or a small MLP.
+
+### B) Use UniVI’s built-in heads (single head or multi-head)
+
+If you enabled classification heads, inference is typically one call:
+
+```python
+model.eval()
+batch = next(iter(val_loader))
+x_dict = {k: v.to(device) for k, v in batch.items()}
+
+with torch.no_grad():
+    probs = model.predict_heads(x_dict, return_probs=True)
+
+# probs is a dict: {head_name: (B, n_classes)}
+for head_name, P in probs.items():
+    print(head_name, P.shape)
+```
+
+Notes:
+
+* For the legacy single-head path, the key is `model.label_head_name` (default `"label"`).
+* For multi-head configs, keys are head names (e.g. `"celltype"`, `"patient"`, `"mutation_TP53"`).
+* During supervised training you’ll supply integer targets `y` (class indices) alongside `x_dict` and weight the head loss relative to the VAE losses.
 
 ---
 
@@ -603,12 +678,19 @@ See `univi/hyperparam_optimization/` and `notebooks/` for examples.
 
 ---
 
-## Contributing
+## Contact, questions, and bug reports
 
-PRs/issues are welcome. If you’re adding new modalities/likelihoods/tokenizers, please include:
+* **Questions / comments:** open a GitHub **Discussion** (if enabled) or a GitHub **Issue** with the `question` label.
+* **Bug reports:** open a GitHub **Issue** and include:
 
-* a minimal example / notebook
-* a small test or sanity check script
-* documentation updates (README + config fields)
+  * your UniVI version (`python -c "import univi; print(univi.__version__)"`)
+  * minimal code to reproduce (or a short notebook snippet)
+  * stack trace + OS/CUDA/PyTorch versions
+* **Feature requests:** open an Issue describing the use-case + expected inputs/outputs (a tiny example is ideal).
+* **PRs are welcome:** if you’re adding new modalities/likelihoods/tokenizers, please include:
+
+  * a minimal example / notebook
+  * a small test or sanity check script
+  * documentation updates (README + any config fields)
 
 ---
