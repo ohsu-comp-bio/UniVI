@@ -2,19 +2,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple, Union, Any
 
 import torch
 from torch import nn
 import torch.nn.functional as F
 
-from ..config import UniVIConfig, ModalityConfig, TokenizerConfig, TransformerConfig
+from ..config import UniVIConfig, ModalityConfig, TokenizerConfig, TransformerConfig as CFGTransformerConfig
 from .mlp import build_mlp
-from .transformer import TransformerEncoder
+from .transformer import TransformerEncoder, TransformerConfig as ModelTransformerConfig
 
 
 # =============================================================================
-# Classic MLP Gaussian encoder
+# Small config helper
 # =============================================================================
 
 @dataclass
@@ -25,6 +25,10 @@ class EncoderConfig:
     dropout: float = 0.1
     batchnorm: bool = True
 
+
+# =============================================================================
+# Base encoders
+# =============================================================================
 
 class GaussianEncoder(nn.Module):
     """Base: x -> (mu, logvar) for a diagonal Gaussian."""
@@ -52,12 +56,12 @@ class MLPGaussianEncoder(GaussianEncoder):
 
 
 # =============================================================================
-# Vector -> tokens (TokenizerConfig)
+# Tokenization: vector -> tokens
 # =============================================================================
 
 class _VectorToTokens(nn.Module):
     """
-    Turn a dense vector x (B, F) into tokens (B, T, D_in) + optional key_padding_mask.
+    Turn a vector x (B, F) into tokens (B, T, D_in) and optional key_padding_mask.
 
     TokenizerConfig modes
     ---------------------
@@ -67,50 +71,42 @@ class _VectorToTokens(nn.Module):
         Select top-k features per cell, output tokens (B, K, C) where C=len(channels)
         channels in {"value","rank","dropout"}:
           * value: raw x at selected indices
-          * rank:  rank01 among selected K tokens (0..1), per cell
+          * rank: rank01 among selected K tokens (0..1), per cell
           * dropout: indicator (value==0)
     - patch:
         Split contiguous features into patches of size P:
           tokens (B, T, P) or (B, T, patch_proj_dim) if patch_proj_dim is set
 
     add_cls_token:
-        If True, prepend a learned CLS token embedding:
-          tokens -> (B, T+1, D_in); mask -> prepend False (not masked)
+        If True, prepend a learned CLS token embedding to tokens.
 
     Notes
     -----
-    - Assumes dense float input (B,F). If your modality data is sparse, densify upstream.
+    - Expects dense float input (B,F). If modality data is sparse, densify upstream.
     """
     def __init__(self, *, input_dim: int, tok: TokenizerConfig):
         super().__init__()
         self.input_dim = int(input_dim)
         self.tok = tok
 
-        mode = str(tok.mode or "topk_scalar").lower().strip()
+        mode = str(tok.mode).lower().strip()
         if mode not in ("topk_scalar", "topk_channels", "patch"):
             raise ValueError(f"Unknown tokenizer mode {tok.mode!r}")
+
         self.mode = mode
+        self.add_cls_token = bool(tok.add_cls_token)
 
-        self.add_cls_token = bool(getattr(tok, "add_cls_token", False))
-
-        # Determine token count and token embedding dimension (d_in)
-        self.patch_proj: Optional[nn.Module] = None
-        self.patch_size: Optional[int] = None
-
+        # d_in per mode
         if self.mode == "topk_scalar":
             self.n_tokens = int(tok.n_tokens)
-            if self.n_tokens <= 0:
-                raise ValueError("tokenizer.n_tokens must be > 0 for topk_scalar")
-            self.channels: Sequence[str] = ("value",)
             self.d_in = 1
+            self.channels: Sequence[str] = ("value",)
 
         elif self.mode == "topk_channels":
             self.n_tokens = int(tok.n_tokens)
-            if self.n_tokens <= 0:
-                raise ValueError("tokenizer.n_tokens must be > 0 for topk_channels")
-            ch = list(getattr(tok, "channels", []) or [])
+            ch = list(tok.channels)
             if not ch:
-                raise ValueError("topk_channels requires tokenizer.channels to be non-empty")
+                raise ValueError("topk_channels requires tokenizer.channels non-empty")
             bad = [c for c in ch if c not in ("value", "rank", "dropout")]
             if bad:
                 raise ValueError(f"topk_channels invalid channels: {bad}")
@@ -118,17 +114,17 @@ class _VectorToTokens(nn.Module):
             self.d_in = len(self.channels)
 
         else:  # patch
-            P = int(getattr(tok, "patch_size", 0) or 0)
+            P = int(tok.patch_size)
             if P <= 0:
-                raise ValueError("patch_size must be > 0 for patch mode")
+                raise ValueError("patch_size must be > 0")
             self.patch_size = P
 
-            # number of patches (ceil)
             T = (self.input_dim + P - 1) // P
             self.n_tokens = int(T)
 
-            proj_dim = getattr(tok, "patch_proj_dim", None)
+            proj_dim = tok.patch_proj_dim
             if proj_dim is None:
+                self.patch_proj = None
                 self.d_in = P
             else:
                 proj_dim = int(proj_dim)
@@ -137,12 +133,19 @@ class _VectorToTokens(nn.Module):
                 self.patch_proj = nn.Linear(P, proj_dim)
                 self.d_in = proj_dim
 
-        # CLS token (learned) in token-embedding space
         self.cls_token: Optional[nn.Parameter] = None
         if self.add_cls_token:
             self.cls_token = nn.Parameter(torch.zeros(1, 1, self.d_in))
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        return_indices: bool = False,
+    ) -> Union[
+        Tuple[torch.Tensor, Optional[torch.Tensor]],
+        Tuple[torch.Tensor, Optional[torch.Tensor], Dict[str, Any]],
+    ]:
         if x.dim() != 2:
             raise ValueError(f"_VectorToTokens expects x as (B,F); got shape {tuple(x.shape)}")
         B, Fdim = x.shape
@@ -150,17 +153,20 @@ class _VectorToTokens(nn.Module):
             raise ValueError(f"Expected input_dim={self.input_dim}, got F={Fdim}")
 
         key_padding_mask: Optional[torch.Tensor] = None
+        meta: Dict[str, Any] = {}
 
         if self.mode == "topk_scalar":
             K = min(int(self.n_tokens), Fdim)
-            vals, _idx = torch.topk(x, k=K, dim=1, largest=True, sorted=False)  # (B,K)
+            vals, idx = torch.topk(x, k=K, dim=1, largest=True, sorted=False)  # (B,K)
             tokens = vals.unsqueeze(-1)  # (B,K,1)
             key_padding_mask = None
+            if return_indices:
+                meta["topk_idx"] = idx  # (B,K)
 
         elif self.mode == "topk_channels":
             K = min(int(self.n_tokens), Fdim)
-            vals, _idx = torch.topk(x, k=K, dim=1, largest=True, sorted=True)  # sorted for stable rank
-            feats: List[torch.Tensor] = []
+            vals, idx = torch.topk(x, k=K, dim=1, largest=True, sorted=True)  # (B,K)
+            feats = []
             for c in self.channels:
                 if c == "value":
                     feats.append(vals)
@@ -177,13 +183,12 @@ class _VectorToTokens(nn.Module):
                     raise RuntimeError(f"Unhandled channel: {c!r}")
             tokens = torch.stack(feats, dim=-1)  # (B,K,C)
             key_padding_mask = None
+            if return_indices:
+                meta["topk_idx"] = idx  # (B,K)
 
         else:  # patch
-            assert self.patch_size is not None
             P = int(self.patch_size)
             T = int(self.n_tokens)
-
-            # pad to T*P then reshape
             pad = T * P - Fdim
             if pad > 0:
                 x_pad = F.pad(x, (0, pad), mode="constant", value=0.0)  # (B, T*P)
@@ -191,30 +196,52 @@ class _VectorToTokens(nn.Module):
                 x_pad = x
             patches = x_pad.view(B, T, P)  # (B,T,P)
 
-            if self.patch_proj is not None:
-                tokens = self.patch_proj(patches)  # (B,T,D_in)
+            tokens = self.patch_proj(patches) if self.patch_proj is not None else patches
+
+            if pad > 0:
+                real_counts = torch.full((T,), P, device=x.device, dtype=torch.int64)
+                last_real = Fdim - (T - 1) * P
+                if last_real < P:
+                    real_counts[-1] = max(int(last_real), 0)
+                key_padding_mask = (real_counts == 0).unsqueeze(0).expand(B, T)
             else:
-                tokens = patches  # (B,T,P)
+                key_padding_mask = None
 
-            # With this implementation, we always have at least one real feature per patch
-            # as long as input_dim>0, so we keep mask None.
-            key_padding_mask = None
+            if return_indices:
+                meta["patch_size"] = P
+                meta["n_patches"] = T
+                meta["pad"] = pad
 
-        # prepend CLS token if requested
         if self.add_cls_token:
             assert self.cls_token is not None
-            cls = self.cls_token.expand(B, -1, -1)  # (B,1,D_in)
-            tokens = torch.cat([cls, tokens], dim=1)  # (B,1+T,D_in)
+            cls = self.cls_token.expand(B, -1, -1)  # (B,1,D)
+            tokens = torch.cat([cls, tokens], dim=1)
             if key_padding_mask is not None:
                 cls_mask = torch.zeros((B, 1), device=x.device, dtype=torch.bool)
                 key_padding_mask = torch.cat([cls_mask, key_padding_mask], dim=1)
 
+        if return_indices:
+            return tokens, key_padding_mask, meta
         return tokens, key_padding_mask
 
 
 # =============================================================================
-# Transformer Gaussian encoder: vector -> tokens -> transformer -> (mu, logvar)
+# Per-modality transformer Gaussian encoder
 # =============================================================================
+
+def _cfg_to_model_tcfg(cfg: CFGTransformerConfig) -> ModelTransformerConfig:
+    return ModelTransformerConfig(
+        d_model=int(cfg.d_model),
+        num_heads=int(cfg.num_heads),
+        num_layers=int(cfg.num_layers),
+        dim_feedforward=int(cfg.dim_feedforward),
+        dropout=float(cfg.dropout),
+        attn_dropout=float(cfg.attn_dropout),
+        activation=str(cfg.activation),
+        pooling=str(cfg.pooling),
+        max_tokens=None if cfg.max_tokens is None else int(cfg.max_tokens),
+    )
+
 
 class TransformerGaussianEncoder(GaussianEncoder):
     """
@@ -226,16 +253,14 @@ class TransformerGaussianEncoder(GaussianEncoder):
         input_dim: int,
         latent_dim: int,
         tokenizer: _VectorToTokens,
-        tcfg: TransformerConfig,
+        tcfg: ModelTransformerConfig,
         use_positional_encoding: bool = True,
     ):
         super().__init__()
         self.vec2tok = tokenizer
-        self.latent_dim = int(latent_dim)
 
-        # Learned pos-emb needs a max token length. Be careful: CLS increases token count by 1.
         if use_positional_encoding and tcfg.max_tokens is None:
-            tcfg.max_tokens = int(self.vec2tok.n_tokens) + (1 if self.vec2tok.add_cls_token else 0)
+            tcfg.max_tokens = int(self.vec2tok.n_tokens + (1 if self.vec2tok.add_cls_token else 0))
 
         self.encoder = TransformerEncoder(
             cfg=tcfg,
@@ -245,25 +270,159 @@ class TransformerGaussianEncoder(GaussianEncoder):
         )
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        tokens, key_padding_mask = self.vec2tok(x)  # (B,T,D_in), (B,T) or None
-        h = self.encoder(tokens, key_padding_mask=key_padding_mask)  # (B,2*latent_dim)
+        tokens, key_padding_mask = self.vec2tok(x)
+        h = self.encoder(tokens, key_padding_mask=key_padding_mask)
         mu, logvar = torch.chunk(h, 2, dim=-1)
         return mu, logvar
 
 
 # =============================================================================
-# Factory
+# NEW: Multimodal concatenated-token transformer Gaussian encoder (fused)
+# =============================================================================
+
+class MultiModalTransformerGaussianEncoder(nn.Module):
+    """
+    Fused encoder over multiple modalities by concatenating tokens.
+
+    Produces ONE fused posterior q(z | x_all). It does not replace per-modality q(z|x_m).
+    """
+    def __init__(
+        self,
+        *,
+        modalities: Sequence[str],
+        input_dims: Dict[str, int],
+        tokenizers: Dict[str, TokenizerConfig],
+        transformer_cfg: CFGTransformerConfig,
+        latent_dim: int,
+        add_modality_embeddings: bool = True,
+        use_positional_encoding: bool = True,
+    ):
+        super().__init__()
+
+        self.modalities = list(modalities)
+        self.latent_dim = int(latent_dim)
+
+        tcfg_model = _cfg_to_model_tcfg(transformer_cfg)
+        d_model = int(tcfg_model.d_model)
+
+        self.vec2tok = nn.ModuleDict()
+        self.proj = nn.ModuleDict()
+        self.mod_emb = nn.ParameterDict() if add_modality_embeddings else None
+
+        total_tokens = 0
+        for m in self.modalities:
+            tok_cfg_in = tokenizers[m]
+
+            # force per-modality CLS off; use only one global CLS if pooling="cls"
+            tok_cfg = TokenizerConfig(
+                mode=tok_cfg_in.mode,
+                n_tokens=int(tok_cfg_in.n_tokens),
+                channels=tuple(tok_cfg_in.channels),
+                patch_size=int(tok_cfg_in.patch_size),
+                patch_proj_dim=None if tok_cfg_in.patch_proj_dim is None else int(tok_cfg_in.patch_proj_dim),
+                add_cls_token=False,
+            )
+
+            tok = _VectorToTokens(input_dim=int(input_dims[m]), tok=tok_cfg)
+            self.vec2tok[m] = tok
+            self.proj[m] = nn.Linear(int(tok.d_in), d_model, bias=True)
+
+            if self.mod_emb is not None:
+                self.mod_emb[m] = nn.Parameter(torch.zeros(1, 1, d_model))
+
+            total_tokens += int(tok.n_tokens)
+
+        self.pooling = str(tcfg_model.pooling).lower().strip()
+        self.use_global_cls = (self.pooling == "cls")
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model)) if self.use_global_cls else None
+
+        if use_positional_encoding and tcfg_model.max_tokens is None:
+            tcfg_model.max_tokens = int(total_tokens + (1 if self.use_global_cls else 0))
+
+        self.encoder = TransformerEncoder(
+            cfg=tcfg_model,
+            d_in=d_model,
+            d_out=2 * int(latent_dim),
+            use_positional_encoding=bool(use_positional_encoding),
+        )
+
+    def forward(
+        self,
+        x_dict: Dict[str, torch.Tensor],
+        *,
+        return_token_meta: bool = False,
+    ) -> Union[
+        Tuple[torch.Tensor, torch.Tensor],
+        Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]],
+    ]:
+        tokens_list: List[torch.Tensor] = []
+        masks_list: List[Optional[torch.Tensor]] = []
+
+        meta: Dict[str, Any] = {"modalities": self.modalities, "slices": {}}
+        t_cursor = 0
+
+        for m in self.modalities:
+            x = x_dict[m]
+
+            if return_token_meta:
+                tok, mask, mmeta = self.vec2tok[m](x, return_indices=True)
+                meta[m] = mmeta
+            else:
+                tok, mask = self.vec2tok[m](x, return_indices=False)
+
+            tok = self.proj[m](tok)  # (B,T,d_model)
+            if self.mod_emb is not None:
+                tok = tok + self.mod_emb[m]
+
+            Tm = tok.shape[1]
+            meta["slices"][m] = (t_cursor, t_cursor + Tm)
+            t_cursor += Tm
+
+            tokens_list.append(tok)
+            masks_list.append(mask)
+
+        tokens = torch.cat(tokens_list, dim=1)  # (B, T_total, d_model)
+
+        key_padding_mask: Optional[torch.Tensor] = None
+        if any(m is not None for m in masks_list):
+            B = tokens.shape[0]
+            built: List[torch.Tensor] = []
+            for i in range(len(self.modalities)):
+                mask = masks_list[i]
+                if mask is None:
+                    Tm = tokens_list[i].shape[1]
+                    built.append(torch.zeros((B, Tm), device=tokens.device, dtype=torch.bool))
+                else:
+                    built.append(mask.to(dtype=torch.bool))
+            key_padding_mask = torch.cat(built, dim=1)
+
+        if self.use_global_cls:
+            assert self.cls_token is not None
+            cls = self.cls_token.expand(tokens.shape[0], -1, -1)
+            tokens = torch.cat([cls, tokens], dim=1)
+            if key_padding_mask is not None:
+                cls_mask = torch.zeros((tokens.shape[0], 1), device=tokens.device, dtype=torch.bool)
+                key_padding_mask = torch.cat([cls_mask, key_padding_mask], dim=1)
+
+        h = self.encoder(tokens, key_padding_mask=key_padding_mask)
+        mu, logvar = torch.chunk(h, 2, dim=-1)
+
+        if return_token_meta:
+            return mu, logvar, meta
+        return mu, logvar
+
+
+# =============================================================================
+# Factories
 # =============================================================================
 
 def build_gaussian_encoder(*, uni_cfg: UniVIConfig, mod_cfg: ModalityConfig) -> GaussianEncoder:
     """
     Factory for per-modality Gaussian encoders.
 
-    Config contract:
-      - mod_cfg.encoder_type in {"mlp","transformer"} (default "mlp")
-      - if transformer:
-          mod_cfg.transformer: TransformerConfig
-          mod_cfg.tokenizer:   TokenizerConfig
+    Supported mod_cfg.encoder_type:
+      - "mlp" (default)
+      - "transformer"
     """
     kind = (mod_cfg.encoder_type or "mlp").lower().strip()
 
@@ -280,22 +439,18 @@ def build_gaussian_encoder(*, uni_cfg: UniVIConfig, mod_cfg: ModalityConfig) -> 
 
     if kind == "transformer":
         if mod_cfg.transformer is None:
-            raise ValueError(
-                f"Modality {mod_cfg.name!r}: encoder_type='transformer' requires mod_cfg.transformer."
-            )
+            raise ValueError(f"Modality {mod_cfg.name!r}: encoder_type='transformer' requires mod_cfg.transformer.")
         if mod_cfg.tokenizer is None:
-            raise ValueError(
-                f"Modality {mod_cfg.name!r}: encoder_type='transformer' requires mod_cfg.tokenizer."
-            )
+            raise ValueError(f"Modality {mod_cfg.name!r}: encoder_type='transformer' requires mod_cfg.tokenizer.")
 
-        tok_cfg = mod_cfg.tokenizer
-        tcfg = mod_cfg.transformer
+        tokenizer = _VectorToTokens(
+            input_dim=int(mod_cfg.input_dim),
+            tok=mod_cfg.tokenizer,  # ✅ signature is tok=TokenizerConfig
+        )
 
-        tokenizer = _VectorToTokens(input_dim=int(mod_cfg.input_dim), tok=tok_cfg)
-
-        # If using learned pos-emb, align max_tokens to actual produced token length.
+        tcfg = _cfg_to_model_tcfg(mod_cfg.transformer)
         if tcfg.max_tokens is None:
-            tcfg.max_tokens = int(tokenizer.n_tokens) + (1 if tokenizer.add_cls_token else 0)
+            tcfg.max_tokens = int(tokenizer.n_tokens + (1 if tokenizer.add_cls_token else 0))
 
         return TransformerGaussianEncoder(
             input_dim=int(mod_cfg.input_dim),
@@ -306,4 +461,41 @@ def build_gaussian_encoder(*, uni_cfg: UniVIConfig, mod_cfg: ModalityConfig) -> 
         )
 
     raise ValueError(f"Unknown encoder_type={kind!r} for modality {mod_cfg.name!r}")
+
+
+def build_multimodal_transformer_encoder(
+    *,
+    uni_cfg: UniVIConfig,
+    modalities: Sequence[ModalityConfig],
+    fused_modalities: Optional[Sequence[str]] = None,
+) -> MultiModalTransformerGaussianEncoder:
+    """
+    Build the fused multimodal transformer encoder from existing per-modality configs.
+
+    Requirements:
+      - uni_cfg.fused_transformer is set
+      - each fused modality has mod_cfg.tokenizer set (even if its per-modality encoder is MLP)
+    """
+    if uni_cfg.fused_transformer is None:
+        raise ValueError("UniVIConfig.fused_transformer must be set for fused_encoder_type='multimodal_transformer'.")
+
+    mods = {m.name: m for m in modalities}
+    use_names = list(fused_modalities) if fused_modalities is not None else list(mods.keys())
+
+    input_dims = {n: int(mods[n].input_dim) for n in use_names}
+    tokenizers: Dict[str, TokenizerConfig] = {}
+    for n in use_names:
+        if mods[n].tokenizer is None:
+            raise ValueError(f"Fused multimodal encoder requires tokenizer for modality {n!r}")
+        tokenizers[n] = mods[n].tokenizer
+
+    return MultiModalTransformerGaussianEncoder(
+        modalities=use_names,
+        input_dims=input_dims,
+        tokenizers=tokenizers,
+        transformer_cfg=uni_cfg.fused_transformer,
+        latent_dim=int(uni_cfg.latent_dim),
+        add_modality_embeddings=bool(getattr(uni_cfg, "fused_add_modality_embeddings", True)),
+        use_positional_encoding=True,
+    )
 

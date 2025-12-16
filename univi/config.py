@@ -5,21 +5,21 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Literal, Sequence
 
 
-# ----------------------------
+# =============================================================================
 # Transformer + tokenizer config
-# ----------------------------
+# =============================================================================
 
 @dataclass
 class TransformerConfig:
     """
-    Configuration for the transformer encoder backend used inside modality encoders.
+    Configuration for transformer encoder backends.
 
     Notes
     -----
-    - This mirrors the fields expected by univi/models/transformer.py:TransformerConfig.
+    - Mirrors fields expected by univi/models/transformer.py:TransformerConfig.
     - max_tokens is optional because token count usually comes from the tokenizer.
       If you use learned positional embeddings, we set max_tokens automatically
-      based on the tokenizer output length (and +1 if add_cls_token=True).
+      based on the tokenizer output length (and +1 if a global CLS token is used).
     """
     d_model: int
     num_heads: int
@@ -60,15 +60,15 @@ class TokenizerConfig:
 
     # patch settings
     patch_size: int = 32
-    patch_proj_dim: Optional[int] = None  # if set, patch vectors -> projection -> D_in=patch_proj_dim
+    patch_proj_dim: Optional[int] = None
 
     # general
     add_cls_token: bool = False
 
 
-# ----------------------------
+# =============================================================================
 # Core UniVI configs
-# ----------------------------
+# =============================================================================
 
 @dataclass
 class ModalityConfig:
@@ -101,7 +101,7 @@ class ModalityConfig:
     input_kind: Literal["matrix", "obs"] = "matrix"
     obs_key: Optional[str] = None
 
-    # encoder backend
+    # encoder backend (per-modality only)
     encoder_type: Literal["mlp", "transformer"] = "mlp"
     transformer: Optional[TransformerConfig] = None
     tokenizer: Optional[TokenizerConfig] = None
@@ -150,6 +150,15 @@ class UniVIConfig:
     class_heads: Optional[List[ClassHeadConfig]] = None
     label_head_name: str = "label"
 
+    # ---------------------------------------------------------------------
+    # NEW: Optional fused multimodal encoder over concatenated tokens
+    # ---------------------------------------------------------------------
+    fused_encoder_type: Literal["moe", "multimodal_transformer"] = "moe"
+    fused_transformer: Optional[TransformerConfig] = None
+    fused_modalities: Optional[Sequence[str]] = None  # default: all modalities
+    fused_add_modality_embeddings: bool = True
+    fused_require_all_modalities: bool = True  # if True: fall back to MoE when missing
+
     def validate(self) -> None:
         if int(self.latent_dim) <= 0:
             raise ValueError(f"latent_dim must be > 0, got {self.latent_dim}")
@@ -159,6 +168,8 @@ class UniVIConfig:
         if len(set(names)) != len(names):
             dupes = sorted({n for n in names if names.count(n) > 1})
             raise ValueError(f"Duplicate modality names in cfg.modalities: {dupes}")
+
+        mod_by_name: Dict[str, ModalityConfig] = {m.name: m for m in self.modalities}
 
         for m in self.modalities:
             if int(m.input_dim) <= 0:
@@ -171,39 +182,44 @@ class UniVIConfig:
                 if m.input_kind == "obs" and not m.obs_key:
                     raise ValueError(f"Categorical modality {m.name!r}: input_kind='obs' requires obs_key.")
 
-            # encoder sanity
+            # per-modality encoder sanity
             enc_type = (m.encoder_type or "mlp").lower().strip()
             if enc_type not in ("mlp", "transformer"):
-                raise ValueError(f"Modality {m.name!r}: encoder_type must be 'mlp' or 'transformer', got {m.encoder_type!r}")
+                raise ValueError(
+                    f"Modality {m.name!r}: encoder_type must be 'mlp' or 'transformer', got {m.encoder_type!r}"
+                )
 
             if enc_type == "transformer":
                 if m.transformer is None:
                     raise ValueError(f"Modality {m.name!r}: encoder_type='transformer' requires transformer config.")
                 if m.tokenizer is None:
                     raise ValueError(f"Modality {m.name!r}: encoder_type='transformer' requires tokenizer config.")
+                _validate_tokenizer(m.name, m.tokenizer)
 
-                # tokenizer sanity
-                tok = m.tokenizer
-                mode = (tok.mode or "").lower().strip()
-                if mode not in ("topk_scalar", "topk_channels", "patch"):
-                    raise ValueError(f"Modality {m.name!r}: tokenizer.mode must be one of "
-                                     f"['topk_scalar','topk_channels','patch'], got {tok.mode!r}")
+        # NEW: fused encoder sanity
+        fe = (self.fused_encoder_type or "moe").lower().strip()
+        if fe not in ("moe", "multimodal_transformer"):
+            raise ValueError(f"fused_encoder_type must be 'moe' or 'multimodal_transformer', got {self.fused_encoder_type!r}")
 
-                if mode in ("topk_scalar", "topk_channels"):
-                    if int(tok.n_tokens) <= 0:
-                        raise ValueError(f"Modality {m.name!r}: tokenizer.n_tokens must be > 0 for topk_*")
-                    if mode == "topk_channels":
-                        if not tok.channels:
-                            raise ValueError(f"Modality {m.name!r}: tokenizer.channels must be non-empty for topk_channels")
-                        bad = [c for c in tok.channels if c not in ("value", "rank", "dropout")]
-                        if bad:
-                            raise ValueError(f"Modality {m.name!r}: tokenizer.channels has invalid entries: {bad}")
+        if fe == "multimodal_transformer":
+            if self.fused_transformer is None:
+                raise ValueError("fused_encoder_type='multimodal_transformer' requires UniVIConfig.fused_transformer.")
+            fused_names = list(self.fused_modalities) if self.fused_modalities is not None else list(mod_by_name.keys())
+            if not fused_names:
+                raise ValueError("fused_modalities is empty; expected at least one modality name.")
 
-                if mode == "patch":
-                    if int(tok.patch_size) <= 0:
-                        raise ValueError(f"Modality {m.name!r}: tokenizer.patch_size must be > 0 for patch")
-                    if tok.patch_proj_dim is not None and int(tok.patch_proj_dim) <= 0:
-                        raise ValueError(f"Modality {m.name!r}: tokenizer.patch_proj_dim must be > 0 if set")
+            missing = [n for n in fused_names if n not in mod_by_name]
+            if missing:
+                raise ValueError(f"fused_modalities contains unknown modalities: {missing}. Known: {list(mod_by_name)}")
+
+            # each fused modality must have a tokenizer (even if its per-modality encoder is MLP)
+            for n in fused_names:
+                tok = mod_by_name[n].tokenizer
+                if tok is None:
+                    raise ValueError(
+                        f"Fused multimodal transformer requires ModalityConfig.tokenizer for modality {n!r}."
+                    )
+                _validate_tokenizer(n, tok)
 
         # class head sanity
         if self.class_heads is not None:
@@ -228,6 +244,31 @@ class UniVIConfig:
                 raise ValueError(f"{k} must be >= 0, got {v}")
 
 
+def _validate_tokenizer(mod_name: str, tok: TokenizerConfig) -> None:
+    mode = (tok.mode or "").lower().strip()
+    if mode not in ("topk_scalar", "topk_channels", "patch"):
+        raise ValueError(
+            f"Modality {mod_name!r}: tokenizer.mode must be one of "
+            f"['topk_scalar','topk_channels','patch'], got {tok.mode!r}"
+        )
+
+    if mode in ("topk_scalar", "topk_channels"):
+        if int(tok.n_tokens) <= 0:
+            raise ValueError(f"Modality {mod_name!r}: tokenizer.n_tokens must be > 0 for topk_*")
+        if mode == "topk_channels":
+            if not tok.channels:
+                raise ValueError(f"Modality {mod_name!r}: tokenizer.channels must be non-empty for topk_channels")
+            bad = [c for c in tok.channels if c not in ("value", "rank", "dropout")]
+            if bad:
+                raise ValueError(f"Modality {mod_name!r}: tokenizer.channels has invalid entries: {bad}")
+
+    if mode == "patch":
+        if int(tok.patch_size) <= 0:
+            raise ValueError(f"Modality {mod_name!r}: tokenizer.patch_size must be > 0 for patch")
+        if tok.patch_proj_dim is not None and int(tok.patch_proj_dim) <= 0:
+            raise ValueError(f"Modality {mod_name!r}: tokenizer.patch_proj_dim must be > 0 if set")
+
+
 @dataclass
 class TrainingConfig:
     n_epochs: int = 200
@@ -243,5 +284,4 @@ class TrainingConfig:
     early_stopping: bool = False
     patience: int = 20
     min_delta: float = 0.0
-
 
