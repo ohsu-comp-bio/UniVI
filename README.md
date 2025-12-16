@@ -1,14 +1,14 @@
 # UniVI
 
 [![PyPI version](https://img.shields.io/pypi/v/univi)](https://pypi.org/project/univi/)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.3.1)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.3.2)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.1/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.2/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.1/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.2/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>

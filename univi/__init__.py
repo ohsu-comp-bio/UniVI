@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, List
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 # Eager (fast/light) public API
 from .config import ModalityConfig, UniVIConfig, TrainingConfig
@@ -37,6 +37,11 @@ __all__ = [
     # eval convenience (optional)
     "encode_adata",
     "evaluate_alignment",
+    # interpretability
+    "interpretability",
+    "fused_encode_with_meta_and_attn",
+    "feature_importance_for_head",
+    "top_cross_modal_feature_pairs_from_attn",
 ]
 
 
@@ -80,6 +85,27 @@ def __getattr__(name: str) -> Any:
     if name == "plotting":
         from . import plotting as _plotting
         return _plotting
+
+    # ---- interpretability ----
+    if name == "interpretability":
+        from . import interpretability as _interpretability
+        return _interpretability
+
+    if name in {
+        "fused_encode_with_meta_and_attn",
+        "feature_importance_for_head",
+        "top_cross_modal_feature_pairs_from_attn",
+    }:
+        from .interpretability import (
+            fused_encode_with_meta_and_attn,
+            feature_importance_for_head,
+            top_cross_modal_feature_pairs_from_attn,
+        )
+        return {
+            "fused_encode_with_meta_and_attn": fused_encode_with_meta_and_attn,
+            "feature_importance_for_head": feature_importance_for_head,
+            "top_cross_modal_feature_pairs_from_attn": top_cross_modal_feature_pairs_from_attn,
+        }[name]
 
     # ---- eval convenience functions (re-export) ----
     if name in {"encode_adata", "evaluate_alignment"}:
