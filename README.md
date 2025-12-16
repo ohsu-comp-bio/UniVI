@@ -220,15 +220,15 @@ See `notebooks/` for end-to-end preprocessing examples.
 
 ---
 
-## Training objectives (v1 vs lite/v2)
+## Training objectives (v1 vs v2/lite)
 
 UniVI supports two main training regimes:
 
 * **UniVI v1 (“paper”)**
   Per-modality posteriors + flexible reconstruction scheme (cross/self/avg) + posterior alignment across modalities.
 
-* **UniVI-lite / v2**
-  A fused posterior (precision-weighted MoE/PoE style) + per-modality recon + β·KL + γ·alignment.
+* **UniVI v2 / lite**
+  A fused posterior (precision-weighted MoE/PoE-style) + per-modality recon + β·KL + γ·alignment.
   Convenient for 3+ modalities and “loosely paired” settings.
 
 You choose via `loss_mode` at model construction (Python) or config JSON (CLI scripts).
@@ -312,7 +312,7 @@ train_cfg = TrainingConfig(
     patience=50,
 )
 
-# Paper objective (v1)
+# v1 (paper)
 model = UniVIMultiModalVAE(
     univi_cfg,
     loss_mode="v1",
@@ -320,8 +320,8 @@ model = UniVIMultiModalVAE(
     normalize_v1_terms=True,
 ).to(device)
 
-# Or: UniVI-lite / v2
-# model = UniVIMultiModalVAE(univi_cfg, loss_mode="lite").to(device)
+# Or: v2/lite
+# model = UniVIMultiModalVAE(univi_cfg, loss_mode="v2").to(device)
 ```
 
 ### 4) Train
@@ -340,58 +340,96 @@ history = trainer.fit()
 
 ---
 
-## Optional classification head addition
+## Classification (built-in heads)
 
-UniVI can be used purely unsupervised **or** you can attach lightweight supervised heads for tasks like:
+UniVI supports **in-model supervised classification heads** (single “legacy” label head and/or multi-head auxiliary decoders). This is useful for:
 
-* harmonized cell type annotation (bridge → unimodal projection labels)
-* patient / batch prediction (sanity checks, domain effects)
-* binary mutation flags, response labels, etc.
+* harmonized cell-type annotation (e.g., bridge → projected cohorts)
+* batch/tech/patient prediction (sanity checks, confounding)
+* adversarial domain confusion via gradient reversal (GRL)
+* multi-task setups (e.g., celltype + patient + mutation flags)
 
-Two common patterns are below.
+### How it works
 
-### A) Train a simple classifier *on top of frozen UniVI latents* (easy + robust)
+* Heads are configured via `UniVIConfig.class_heads` using `ClassHeadConfig`.
+* Training targets are passed as `y`, a **dict mapping head name → integer class indices** with shape `(B,)`.
+* Unlabeled entries should use `ignore_index` (default `-1`) and are masked out automatically.
+* Each head can be delayed with `warmup` and weighted with `loss_weight`.
+* Set `adversarial=True` for GRL heads (domain confusion).
 
-This is the “least magic” option: train UniVI unsupervised as usual, then train a classifier on the latent means.
+### 1) Add heads in the config
 
 ```python
-import numpy as np
-import torch
-from sklearn.linear_model import LogisticRegression
+from univi.config import ClassHeadConfig
 
-# Example: labels live in RNA AnnData
-# (since modalities are aligned, RNA labels index the same cells as ADT/ATAC)
-y_cat = rna.obs["celltype"].astype("category")
-y = y_cat.cat.codes.to_numpy()  # (n,)
-
-# Encode latents for ALL cells (use your favorite split logic)
-model.eval()
-Z_all = []
-
-with torch.no_grad():
-    for batch in DataLoader(dataset, batch_size=512, shuffle=False):
-        x_dict = {k: v.to(device) for k, v in batch.items()}
-        mu_z, logvar_z, z = model.encode_fused(x_dict, use_mean=True)
-        Z_all.append(mu_z.detach().cpu().numpy())
-
-Z_all = np.concatenate(Z_all, axis=0)  # (n, latent_dim)
-
-# Fit classifier on train split (example)
-clf = LogisticRegression(max_iter=2000, n_jobs=1)
-clf.fit(Z_all[train_idx], y[train_idx])
-
-# Predict on val/test
-yhat = clf.predict(Z_all[val_idx])
+univi_cfg = UniVIConfig(
+    latent_dim=40,
+    beta=1.5,
+    gamma=2.5,
+    modalities=[
+        ModalityConfig("rna", rna.n_vars, [512,256,128], [128,256,512], likelihood="nb"),
+        ModalityConfig("adt", adt.n_vars, [128,64],      [64,128],      likelihood="nb"),
+    ],
+    class_heads=[
+        ClassHeadConfig(
+            name="celltype",
+            n_classes=int(rna.obs["celltype"].astype("category").cat.categories.size),
+            loss_weight=1.0,
+            ignore_index=-1,
+            from_mu=True,     # classify from mu_z (more stable)
+            warmup=0,
+        ),
+        ClassHeadConfig(
+            name="batch",
+            n_classes=int(rna.obs["batch"].astype("category").cat.categories.size),
+            loss_weight=0.2,
+            ignore_index=-1,
+            from_mu=True,
+            warmup=10,
+            adversarial=True,  # GRL head (domain confusion)
+            adv_lambda=1.0,
+        ),
+    ],
+)
 ```
 
-Notes:
+Optional: attach readable label names (for your own decoding later):
 
-* This gives you a clean “latent classifier” that is easy to audit and compare across models.
-* For coarse labels, logistic regression is often surprisingly strong; for many classes you can swap in a linear SVM or a small MLP.
+```python
+# for multi-heads
+model.set_head_label_names("celltype", list(rna.obs["celltype"].astype("category").cat.categories))
+model.set_head_label_names("batch",    list(rna.obs["batch"].astype("category").cat.categories))
 
-### B) Use UniVI’s built-in heads (single head or multi-head)
+# for legacy single head (if you use n_label_classes>0)
+# model.set_label_names([...])
+```
 
-If you enabled classification heads, inference is typically one call:
+### 2) Pass `y` to the model during training
+
+Your dataloader typically yields only `x_dict`. You can construct `y` from your dataset indices (or store labels inside your dataset object). Example pattern:
+
+```python
+# Suppose you have per-cell label arrays aligned to dataset order:
+celltype_codes = rna.obs["celltype"].astype("category").cat.codes.to_numpy()
+batch_codes    = rna.obs["batch"].astype("category").cat.codes.to_numpy()
+
+# In your training loop / trainer, for a batch of indices `batch_idx`:
+y = {
+    "celltype": torch.tensor(celltype_codes[batch_idx], device=device),
+    "batch":    torch.tensor(batch_codes[batch_idx], device=device),
+}
+
+out = model(x_dict, epoch=epoch, y=y)
+loss = out["loss"]
+loss.backward()
+```
+
+What you get back in `out` (when labels are provided) includes:
+
+* `out["head_logits"]`: dict of logits `(B, n_classes)` per head
+* `out["head_losses"]`: mean CE per head (masked by `ignore_index`)
+
+### 3) Predict heads after training
 
 ```python
 model.eval()
@@ -401,16 +439,16 @@ x_dict = {k: v.to(device) for k, v in batch.items()}
 with torch.no_grad():
     probs = model.predict_heads(x_dict, return_probs=True)
 
-# probs is a dict: {head_name: (B, n_classes)}
 for head_name, P in probs.items():
-    print(head_name, P.shape)
+    print(head_name, P.shape)  # (B, n_classes)
 ```
 
-Notes:
+To inspect which heads exist + their settings:
 
-* For the legacy single-head path, the key is `model.label_head_name` (default `"label"`).
-* For multi-head configs, keys are head names (e.g. `"celltype"`, `"patient"`, `"mutation_TP53"`).
-* During supervised training you’ll supply integer targets `y` (class indices) alongside `x_dict` and weight the head loss relative to the VAE losses.
+```python
+meta = model.get_classification_meta()
+print(meta)
+```
 
 ---
 
@@ -419,10 +457,10 @@ Notes:
 UniVI isn’t just “map to latent”. With a trained model you can typically:
 
 * **Encode modality-specific posteriors** `q(z|x_rna)`, `q(z|x_adt)`, …
-* **Encode a fused posterior** (lite/v2 MoE/PoE; or an optional fused transformer encoder)
+* **Encode a fused posterior** (MoE/PoE; or an optional fused transformer encoder)
 * **Reconstruct** inputs via decoders (denoising)
 * **Cross-reconstruct / impute** across modalities (RNA→ADT, ADT→RNA, RNA→ATAC, …)
-* **Predict supervised targets** via classification heads (single head or multi-head)
+* **Predict supervised targets** via built-in classification heads
 * **Inspect per-modality posterior means/variances** for debugging and uncertainty
 * (Optional) **Inspect transformer token selection meta** (top-k indices) and (with a small patch) attention weights
 
@@ -430,13 +468,12 @@ UniVI isn’t just “map to latent”. With a trained model you can typically:
 
 ```python
 model.eval()
-batch = next(iter(val_loader))  # a dict: {"rna": (B,F), "adt": (B,F)}
+batch = next(iter(val_loader))  # dict: {"rna": (B,F), "adt": (B,F)}
 x_dict = {k: v.to(device) for k, v in batch.items()}
 
 with torch.no_grad():
     mu_z, logvar_z, z = model.encode_fused(x_dict, use_mean=True)
 
-# mu_z is a clean embedding for UMAP/clustering
 Z = mu_z.detach().cpu().numpy()
 print(Z.shape)
 ```
@@ -457,9 +494,6 @@ Z_adt = mu_dict["adt"].detach().cpu().numpy()
 with torch.no_grad():
     out = model(x_dict, epoch=0)
     xhat = out["xhat"]  # dict(modality -> decoder output)
-
-# Depending on decoder likelihood, xhat[m] may be a tensor or a dict (e.g. {"mu":..., "log_theta":...})
-# For gaussian-ish decoders, the "mean" is typically the denoised prediction.
 ```
 
 ### 4) Cross-modal reconstruction / imputation (encode one modality, decode another)
@@ -471,50 +505,8 @@ x_rna_only = {"rna": x_dict["rna"]}
 
 with torch.no_grad():
     mu_dict, lv_dict = model.encode_modalities(x_rna_only)
-    z_rna = mu_dict["rna"]  # deterministic; or sample via reparameterize
-
+    z_rna = mu_dict["rna"]  # deterministic
     adt_pred = model.decoders["adt"](z_rna)
-
-# If the ADT decoder returns {"mean": ...}, use adt_pred["mean"] as your predicted profile
-```
-
-This is the basis of:
-
-* feature recovery curves (observed vs predicted)
-* cross-modal marker plots (e.g., predict ADTs for RNA-only cohorts)
-* “denoised” reconstructions (use fused z to reconstruct each modality)
-
-### 5) Predict classification heads (single legacy head or multi-head)
-
-If you enabled classification heads, inference is typically one call:
-
-```python
-model.eval()
-with torch.no_grad():
-    probs = model.predict_heads(x_dict, return_probs=True)
-
-# probs is a dict: {head_name: (B, n_classes)}
-for head_name, P in probs.items():
-    print(head_name, P.shape)
-```
-
-Notes:
-
-* For the legacy single-head path, the key is `model.label_head_name` (default `"label"`).
-* For multi-head configs, keys are head names (e.g. `"celltype"`, `"patient"`, `"mutation_TP53"`).
-
-### 6) Get everything in one forward call (loss + recon + latents)
-
-```python
-out = model(x_dict, epoch=0, y=None)
-
-print(out.keys())
-# includes (typical):
-# - "loss", "recon_total", "kl", "align"
-# - "mu_z", "logvar_z", "z"
-# - "xhat"
-# - "mu_dict", "logvar_dict"
-# - optional: "class_logits", "head_logits", ...
 ```
 
 ---
@@ -553,7 +545,7 @@ If you want a transformer encoder for a modality, set:
 * a `TokenizerConfig` (how `(B,F)` becomes `(B,T,D_in)`)
 * a `TransformerConfig` (depth/width/pooling)
 
-Example: transformer RNA encoder, MLP ADT/ATAC encoders:
+Example:
 
 ```python
 from univi.config import TransformerConfig, TokenizerConfig
@@ -584,14 +576,7 @@ univi_cfg = UniVIConfig(
             decoder_hidden=[64, 128],
             likelihood="gaussian",
             encoder_type="mlp",
-        ),
-        ModalityConfig(
-            name="atac",
-            input_dim=atac.n_vars,
-            encoder_hidden=[128, 64],
-            decoder_hidden=[64, 128],
-            likelihood="gaussian",
-            encoder_type="mlp",
+            tokenizer=TokenizerConfig(mode="topk_scalar", n_tokens=min(32, adt.n_vars)),  # useful for fused encoder
         ),
     ],
 )
@@ -599,69 +584,44 @@ univi_cfg = UniVIConfig(
 
 Why bother?
 
-* Better inductive bias for **feature interaction modeling** (within-modality)
-* Tokenizers let you focus attention on the most informative features per cell (top-k)
-* Provides a natural hook for interpretability (token indices + optional attention maps)
+* Better inductive bias for **feature interaction modeling**
+* Tokenizers focus attention on the most informative features per cell (top-k)
+* Interpretability hooks: token indices (and optional attention maps)
 
 ---
 
 ## Optional: Fused multimodal transformer encoder (advanced)
 
-This is the “extra fun” mode: a **single transformer** sees **concatenated tokens from multiple modalities** and returns a **single fused posterior** `q(z|all modalities)` using a global CLS token (or mean pooling).
-
-This is optional and does **not** replace the original workflow by default.
+A single transformer sees **concatenated tokens from multiple modalities** and returns a **single fused posterior** `q(z|all modalities)` using global CLS pooling (or mean pooling).
 
 ### Minimal config
 
 ```python
+from univi.config import TransformerConfig
+
 univi_cfg = UniVIConfig(
     latent_dim=40,
     beta=1.0,
     gamma=1.25,
-    modalities=[...],  # your usual per-modality configs still exist
-
+    modalities=[...],  # your per-modality configs still exist
     fused_encoder_type="multimodal_transformer",
-    fused_modalities=("rna", "adt", "atac"),  # omit to fuse all modalities
-
+    fused_modalities=("rna", "adt", "atac"),  # default: all modalities
     fused_transformer=TransformerConfig(
         d_model=256, num_heads=8, num_layers=4,
         dim_feedforward=1024, dropout=0.1, attn_dropout=0.1,
-        activation="gelu", pooling="cls",   # global CLS over concatenated tokens
+        activation="gelu", pooling="cls",
     ),
 )
 ```
 
-### What do you gain?
+Notes:
 
-* A “third view” of the cell:
-
-  * modality-specific posteriors `q(z|x_m)` (still useful for projection and diagnostics)
-  * MoE/PoE fused posterior (lite/v2)
-  * **token-concatenated fused transformer posterior** (when multiple modalities exist)
-* Better capacity to represent **cross-modal interactions** (e.g., ADT↔RNA, ATAC↔RNA) without relying solely on posterior averaging
-* Interpretability hooks:
-
-  * **token selection meta** (e.g., top-k feature indices per cell per modality)
-  * with a small optional patch to `TransformerEncoder`, you can also return **attention weights**
-
-### How to use it well (practical tips)
-
-* **Modality dropout during training** (randomly drop one modality sometimes) helps the model:
-
-  * remain strong for unimodal projection
-  * avoid overfitting to “always having everything”
-* Keep token counts reasonable:
-
-  * RNA/ATAC can be large → top-k tokenizers keep attention feasible
-  * ADT is small → fewer tokens is usually enough
-* Use fused transformer embeddings when you *have multiple modalities*,
-  and per-modality embeddings when you *don’t*.
+* Every modality in `fused_modalities` must define a `tokenizer` (even if its per-modality encoder is MLP).
+* If `fused_require_all_modalities=True` and any fused modality is missing at inference, UniVI falls back to MoE/PoE fusion.
 
 ---
 
 ## Hyperparameter optimization (optional)
-
-UniVI includes utilities for hyperparameter search:
 
 ```python
 from univi.hyperparam_optimization import (
@@ -680,17 +640,12 @@ See `univi/hyperparam_optimization/` and `notebooks/` for examples.
 
 ## Contact, questions, and bug reports
 
-* **Questions / comments:** open a GitHub **Discussion** (if enabled) or a GitHub **Issue** with the `question` label.
-* **Bug reports:** open a GitHub **Issue** and include:
+* **Questions / comments:** open a GitHub Issue with the `question` label (or a Discussion if enabled).
+* **Bug reports:** open a GitHub Issue and include:
 
-  * your UniVI version (`python -c "import univi; print(univi.__version__)"`)
+  * your UniVI version: `python -c "import univi; print(univi.__version__)"`
   * minimal code to reproduce (or a short notebook snippet)
   * stack trace + OS/CUDA/PyTorch versions
 * **Feature requests:** open an Issue describing the use-case + expected inputs/outputs (a tiny example is ideal).
-* **PRs are welcome:** if you’re adding new modalities/likelihoods/tokenizers, please include:
-
-  * a minimal example / notebook
-  * a small test or sanity check script
-  * documentation updates (README + any config fields)
 
 ---
