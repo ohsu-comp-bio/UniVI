@@ -21,6 +21,11 @@ class TransformerConfig:
     pooling: Literal["cls", "mean"] = "mean"
     max_tokens: Optional[int] = None
 
+    # Optional: binned relative-position attention bias (e.g., genomic distance)
+    use_relpos_bias: bool = False
+    relpos_num_bins: int = 32
+    relpos_max_dist: float = 1e6  # basepairs
+
 
 def _act(name: str):
     name = str(name).lower().strip()
@@ -31,25 +36,59 @@ def _act(name: str):
     raise ValueError(f"Unknown activation: {name!r}")
 
 
+class GenomicRelPosBias(nn.Module):
+    """
+    Simple distance-binned relative attention bias.
+
+    Given token positions pos (B,T) in basepairs, returns an additive bias
+    (B, H, T, T). Intended for ATAC peak midpoints.
+
+    Notes
+    -----
+    - Uses log1p compression to allocate more bins to shorter distances.
+    - Bias table is learned: (H, num_bins).
+    """
+    def __init__(self, num_heads: int, num_bins: int = 32, max_dist: float = 1e6):
+        super().__init__()
+        self.num_heads = int(num_heads)
+        self.num_bins = int(num_bins)
+        self.max_dist = float(max_dist)
+        self.bias = nn.Parameter(torch.zeros(self.num_heads, self.num_bins))
+
+    def _bin(self, dist: torch.Tensor) -> torch.Tensor:
+        # dist: (B,T,T) >= 0
+        d = dist.clamp(min=0.0, max=self.max_dist)
+        d = torch.log1p(d)
+        dmax = torch.log1p(torch.tensor(self.max_dist, device=d.device, dtype=d.dtype))
+        b = (d / dmax) * (self.num_bins - 1)
+        return b.to(torch.long)
+
+    def forward(self, pos: torch.Tensor) -> torch.Tensor:
+        # pos: (B,T)
+        dist = (pos[:, :, None] - pos[:, None, :]).abs()  # (B,T,T)
+        bins = self._bin(dist)                             # (B,T,T)
+        # bias[:, bins] -> (H,B,T,T) then permute -> (B,H,T,T)
+        out = self.bias[:, bins]
+        return out.permute(1, 0, 2, 3).contiguous()
+
+
 class TransformerBlock(nn.Module):
     """
     Single pre-norm style block:
       x -> MHA -> residual -> LN
         -> FFN -> residual -> LN
 
-    If return_attn=True:
-      returns (x, attn_w) where attn_w is:
-        - (B, T, T) if attn_average_heads=True
-        - (B, H, T, T) if attn_average_heads=False
+    Supports optional additive attention bias (e.g., relative position).
     """
     def __init__(self, cfg: TransformerConfig):
         super().__init__()
         self.cfg = cfg
         d_model = int(cfg.d_model)
+        self.num_heads = int(cfg.num_heads)
 
         self.attn = nn.MultiheadAttention(
             embed_dim=d_model,
-            num_heads=int(cfg.num_heads),
+            num_heads=self.num_heads,
             dropout=float(cfg.attn_dropout),
             batch_first=True,
         )
@@ -65,27 +104,39 @@ class TransformerBlock(nn.Module):
         self.ff_drop = nn.Dropout(float(cfg.dropout))
         self.ln2 = nn.LayerNorm(d_model)
 
+        self.relpos: Optional[GenomicRelPosBias] = None
+        if bool(getattr(cfg, "use_relpos_bias", False)):
+            self.relpos = GenomicRelPosBias(
+                num_heads=self.num_heads,
+                num_bins=int(getattr(cfg, "relpos_num_bins", 32)),
+                max_dist=float(getattr(cfg, "relpos_max_dist", 1e6)),
+            )
+
     def forward(
         self,
         x: torch.Tensor,
         *,
         key_padding_mask: Optional[torch.Tensor] = None,
+        token_pos: Optional[torch.Tensor] = None,  # (B,T) basepairs or other coordinates
         return_attn: bool = False,
         attn_average_heads: bool = True,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        # x: (B, T, D)
         need_weights = bool(return_attn)
+
+        attn_mask = None
+        if self.relpos is not None and token_pos is not None:
+            # (B,H,T,T) -> (B*H,T,T) for nn.MultiheadAttention
+            bias = self.relpos(token_pos).to(dtype=x.dtype)
+            B, H, T, _ = bias.shape
+            attn_mask = bias.view(B * H, T, T)
 
         attn_out, attn_w = self.attn(
             x, x, x,
             key_padding_mask=key_padding_mask,        # (B, T) True = PAD
+            attn_mask=attn_mask,                      # None or (B*H,T,T)
             need_weights=need_weights,
             average_attn_weights=bool(attn_average_heads),
         )
-        # Shapes:
-        #  - if need_weights=False: attn_w is None (ignored)
-        #  - if average_attn_weights=True:  attn_w is (B, T, T)
-        #  - if average_attn_weights=False: attn_w is (B, H, T, T)
 
         x = self.ln1(x + self.attn_drop(attn_out))
         ff_out = self.ff(x)
@@ -103,11 +154,9 @@ class TransformerEncoder(nn.Module):
     Generic encoder:
       tokens (B,T,D_in) -> proj -> blocks -> pool -> out_proj -> (B,d_out)
 
-    If return_attn=True:
-      returns (pooled_out, [attn_layer0, attn_layer1, ...])
-    where each attn_layer is:
-      - (B, T, T) if attn_average_heads=True
-      - (B, H, T, T) if attn_average_heads=False
+    Optional:
+      - learned absolute positional embeddings (use_positional_encoding=True)
+      - relative attention bias via token_pos (if cfg.use_relpos_bias=True)
     """
     def __init__(
         self,
@@ -138,20 +187,12 @@ class TransformerEncoder(nn.Module):
                 raise ValueError("use_positional_encoding=True requires cfg.max_tokens to be set.")
             max_tokens = int(cfg.max_tokens)
             self.pos_emb = nn.Parameter(torch.zeros(1, max_tokens, d_model))
-            # A small init helps stabilize early training a bit
             nn.init.normal_(self.pos_emb, mean=0.0, std=0.02)
 
-    def _pool(
-        self,
-        x: torch.Tensor,  # (B, T, D)
-        *,
-        key_padding_mask: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    def _pool(self, x: torch.Tensor, *, key_padding_mask: Optional[torch.Tensor]) -> torch.Tensor:
         if self.pooling == "cls":
-            # assumes caller prepended CLS token at position 0
             return x[:, 0, :]
 
-        # mean pooling (mask-aware)
         if key_padding_mask is None:
             return x.mean(dim=1)
 
@@ -164,10 +205,10 @@ class TransformerEncoder(nn.Module):
         tokens: torch.Tensor,
         *,
         key_padding_mask: Optional[torch.Tensor] = None,
+        token_pos: Optional[torch.Tensor] = None,  # (B,T) for relpos bias (optional)
         return_attn: bool = False,
         attn_average_heads: bool = True,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
-        # tokens: (B, T, D_in)
         x = self.input_proj(tokens)
 
         if self.use_positional_encoding:
@@ -185,6 +226,7 @@ class TransformerEncoder(nn.Module):
                 x, aw = blk(
                     x,
                     key_padding_mask=key_padding_mask,
+                    token_pos=token_pos,
                     return_attn=True,
                     attn_average_heads=attn_average_heads,
                 )
@@ -193,8 +235,9 @@ class TransformerEncoder(nn.Module):
                 x = blk(
                     x,
                     key_padding_mask=key_padding_mask,
+                    token_pos=token_pos,
                     return_attn=False,
-                    attn_average_heads=attn_average_heads,  # ignored when return_attn=False
+                    attn_average_heads=attn_average_heads,
                 )
 
         pooled = self._pool(x, key_padding_mask=key_padding_mask)

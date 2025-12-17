@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Literal, Sequence
+from typing import Dict, List, Optional, Literal, Sequence, Any
 
 
 # =============================================================================
@@ -17,9 +17,9 @@ class TransformerConfig:
     Notes
     -----
     - Mirrors fields expected by univi/models/transformer.py:TransformerConfig.
-    - max_tokens is optional because token count usually comes from the tokenizer.
-      If you use learned positional embeddings, we set max_tokens automatically
-      based on the tokenizer output length (and +1 if a global CLS token is used).
+    - max_tokens is only needed if you enable learned positional embeddings.
+    - Relative positional bias is optional and intended mainly for ATAC peaks
+      when you provide token_pos (basepair midpoints) at runtime.
     """
     d_model: int
     num_heads: int
@@ -30,6 +30,11 @@ class TransformerConfig:
     activation: Literal["relu", "gelu"] = "gelu"
     pooling: Literal["cls", "mean"] = "mean"
     max_tokens: Optional[int] = None
+
+    # Optional: binned relative-position attention bias (e.g., genomic distance)
+    use_relpos_bias: bool = False
+    relpos_num_bins: int = 32
+    relpos_max_dist: float = 1e6  # basepairs
 
 
 @dataclass
@@ -44,15 +49,21 @@ class TokenizerConfig:
                        channels from: "value", "rank", "dropout"
     - "patch":         split features into contiguous patches -> (B, T, patch_size)
                        OR project each patch -> (B, T, patch_proj_dim)
+    - "topk_embed":    top-k features per cell with explicit feature identity:
+                       token = Emb(feature_id) + MLP(channels)
+                       -> (B, K, d_model)
+
+                       Optionally add ATAC coordinate embeddings:
+                       token += Emb(chrom_id) + MLP(midpoint_bp / coord_scale)
 
     Notes
     -----
-    - topk_* is good for large sparse inputs where you only want attention on the
-      most informative features per cell.
-    - patch is closer to "patch embeddings": groups of genes/features.
-    - TransformerEncoder will map D_in -> d_model internally (input_proj).
+    - topk_embed is the recommended way to use attention over sparse omics features
+      without losing feature identity.
+    - If you need relative bias, you should pass token_pos (bp midpoints) into the
+      transformer at runtime. The tokenizer will stash it in tokenizer.last_meta["token_pos"].
     """
-    mode: Literal["topk_scalar", "topk_channels", "patch"] = "topk_scalar"
+    mode: Literal["topk_scalar", "topk_channels", "patch", "topk_embed"] = "topk_scalar"
 
     # top-k settings
     n_tokens: int = 256
@@ -64,6 +75,22 @@ class TokenizerConfig:
 
     # general
     add_cls_token: bool = False
+
+    # ---- topk_embed settings ----
+    # required for topk_embed
+    n_features: Optional[int] = None
+    d_model: Optional[int] = None
+    value_mlp_hidden: int = 256
+
+    # optional coord embeddings (mainly ATAC)
+    use_coords: bool = False
+    chrom_vocab_size: int = 0
+    coord_scale: float = 1e6  # divide bp midpoints by this before coord MLP
+
+    # Optional per-feature metadata for coords (set at runtime; not great for JSON)
+    # Expected keys: {"chrom": ..., "start": ..., "end": ...}
+    # Values can be lists/arrays/torch tensors; tokenizer will convert to tensors.
+    feature_info: Optional[Dict[str, Any]] = None
 
 
 # =============================================================================
@@ -151,7 +178,7 @@ class UniVIConfig:
     label_head_name: str = "label"
 
     # ---------------------------------------------------------------------
-    # NEW: Optional fused multimodal encoder over concatenated tokens
+    # Optional fused multimodal encoder over concatenated tokens
     # ---------------------------------------------------------------------
     fused_encoder_type: Literal["moe", "multimodal_transformer"] = "moe"
     fused_transformer: Optional[TransformerConfig] = None
@@ -182,7 +209,6 @@ class UniVIConfig:
                 if m.input_kind == "obs" and not m.obs_key:
                     raise ValueError(f"Categorical modality {m.name!r}: input_kind='obs' requires obs_key.")
 
-            # per-modality encoder sanity
             enc_type = (m.encoder_type or "mlp").lower().strip()
             if enc_type not in ("mlp", "transformer"):
                 raise ValueError(
@@ -196,14 +222,17 @@ class UniVIConfig:
                     raise ValueError(f"Modality {m.name!r}: encoder_type='transformer' requires tokenizer config.")
                 _validate_tokenizer(m.name, m.tokenizer)
 
-        # NEW: fused encoder sanity
+        # fused encoder sanity
         fe = (self.fused_encoder_type or "moe").lower().strip()
         if fe not in ("moe", "multimodal_transformer"):
-            raise ValueError(f"fused_encoder_type must be 'moe' or 'multimodal_transformer', got {self.fused_encoder_type!r}")
+            raise ValueError(
+                f"fused_encoder_type must be 'moe' or 'multimodal_transformer', got {self.fused_encoder_type!r}"
+            )
 
         if fe == "multimodal_transformer":
             if self.fused_transformer is None:
                 raise ValueError("fused_encoder_type='multimodal_transformer' requires UniVIConfig.fused_transformer.")
+
             fused_names = list(self.fused_modalities) if self.fused_modalities is not None else list(mod_by_name.keys())
             if not fused_names:
                 raise ValueError("fused_modalities is empty; expected at least one modality name.")
@@ -212,7 +241,6 @@ class UniVIConfig:
             if missing:
                 raise ValueError(f"fused_modalities contains unknown modalities: {missing}. Known: {list(mod_by_name)}")
 
-            # each fused modality must have a tokenizer (even if its per-modality encoder is MLP)
             for n in fused_names:
                 tok = mod_by_name[n].tokenizer
                 if tok is None:
@@ -246,21 +274,46 @@ class UniVIConfig:
 
 def _validate_tokenizer(mod_name: str, tok: TokenizerConfig) -> None:
     mode = (tok.mode or "").lower().strip()
-    if mode not in ("topk_scalar", "topk_channels", "patch"):
+    if mode not in ("topk_scalar", "topk_channels", "patch", "topk_embed"):
         raise ValueError(
             f"Modality {mod_name!r}: tokenizer.mode must be one of "
-            f"['topk_scalar','topk_channels','patch'], got {tok.mode!r}"
+            f"['topk_scalar','topk_channels','patch','topk_embed'], got {tok.mode!r}"
         )
 
-    if mode in ("topk_scalar", "topk_channels"):
+    if mode in ("topk_scalar", "topk_channels", "topk_embed"):
         if int(tok.n_tokens) <= 0:
             raise ValueError(f"Modality {mod_name!r}: tokenizer.n_tokens must be > 0 for topk_*")
-        if mode == "topk_channels":
-            if not tok.channels:
-                raise ValueError(f"Modality {mod_name!r}: tokenizer.channels must be non-empty for topk_channels")
-            bad = [c for c in tok.channels if c not in ("value", "rank", "dropout")]
-            if bad:
-                raise ValueError(f"Modality {mod_name!r}: tokenizer.channels has invalid entries: {bad}")
+
+    if mode == "topk_channels":
+        if not tok.channels:
+            raise ValueError(f"Modality {mod_name!r}: tokenizer.channels must be non-empty for topk_channels")
+        bad = [c for c in tok.channels if c not in ("value", "rank", "dropout")]
+        if bad:
+            raise ValueError(f"Modality {mod_name!r}: tokenizer.channels has invalid entries: {bad}")
+
+    if mode == "topk_embed":
+        if tok.n_features is None or int(tok.n_features) <= 0:
+            raise ValueError(f"Modality {mod_name!r}: tokenizer.n_features must be set (>0) for topk_embed")
+        if tok.d_model is None or int(tok.d_model) <= 0:
+            raise ValueError(f"Modality {mod_name!r}: tokenizer.d_model must be set (>0) for topk_embed")
+        if not tok.channels:
+            raise ValueError(f"Modality {mod_name!r}: tokenizer.channels must be non-empty for topk_embed")
+        bad = [c for c in tok.channels if c not in ("value", "rank", "dropout")]
+        if bad:
+            raise ValueError(f"Modality {mod_name!r}: tokenizer.channels has invalid entries: {bad}")
+
+        if tok.use_coords:
+            if int(tok.chrom_vocab_size) <= 0:
+                raise ValueError(
+                    f"Modality {mod_name!r}: tokenizer.chrom_vocab_size must be > 0 when use_coords=True"
+                )
+            # feature_info may be injected at runtime; validate if present
+            if tok.feature_info is not None:
+                for k in ("chrom", "start", "end"):
+                    if k not in tok.feature_info:
+                        raise ValueError(
+                            f"Modality {mod_name!r}: tokenizer.feature_info missing key {k!r} (required for coords)"
+                        )
 
     if mode == "patch":
         if int(tok.patch_size) <= 0:
