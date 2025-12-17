@@ -72,13 +72,75 @@ class GenomicRelPosBias(nn.Module):
         return out.permute(1, 0, 2, 3).contiguous()
 
 
+def _as_mha_attn_mask(
+    bias: torch.Tensor,
+    *,
+    num_heads: int,
+    batch_size: int,
+    seq_len: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Convert an additive attention bias into a shape accepted by nn.MultiheadAttention.
+
+    Accepted input shapes:
+      - (T, T)                     -> returned as-is (shared across batch/heads)
+      - (B, T, T)                  -> expanded to (B*H, T, T)
+      - (B, H, T, T)               -> reshaped to (B*H, T, T)
+      - (B*H, T, T)                -> returned as-is
+      - (1, T, T)                  -> treated like (B, T, T) and expanded
+    """
+    if bias.dim() == 2:
+        # (T,T)
+        if bias.shape != (seq_len, seq_len):
+            raise ValueError(f"attn_bias (T,T) must be ({seq_len},{seq_len}); got {tuple(bias.shape)}")
+        return bias.to(device=device, dtype=dtype)
+
+    if bias.dim() == 3:
+        # (B,T,T) or (1,T,T) or (B*H,T,T)
+        b0, t1, t2 = bias.shape
+        if (t1, t2) != (seq_len, seq_len):
+            raise ValueError(f"attn_bias (...,T,T) must have T={seq_len}; got {tuple(bias.shape)}")
+
+        if b0 == batch_size * num_heads:
+            return bias.to(device=device, dtype=dtype)
+
+        if b0 == 1:
+            bias = bias.expand(batch_size, seq_len, seq_len)
+
+        if b0 != batch_size:
+            raise ValueError(
+                f"attn_bias (B,T,T) must have B={batch_size} (or 1); got {b0} with shape {tuple(bias.shape)}"
+            )
+
+        # expand across heads -> (B*H,T,T)
+        bias = bias.to(device=device, dtype=dtype)
+        bias = bias.unsqueeze(1).expand(batch_size, num_heads, seq_len, seq_len)
+        return bias.reshape(batch_size * num_heads, seq_len, seq_len).contiguous()
+
+    if bias.dim() == 4:
+        # (B,H,T,T)
+        b0, h0, t1, t2 = bias.shape
+        if (t1, t2) != (seq_len, seq_len):
+            raise ValueError(f"attn_bias (B,H,T,T) must have T={seq_len}; got {tuple(bias.shape)}")
+        if b0 != batch_size:
+            raise ValueError(f"attn_bias (B,H,T,T) must have B={batch_size}; got {b0}")
+        if h0 != num_heads:
+            raise ValueError(f"attn_bias (B,H,T,T) must have H={num_heads}; got {h0}")
+        bias = bias.to(device=device, dtype=dtype)
+        return bias.reshape(batch_size * num_heads, seq_len, seq_len).contiguous()
+
+    raise ValueError(f"attn_bias must be 2D/3D/4D; got ndim={bias.dim()} shape={tuple(bias.shape)}")
+
+
 class TransformerBlock(nn.Module):
     """
     Single pre-norm style block:
       x -> MHA -> residual -> LN
         -> FFN -> residual -> LN
 
-    Supports optional additive attention bias (e.g., relative position).
+    Supports optional additive attention bias (e.g., genomic distance).
     """
     def __init__(self, cfg: TransformerConfig):
         super().__init__()
@@ -118,22 +180,39 @@ class TransformerBlock(nn.Module):
         *,
         key_padding_mask: Optional[torch.Tensor] = None,
         token_pos: Optional[torch.Tensor] = None,  # (B,T) basepairs or other coordinates
+        attn_bias: Optional[torch.Tensor] = None,  # additive bias: (T,T) or (B,T,T) or (B,H,T,T) or (B*H,T,T)
         return_attn: bool = False,
         attn_average_heads: bool = True,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         need_weights = bool(return_attn)
 
+        # Build additive attention mask for nn.MultiheadAttention
         attn_mask = None
+        B, T, _ = x.shape
+        H = self.num_heads
+
+        # 1) relpos bias -> (B,H,T,T) -> (B*H,T,T)
         if self.relpos is not None and token_pos is not None:
-            # (B,H,T,T) -> (B*H,T,T) for nn.MultiheadAttention
-            bias = self.relpos(token_pos).to(dtype=x.dtype)
-            B, H, T, _ = bias.shape
-            attn_mask = bias.view(B * H, T, T)
+            rel = self.relpos(token_pos).to(dtype=x.dtype)          # (B,H,T,T)
+            rel = rel.reshape(B * H, T, T).contiguous()             # (B*H,T,T)
+            attn_mask = rel
+
+        # 2) external attn_bias -> normalize to MHA shape and add
+        if attn_bias is not None:
+            ext = _as_mha_attn_mask(
+                attn_bias,
+                num_heads=H,
+                batch_size=B,
+                seq_len=T,
+                dtype=x.dtype,
+                device=x.device,
+            )
+            attn_mask = ext if attn_mask is None else (attn_mask + ext)
 
         attn_out, attn_w = self.attn(
             x, x, x,
             key_padding_mask=key_padding_mask,        # (B, T) True = PAD
-            attn_mask=attn_mask,                      # None or (B*H,T,T)
+            attn_mask=attn_mask,                      # None or (T,T) or (B*H,T,T)
             need_weights=need_weights,
             average_attn_weights=bool(attn_average_heads),
         )
@@ -157,6 +236,7 @@ class TransformerEncoder(nn.Module):
     Optional:
       - learned absolute positional embeddings (use_positional_encoding=True)
       - relative attention bias via token_pos (if cfg.use_relpos_bias=True)
+      - external additive attention bias via attn_bias (passed through to blocks)
     """
     def __init__(
         self,
@@ -206,6 +286,7 @@ class TransformerEncoder(nn.Module):
         *,
         key_padding_mask: Optional[torch.Tensor] = None,
         token_pos: Optional[torch.Tensor] = None,  # (B,T) for relpos bias (optional)
+        attn_bias: Optional[torch.Tensor] = None,  # (T,T) or (B,T,T) or (B,H,T,T) or (B*H,T,T)
         return_attn: bool = False,
         attn_average_heads: bool = True,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
@@ -227,6 +308,7 @@ class TransformerEncoder(nn.Module):
                     x,
                     key_padding_mask=key_padding_mask,
                     token_pos=token_pos,
+                    attn_bias=attn_bias,
                     return_attn=True,
                     attn_average_heads=attn_average_heads,
                 )
@@ -236,6 +318,7 @@ class TransformerEncoder(nn.Module):
                     x,
                     key_padding_mask=key_padding_mask,
                     token_pos=token_pos,
+                    attn_bias=attn_bias,
                     return_attn=False,
                     attn_average_heads=attn_average_heads,
                 )

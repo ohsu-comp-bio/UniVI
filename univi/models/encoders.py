@@ -56,6 +56,74 @@ class MLPGaussianEncoder(GaussianEncoder):
 
 
 # =============================================================================
+# Compatibility: safe TransformerEncoder call
+# =============================================================================
+
+def _call_transformer_encoder(
+    enc: nn.Module,
+    tokens: torch.Tensor,
+    *,
+    key_padding_mask: Optional[torch.Tensor],
+    return_attn: bool,
+    attn_average_heads: bool = True,
+    attn_bias: Optional[torch.Tensor] = None,
+):
+    """
+    Call TransformerEncoder.forward in a backward-compatible way across
+    versions that may or may not support:
+      - attn_bias kwarg
+      - attn_average_heads kwarg
+
+    Returns
+    -------
+    If return_attn:
+        (h, attn_all)
+    else:
+        h
+    """
+    # Build base kwargs
+    kwargs: Dict[str, Any] = {
+        "key_padding_mask": key_padding_mask,
+        "return_attn": bool(return_attn),
+    }
+
+    # Only include attn_average_heads when returning attention
+    if return_attn:
+        kwargs["attn_average_heads"] = bool(attn_average_heads)
+
+    # Only include attn_bias when provided (older encoders choke on the kwarg)
+    if attn_bias is not None:
+        kwargs["attn_bias"] = attn_bias
+
+    # Try the "full" call first
+    try:
+        return enc(tokens, **kwargs)
+    except TypeError:
+        # Drop attn_bias first (most common incompatibility)
+        if "attn_bias" in kwargs:
+            kwargs.pop("attn_bias", None)
+            try:
+                return enc(tokens, **kwargs)
+            except TypeError:
+                pass
+
+        # Then drop attn_average_heads (some versions don’t support it)
+        if "attn_average_heads" in kwargs:
+            kwargs.pop("attn_average_heads", None)
+            try:
+                return enc(tokens, **kwargs)
+            except TypeError:
+                pass
+
+        # Final fallback: keep only the essentials
+        kwargs_min: Dict[str, Any] = {
+            "key_padding_mask": key_padding_mask,
+            "return_attn": bool(return_attn),
+        }
+        return enc(tokens, **kwargs_min)
+
+
+# =============================================================================
 # Tokenization: vector -> tokens (+ optional embeddings / bias)
 # =============================================================================
 
@@ -177,9 +245,6 @@ class _VectorToTokens(nn.Module):
 
         # ------------------------------------------------------------------
         # Decide final token dim (d_in)
-        #   - if token_proj_dim set -> project to it
-        #   - else if embeddings enabled -> pick a reasonable dim (feature/coord emb dim, or 64)
-        #   - else -> keep base_d (exact backward-compat)
         # ------------------------------------------------------------------
         implied_proj: Optional[int] = None
         if self.token_proj_dim is not None:
@@ -210,7 +275,6 @@ class _VectorToTokens(nn.Module):
                 if self.feature_emb_mode == "concat":
                     self.id_fuse = nn.Linear(self._d_in + emb_dim, self._d_in)
             else:
-                # patch: embed patch index (0..T-1)
                 emb_dim = int(self.feature_emb_dim or self._d_in)
                 self.id_emb = nn.Embedding(int(self.n_tokens), emb_dim)
                 if self.feature_emb_mode == "concat":
@@ -243,14 +307,6 @@ class _VectorToTokens(nn.Module):
         return int(self._d_in)
 
     def set_feature_coords(self, chrom_ids: torch.Tensor, start: torch.Tensor, end: torch.Tensor) -> None:
-        """
-        Attach per-feature genomic coordinates (for ATAC coordinate embeddings and distance bias).
-
-        Parameters
-        ----------
-        chrom_ids : LongTensor [F] with values in [0, n_chroms)
-        start/end : Float/LongTensor [F] in basepairs
-        """
         chrom_ids = chrom_ids.long().contiguous()
         start = start.to(dtype=torch.float32).contiguous()
         end = end.to(dtype=torch.float32).contiguous()
@@ -269,7 +325,7 @@ class _VectorToTokens(nn.Module):
     def _apply_id_emb(self, tokens: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
         if self.id_emb is None:
             return tokens
-        idv = self.id_emb(ids)  # (..., E)
+        idv = self.id_emb(ids)
 
         if self.feature_emb_mode == "add":
             if idv.shape[-1] != tokens.shape[-1]:
@@ -289,7 +345,6 @@ class _VectorToTokens(nn.Module):
         if not self.use_coord_emb:
             return tokens
         if not self._has_coords:
-            # coords not attached -> silently no-op (keeps things robust)
             return tokens
         if self.chrom_emb is None or self.coord_mlp is None:
             return tokens
@@ -299,19 +354,19 @@ class _VectorToTokens(nn.Module):
         if self._chrom_ids.numel() != Fdim:
             raise ValueError(f"Tokenizer coords are for F={self._chrom_ids.numel()} but input_dim={Fdim}")
 
-        chrom = torch.gather(self._chrom_ids.view(1, Fdim).expand(B, Fdim), 1, topk_idx)  # (B,K)
-        start = torch.gather(self._start.view(1, Fdim).expand(B, Fdim), 1, topk_idx)       # (B,K)
-        end = torch.gather(self._end.view(1, Fdim).expand(B, Fdim), 1, topk_idx)           # (B,K)
+        chrom = torch.gather(self._chrom_ids.view(1, Fdim).expand(B, Fdim), 1, topk_idx)
+        start = torch.gather(self._start.view(1, Fdim).expand(B, Fdim), 1, topk_idx)
+        end = torch.gather(self._end.view(1, Fdim).expand(B, Fdim), 1, topk_idx)
 
-        chrom_e = self.chrom_emb(chrom)  # (B,K,D)
+        chrom_e = self.chrom_emb(chrom)
 
         if self.coord_mode == "midpoint":
             mid = 0.5 * (start + end)
-            pos = (mid * self.coord_scale).unsqueeze(-1)  # (B,K,1)
+            pos = (mid * self.coord_scale).unsqueeze(-1)
         else:
-            pos = torch.stack([start * self.coord_scale, end * self.coord_scale], dim=-1)  # (B,K,2)
+            pos = torch.stack([start * self.coord_scale, end * self.coord_scale], dim=-1)
 
-        pos_e = self.coord_mlp(pos)  # (B,K,D)
+        pos_e = self.coord_mlp(pos)
         return tokens + chrom_e + pos_e
 
     def build_distance_attn_bias(
@@ -323,21 +378,6 @@ class _VectorToTokens(nn.Module):
         include_cls: bool = False,
         cls_is_zero: bool = True,
     ) -> torch.Tensor:
-        """
-        Build an additive attention bias matrix for topk tokens based on genomic distance.
-
-        Returns
-        -------
-        attn_bias : FloatTensor (B, T, T)
-          Additive bias to attention logits (higher = more attention).
-          Uses a Gaussian kernel: bias = - (dist / lengthscale)^2
-
-        Notes
-        -----
-        - Only valid when coords are attached via set_feature_coords().
-        - For CLS handling:
-            include_cls=True assumes your tokens will have CLS prepended at position 0.
-        """
         if self.mode not in ("topk_scalar", "topk_channels"):
             raise ValueError("build_distance_attn_bias is only supported for topk_* modes.")
         if not self._has_coords:
@@ -348,12 +388,11 @@ class _VectorToTokens(nn.Module):
         B, K = topk_idx.shape
         Fdim = self.input_dim
 
-        chrom = torch.gather(self._chrom_ids.view(1, Fdim).expand(B, Fdim), 1, topk_idx)  # (B,K)
-        start = torch.gather(self._start.view(1, Fdim).expand(B, Fdim), 1, topk_idx)       # (B,K)
-        end = torch.gather(self._end.view(1, Fdim).expand(B, Fdim), 1, topk_idx)           # (B,K)
-        mid = 0.5 * (start + end)  # (B,K)
+        chrom = torch.gather(self._chrom_ids.view(1, Fdim).expand(B, Fdim), 1, topk_idx)
+        start = torch.gather(self._start.view(1, Fdim).expand(B, Fdim), 1, topk_idx)
+        end = torch.gather(self._end.view(1, Fdim).expand(B, Fdim), 1, topk_idx)
+        mid = 0.5 * (start + end)
 
-        # pairwise distances per batch: (B,K,K)
         dist = (mid.unsqueeze(2) - mid.unsqueeze(1)).abs()
 
         if same_chrom_only:
@@ -370,7 +409,6 @@ class _VectorToTokens(nn.Module):
             out = torch.zeros((B, T, T), device=bias.device, dtype=bias.dtype)
             out[:, 1:, 1:] = bias
             if not cls_is_zero:
-                # (rare) you could choose to bias CLS-to-all; default keeps it neutral
                 pass
             return out
 
@@ -396,14 +434,14 @@ class _VectorToTokens(nn.Module):
 
         if self.mode == "topk_scalar":
             K = min(int(self.n_tokens), Fdim)
-            vals, idx = torch.topk(x, k=K, dim=1, largest=True, sorted=False)  # (B,K)
-            tokens = vals.unsqueeze(-1)  # (B,K,1)
+            vals, idx = torch.topk(x, k=K, dim=1, largest=True, sorted=False)
+            tokens = vals.unsqueeze(-1)
             key_padding_mask = None
             if return_indices:
-                meta["topk_idx"] = idx  # (B,K)
+                meta["topk_idx"] = idx
 
             if self.val_proj is not None:
-                tokens = self.val_proj(tokens)  # (B,K,D)
+                tokens = self.val_proj(tokens)
 
             if self.use_feature_emb:
                 tokens = self._apply_id_emb(tokens, idx)
@@ -412,7 +450,7 @@ class _VectorToTokens(nn.Module):
 
         elif self.mode == "topk_channels":
             K = min(int(self.n_tokens), Fdim)
-            vals, idx = torch.topk(x, k=K, dim=1, largest=True, sorted=True)  # (B,K)
+            vals, idx = torch.topk(x, k=K, dim=1, largest=True, sorted=True)
             feats = []
             for c in self.channels:
                 if c == "value":
@@ -428,13 +466,13 @@ class _VectorToTokens(nn.Module):
                     feats.append((vals == 0).to(torch.float32))
                 else:
                     raise RuntimeError(f"Unhandled channel: {c!r}")
-            tokens = torch.stack(feats, dim=-1)  # (B,K,C)
+            tokens = torch.stack(feats, dim=-1)
             key_padding_mask = None
             if return_indices:
-                meta["topk_idx"] = idx  # (B,K)
+                meta["topk_idx"] = idx
 
             if self.val_proj is not None:
-                tokens = self.val_proj(tokens)  # (B,K,D)
+                tokens = self.val_proj(tokens)
 
             if self.use_feature_emb:
                 tokens = self._apply_id_emb(tokens, idx)
@@ -446,10 +484,10 @@ class _VectorToTokens(nn.Module):
             T = int(self.n_tokens)
             pad = T * P - Fdim
             if pad > 0:
-                x_pad = F.pad(x, (0, pad), mode="constant", value=0.0)  # (B, T*P)
+                x_pad = F.pad(x, (0, pad), mode="constant", value=0.0)
             else:
                 x_pad = x
-            patches = x_pad.view(B, T, P)  # (B,T,P)
+            patches = x_pad.view(B, T, P)
 
             tokens = self.patch_proj(patches) if self.patch_proj is not None else patches
 
@@ -468,12 +506,12 @@ class _VectorToTokens(nn.Module):
                 meta["pad"] = pad
 
             if self.use_feature_emb and self.id_emb is not None:
-                pid = torch.arange(T, device=x.device).view(1, T).expand(B, T)  # (B,T)
+                pid = torch.arange(T, device=x.device).view(1, T).expand(B, T)
                 tokens = self._apply_id_emb(tokens, pid)
 
         if self.add_cls_token:
             assert self.cls_token is not None
-            cls = self.cls_token.expand(B, -1, -1)  # (B,1,D)
+            cls = self.cls_token.expand(B, -1, -1)
             tokens = torch.cat([cls, tokens], dim=1)
             if key_padding_mask is not None:
                 cls_mask = torch.zeros((B, 1), device=x.device, dtype=torch.bool)
@@ -506,7 +544,6 @@ class TransformerGaussianEncoder(GaussianEncoder):
     """
     (B,F) -> tokens (B,T,D_in) -> TransformerEncoder -> (mu, logvar)
 
-    New convenience:
     - attach coords: self.vec2tok.set_feature_coords(...)
     - optional attn_bias passthrough (e.g., distance bias)
     """
@@ -548,19 +585,22 @@ class TransformerGaussianEncoder(GaussianEncoder):
             meta = None
 
         if return_attn:
-            h, attn_all = self.encoder(
+            h, attn_all = _call_transformer_encoder(
+                self.encoder,
                 tokens,
                 key_padding_mask=key_padding_mask,
-                attn_bias=attn_bias,
                 return_attn=True,
                 attn_average_heads=attn_average_heads,
+                attn_bias=attn_bias,
             )
         else:
-            h = self.encoder(
+            h = _call_transformer_encoder(
+                self.encoder,
                 tokens,
                 key_padding_mask=key_padding_mask,
-                attn_bias=attn_bias,
                 return_attn=False,
+                attn_average_heads=attn_average_heads,
+                attn_bias=attn_bias,
             )
             attn_all = None
 
@@ -580,7 +620,6 @@ class TransformerGaussianEncoder(GaussianEncoder):
 # =============================================================================
 
 def _tokcfg_without_cls(tok_cfg_in: TokenizerConfig) -> TokenizerConfig:
-    # preserve all fields, only override add_cls_token=False
     return replace(tok_cfg_in, add_cls_token=False)
 
 
@@ -589,12 +628,6 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
     Fused encoder over multiple modalities by concatenating tokens.
 
     Produces ONE fused posterior q(z | x_all). It does not replace per-modality q(z|x_m).
-
-    Clean coord hook:
-      fused_encoder.set_feature_coords("atac", chrom_ids, start, end)
-
-    Attention bias:
-      You can pass attn_bias=... into forward, or pass attn_bias_fn(meta)->bias.
     """
     def __init__(
         self,
@@ -622,7 +655,7 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
         total_tokens = 0
         for m in self.modalities:
             tok_cfg_in = tokenizers[m]
-            tok_cfg = _tokcfg_without_cls(tok_cfg_in)  # force per-modality CLS off (one global CLS optional)
+            tok_cfg = _tokcfg_without_cls(tok_cfg_in)
 
             tok = _VectorToTokens(input_dim=int(input_dims[m]), tok=tok_cfg)
             self.vec2tok[m] = tok
@@ -671,7 +704,7 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
 
         meta: Dict[str, Any] = {
             "modalities": self.modalities,
-            "slices": {},              # modality -> (start, end) in CONCAT TOKEN SPACE (excluding global CLS)
+            "slices": {},
             "has_global_cls": bool(self.use_global_cls),
             "cls_index": 0 if self.use_global_cls else None,
         }
@@ -686,7 +719,7 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
             else:
                 tok, mask = self.vec2tok[m](x, return_indices=False)
 
-            tok = self.proj[m](tok)  # (B,T,d_model)
+            tok = self.proj[m](tok)
             if self.mod_emb is not None:
                 tok = tok + self.mod_emb[m]
 
@@ -697,7 +730,7 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
             tokens_list.append(tok)
             masks_list.append(mask)
 
-        tokens = torch.cat(tokens_list, dim=1)  # (B, T_total, d_model)
+        tokens = torch.cat(tokens_list, dim=1)
 
         key_padding_mask: Optional[torch.Tensor] = None
         if any(m is not None for m in masks_list):
@@ -712,10 +745,9 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
                     built.append(mask.to(dtype=torch.bool))
             key_padding_mask = torch.cat(built, dim=1)
 
-        # Prepend ONE global CLS if pooling="cls"
         if self.use_global_cls:
             assert self.cls_token is not None
-            cls = self.cls_token.expand(tokens.shape[0], -1, -1)  # (B,1,D)
+            cls = self.cls_token.expand(tokens.shape[0], -1, -1)
             tokens = torch.cat([cls, tokens], dim=1)
 
             meta["slices_with_cls"] = {k: (a + 1, b + 1) for k, (a, b) in meta["slices"].items()}
@@ -726,25 +758,26 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
         else:
             meta["slices_with_cls"] = dict(meta["slices"])
 
-        # Optionally let user build bias from meta
         if attn_bias is None and attn_bias_fn is not None:
             attn_bias = attn_bias_fn(meta)
 
-        # Run transformer (+ optional attn collection)
         if return_attn:
-            h, attn_all = self.encoder(
+            h, attn_all = _call_transformer_encoder(
+                self.encoder,
                 tokens,
                 key_padding_mask=key_padding_mask,
-                attn_bias=attn_bias,
                 return_attn=True,
                 attn_average_heads=attn_average_heads,
+                attn_bias=attn_bias,
             )
         else:
-            h = self.encoder(
+            h = _call_transformer_encoder(
+                self.encoder,
                 tokens,
                 key_padding_mask=key_padding_mask,
-                attn_bias=attn_bias,
                 return_attn=False,
+                attn_average_heads=attn_average_heads,
+                attn_bias=attn_bias,
             )
             attn_all = None
 
@@ -764,13 +797,6 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
 # =============================================================================
 
 def build_gaussian_encoder(*, uni_cfg: UniVIConfig, mod_cfg: ModalityConfig) -> GaussianEncoder:
-    """
-    Factory for per-modality Gaussian encoders.
-
-    Supported mod_cfg.encoder_type:
-      - "mlp" (default)
-      - "transformer"
-    """
     kind = (mod_cfg.encoder_type or "mlp").lower().strip()
 
     if kind == "mlp":
@@ -816,13 +842,6 @@ def build_multimodal_transformer_encoder(
     modalities: Sequence[ModalityConfig],
     fused_modalities: Optional[Sequence[str]] = None,
 ) -> MultiModalTransformerGaussianEncoder:
-    """
-    Build the fused multimodal transformer encoder from existing per-modality configs.
-
-    Requirements:
-      - uni_cfg.fused_transformer is set
-      - each fused modality has mod_cfg.tokenizer set (even if its per-modality encoder is MLP)
-    """
     if uni_cfg.fused_transformer is None:
         raise ValueError("UniVIConfig.fused_transformer must be set for fused_encoder_type='multimodal_transformer'.")
 
