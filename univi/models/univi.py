@@ -1,7 +1,7 @@
 # univi/models/univi.py
 from __future__ import annotations
 
-from typing import Dict, Tuple, Optional, Any, List, Union, Mapping
+from typing import Dict, Tuple, Optional, Any, List, Union, Mapping, Callable
 import math
 
 import torch
@@ -38,15 +38,28 @@ class UniVIMultiModalVAE(nn.Module):
     - Per-modality encoders: MLP (or transformer if set on that modality)
     - Fused posterior: MoE/PoE-style precision fusion over per-modality posteriors
 
-    NEW (optional)
-    --------------
+    Optional fused multimodal transformer posterior
+    ----------------------------------------------
     If cfg.fused_encoder_type == "multimodal_transformer", build a fused encoder that:
       x_dict -> concat(tokens_rna, tokens_adt, tokens_atac, ...) -> transformer -> (mu_fused, logvar_fused)
 
     In that mode:
-      - v2/lite uses mu_fused/logvar_fused (optionally combined with label-expert) for z
+      - v2/lite can use mu_fused/logvar_fused for z
       - alignment term becomes mean_i ||mu_i - mu_fused||^2 (instead of pairwise)
-      - if required fused modalities are missing, it falls back to MoE fusion
+      - if required fused modalities are missing (cfg.fused_require_all_modalities=True), fall back to MoE fusion
+
+    Optional attention bias (safe no-op)
+    ------------------------------------
+    You can pass `attn_bias_cfg` into forward/encode_fused/predict_heads:
+
+      attn_bias_cfg = {
+        "atac": {"type": "distance", "lengthscale_bp": 50000, "same_chrom_only": True},
+      }
+
+    - Per-modality transformer encoders: will try to build a distance attention bias if the tokenizer
+      supports topk indices + coords and exposes build_distance_attn_bias().
+    - Fused multimodal transformer encoder: will fill within-modality blocks (e.g. ATAC slice) and
+      keep cross-modality blocks neutral (0).
     """
 
     LOGVAR_MIN = -10.0
@@ -135,7 +148,7 @@ class UniVIMultiModalVAE(nn.Module):
         self.register_buffer("prior_logvar", torch.zeros(self.latent_dim))
 
         # ------------------------------------------------------------
-        # NEW: optional fused multimodal encoder
+        # Optional fused multimodal encoder
         # ------------------------------------------------------------
         self.fused_encoder_type = (getattr(cfg, "fused_encoder_type", "moe") or "moe").lower().strip()
         self.fused_require_all = bool(getattr(cfg, "fused_require_all_modalities", True))
@@ -343,9 +356,157 @@ class UniVIMultiModalVAE(nn.Module):
             x_oh[mask] = F.one_hot(y[mask], num_classes=C).float()
         return x_oh
 
+    # -------------------------- attention-bias helpers (optional, safe no-op) --------------------------
+
+    def _build_distance_bias_for_permod_transformer(
+        self,
+        enc: nn.Module,
+        x_in: torch.Tensor,
+        cfg_m: Mapping[str, Any],
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Attempt to build (tokens, key_padding_mask, attn_bias) for a TransformerGaussianEncoder-like module.
+
+        Returns (None, None, None) if:
+          - encoder isn't transformer-style,
+          - tokenizer doesn't expose topk indices,
+          - coords aren't attached,
+          - config isn't distance type, etc.
+        """
+        typ = str(cfg_m.get("type", "")).lower().strip()
+        if typ != "distance":
+            return None, None, None
+
+        vec2tok = getattr(enc, "vec2tok", None)
+        core = getattr(enc, "encoder", None)
+        if vec2tok is None or core is None:
+            return None, None, None
+
+        if not hasattr(vec2tok, "build_distance_attn_bias"):
+            return None, None, None
+
+        try:
+            tokens, key_padding_mask, meta = vec2tok(x_in, return_indices=True)
+        except Exception:
+            return None, None, None
+
+        topk_idx = None if meta is None else meta.get("topk_idx", None)
+        if topk_idx is None:
+            return None, None, None
+
+        lengthscale_bp = float(cfg_m.get("lengthscale_bp", 50_000.0))
+        same_chrom_only = bool(cfg_m.get("same_chrom_only", True))
+        include_cls = bool(getattr(vec2tok, "add_cls_token", False))
+
+        try:
+            attn_bias = vec2tok.build_distance_attn_bias(
+                topk_idx,
+                lengthscale_bp=lengthscale_bp,
+                same_chrom_only=same_chrom_only,
+                include_cls=include_cls,
+            )
+        except Exception:
+            return None, None, None
+
+        return tokens, key_padding_mask, attn_bias
+
+    def _build_fused_attn_bias_fn(
+        self,
+        attn_bias_cfg: Mapping[str, Any],
+        sub_x_dict: Dict[str, torch.Tensor],
+    ) -> Optional[Callable[[Dict[str, Any]], Optional[torch.Tensor]]]:
+        """
+        Build a callable(meta)->(B,T,T) for MultiModalTransformerGaussianEncoder.
+
+        Behavior:
+          - fills ONLY within-modality blocks for modalities configured as distance bias
+          - keeps cross-modality logits neutral (0)
+        """
+        fused = self.fused_encoder
+        if fused is None:
+            return None
+
+        vec2tok_map = getattr(fused, "vec2tok", None)
+        if vec2tok_map is None:
+            return None
+
+        # only bother if any modality is configured for distance bias
+        want_any = any(str(v.get("type", "")).lower().strip() == "distance" for v in attn_bias_cfg.values() if isinstance(v, Mapping))
+        if not want_any:
+            return None
+
+        def fn(meta: Dict[str, Any]) -> Optional[torch.Tensor]:
+            if not meta:
+                return None
+
+            # batch size
+            any_x = next(iter(sub_x_dict.values()))
+            B = int(any_x.shape[0])
+
+            slices = meta.get("slices_with_cls", meta.get("slices", {}))
+            if not slices:
+                return None
+
+            # total token length in fused space (already includes global CLS if present)
+            T = 0
+            for _, (a, b) in slices.items():
+                T = max(T, int(b))
+            if bool(meta.get("has_global_cls", False)):
+                T = max(T, 1)
+
+            bias_full = torch.zeros((B, T, T), device=any_x.device, dtype=torch.float32)
+
+            for m, cfg_m in attn_bias_cfg.items():
+                if not isinstance(cfg_m, Mapping):
+                    continue
+                if str(cfg_m.get("type", "")).lower().strip() != "distance":
+                    continue
+                if m not in slices:
+                    continue
+                if m not in vec2tok_map:
+                    continue
+
+                tok = vec2tok_map[m]
+                if not hasattr(tok, "build_distance_attn_bias"):
+                    continue
+
+                mmeta = meta.get(m, {}) or {}
+                topk_idx = mmeta.get("topk_idx", None)
+                if topk_idx is None:
+                    continue
+
+                lengthscale_bp = float(cfg_m.get("lengthscale_bp", 50_000.0))
+                same_chrom_only = bool(cfg_m.get("same_chrom_only", True))
+
+                try:
+                    local = tok.build_distance_attn_bias(
+                        topk_idx,
+                        lengthscale_bp=lengthscale_bp,
+                        same_chrom_only=same_chrom_only,
+                        include_cls=False,  # per-modality cls is forced off in fused encoder
+                    )  # (B, K, K)
+                except Exception:
+                    continue
+
+                a, b = slices[m]
+                a = int(a); b = int(b)
+                if (b - a) != int(local.shape[1]):
+                    continue
+
+                bias_full[:, a:b, a:b] = local
+
+            return bias_full
+
+        return fn
+
     # -------------------------- encode/decode/fuse --------------------------
 
-    def encode_modalities(self, x_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    def encode_modalities(
+        self,
+        x_dict: Dict[str, torch.Tensor],
+        *,
+        attn_bias_cfg: Optional[Mapping[str, Any]] = None,
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         mu_dict: Dict[str, torch.Tensor] = {}
         logvar_dict: Dict[str, torch.Tensor] = {}
 
@@ -354,7 +515,30 @@ class UniVIMultiModalVAE(nn.Module):
                 continue
 
             x_in = self._encode_categorical_input_if_needed(m, x_dict[m])
-            mu, logvar = self.encoders[m](x_in)
+            enc = self.encoders[m]
+
+            # optional: transformer distance bias (single-pass through core encoder)
+            tokens = key_padding_mask = attn_bias = None
+            if attn_bias_cfg is not None and isinstance(attn_bias_cfg, Mapping):
+                cfg_m = attn_bias_cfg.get(m, None)
+                if isinstance(cfg_m, Mapping):
+                    tokens, key_padding_mask, attn_bias = self._build_distance_bias_for_permod_transformer(enc, x_in, cfg_m)
+
+            if tokens is not None and getattr(enc, "encoder", None) is not None:
+                # enc is TransformerGaussianEncoder-like; run core directly
+                h = enc.encoder(
+                    tokens,
+                    key_padding_mask=key_padding_mask,
+                    attn_bias=attn_bias,
+                    return_attn=False,
+                )
+                mu, logvar = torch.chunk(h, 2, dim=-1)
+            else:
+                # fallback: standard encoder call
+                try:
+                    mu, logvar = enc(x_in, attn_bias=attn_bias)  # transformer supports attn_bias kw
+                except TypeError:
+                    mu, logvar = enc(x_in)
 
             mu = self.encoder_heads[m](mu)
             logvar = torch.clamp(logvar, self.LOGVAR_MIN, self.LOGVAR_MAX)
@@ -381,22 +565,44 @@ class UniVIMultiModalVAE(nn.Module):
     def decode_modalities(self, z: torch.Tensor) -> Dict[str, Any]:
         return {m: self.decoders[m](z) for m in self.modality_names}
 
-    # -------------------- fused posterior (NEW) --------------------
+    # -------------------- fused posterior --------------------
+
+    def _present_fused_modalities(self, x_dict: Dict[str, torch.Tensor]) -> List[str]:
+        return [m for m in self.fused_modalities if (m in x_dict) and (x_dict[m] is not None)]
 
     def _can_use_fused_encoder(self, x_dict: Dict[str, torch.Tensor]) -> bool:
         if self.fused_encoder is None:
             return False
         if not self.fused_modalities:
             return False
-        if self.fused_require_all:
-            return all((m in x_dict) and (x_dict[m] is not None) for m in self.fused_modalities)
-        # if not require_all, we still demand at least one (but encoder itself expects keys)
-        return all((m in x_dict) and (x_dict[m] is not None) for m in self.fused_modalities)
 
-    def _compute_fused_posterior(self, x_dict: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        present = self._present_fused_modalities(x_dict)
+        if self.fused_require_all:
+            return len(present) == len(self.fused_modalities)
+        return len(present) >= 1
+
+    def _compute_fused_posterior(
+        self,
+        x_dict: Dict[str, torch.Tensor],
+        *,
+        attn_bias_cfg: Optional[Mapping[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         assert self.fused_encoder is not None
-        sub = {m: x_dict[m] for m in self.fused_modalities}
-        mu_f, logvar_f = self.fused_encoder(sub)
+        present = self._present_fused_modalities(x_dict)
+        sub = {m: x_dict[m] for m in present}
+
+        attn_bias_fn = None
+        want_meta = False
+        if attn_bias_cfg is not None and isinstance(attn_bias_cfg, Mapping):
+            attn_bias_fn = self._build_fused_attn_bias_fn(attn_bias_cfg, sub)
+            want_meta = attn_bias_fn is not None
+
+        out = self.fused_encoder(sub, return_token_meta=want_meta, attn_bias_fn=attn_bias_fn)
+        if want_meta:
+            mu_f, logvar_f, _meta = out  # type: ignore[misc]
+        else:
+            mu_f, logvar_f = out  # type: ignore[misc]
+
         logvar_f = torch.clamp(logvar_f, self.LOGVAR_MIN, self.LOGVAR_MAX)
         return mu_f, logvar_f
 
@@ -495,40 +701,50 @@ class UniVIMultiModalVAE(nn.Module):
 
     # ------------------------------ forward dispatcher ------------------------------
 
-    def forward(self, x_dict: Dict[str, torch.Tensor], epoch: int = 0, y: Optional[YType] = None) -> Dict[str, torch.Tensor]:
+    def forward(
+        self,
+        x_dict: Dict[str, torch.Tensor],
+        epoch: int = 0,
+        y: Optional[YType] = None,
+        attn_bias_cfg: Optional[Mapping[str, Any]] = None,
+        **kwargs: Any,  # keep older wrappers from breaking if they pass extra args
+    ) -> Dict[str, torch.Tensor]:
         mode = (self.loss_mode or "v2").lower()
         if mode in ("v1", "paper", "cross"):
-            return self._forward_v1(x_dict=x_dict, epoch=epoch, y=y)
+            return self._forward_v1(x_dict=x_dict, epoch=epoch, y=y, attn_bias_cfg=attn_bias_cfg)
         if mode in ("v2", "lite", "light", "moe", "poe", "fused"):
-            return self._forward_v2(x_dict=x_dict, epoch=epoch, y=y)
+            return self._forward_v2(x_dict=x_dict, epoch=epoch, y=y, attn_bias_cfg=attn_bias_cfg)
         raise ValueError(f"Unknown loss_mode={self.loss_mode!r}.")
 
     # ------------------------------ v2 / lite ------------------------------
 
-    def _forward_v2(self, x_dict: Dict[str, torch.Tensor], epoch: int = 0, y: Optional[YType] = None) -> Dict[str, torch.Tensor]:
-        mu_dict, logvar_dict = self.encode_modalities(x_dict)
+    def _forward_v2(
+        self,
+        x_dict: Dict[str, torch.Tensor],
+        epoch: int = 0,
+        y: Optional[YType] = None,
+        attn_bias_cfg: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, torch.Tensor]:
+        mu_dict, logvar_dict = self.encode_modalities(x_dict, attn_bias_cfg=attn_bias_cfg)
         if len(mu_dict) == 0:
             raise ValueError("At least one modality must be present in x_dict.")
 
-        # decide fused posterior source
         use_fused = (self.fused_encoder_type == "multimodal_transformer") and self._can_use_fused_encoder(x_dict)
         mu_fused: Optional[torch.Tensor] = None
         logvar_fused: Optional[torch.Tensor] = None
 
         if use_fused:
-            mu_fused, logvar_fused = self._compute_fused_posterior(x_dict)
+            mu_fused, logvar_fused = self._compute_fused_posterior(x_dict, attn_bias_cfg=attn_bias_cfg)
             mu_z, logvar_z = mu_fused, logvar_fused
         else:
             mu_z, logvar_z = self.mixture_of_experts(mu_dict, logvar_dict)
 
-        # optional: inject legacy label expert into fusion
         y_legacy = self._extract_legacy_y(y)
         if self.label_encoder is not None and y_legacy is not None and epoch >= self.label_encoder_warmup:
             B = mu_z.shape[0]
             device = mu_z.device
             mu_y, logvar_y = self._encode_labels_as_expert(y=y_legacy, B=B, device=device)
 
-            # fuse ONLY base posterior (fused or moe) + label expert
             base_mu_dict = {"__base__": mu_z, "__label__": mu_y}
             base_lv_dict = {"__base__": logvar_z, "__label__": logvar_y}
             mu_z, logvar_z = self.mixture_of_experts(base_mu_dict, base_lv_dict)
@@ -558,7 +774,6 @@ class UniVIMultiModalVAE(nn.Module):
         logvar_p = self.prior_logvar.expand_as(logvar_z)
         kl = self._kl_gaussian(mu_z, logvar_z, mu_p, logvar_p)
 
-        # alignment
         real_mu = {k: v for k, v in mu_dict.items() if not k.startswith("__")}
         if use_fused and (mu_fused is not None):
             align_loss = self._alignment_loss_to_fused(real_mu, mu_fused)
@@ -575,7 +790,6 @@ class UniVIMultiModalVAE(nn.Module):
         loss_fixed = recon_total + self.beta_max * kl + self.gamma_max * align_loss
         loss = recon_total + beta_used * kl + gamma_used * align_loss
 
-        # legacy label decoder head (optional)
         class_loss = None
         class_logits = None
         if self.label_decoder is not None:
@@ -596,7 +810,6 @@ class UniVIMultiModalVAE(nn.Module):
                 loss_annealed = loss_annealed + self.label_loss_weight * class_loss
                 loss_fixed = loss_fixed + self.label_loss_weight * class_loss
 
-        # multi-head losses (dict y)
         loss, loss_annealed, loss_fixed, head_logits, head_loss_means = self._apply_multihead_losses(
             mu_z=mu_z,
             z=z,
@@ -639,18 +852,23 @@ class UniVIMultiModalVAE(nn.Module):
 
     # ------------------------------ v1 ------------------------------
 
-    def _forward_v1(self, x_dict: Dict[str, torch.Tensor], epoch: int = 0, y: Optional[YType] = None) -> Dict[str, torch.Tensor]:
-        mu_dict, logvar_dict = self.encode_modalities(x_dict)
+    def _forward_v1(
+        self,
+        x_dict: Dict[str, torch.Tensor],
+        epoch: int = 0,
+        y: Optional[YType] = None,
+        attn_bias_cfg: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, torch.Tensor]:
+        mu_dict, logvar_dict = self.encode_modalities(x_dict, attn_bias_cfg=attn_bias_cfg)
         if len(mu_dict) == 0:
             raise ValueError("At least one modality must be present in x_dict.")
 
         present = list(mu_dict.keys())
         K = len(present)
 
-        # base "moe" posterior used in v1 outputs; optionally replaced by fused posterior
         use_fused = (self.fused_encoder_type == "multimodal_transformer") and self._can_use_fused_encoder(x_dict)
         if use_fused:
-            mu_moe, logvar_moe = self._compute_fused_posterior(x_dict)
+            mu_moe, logvar_moe = self._compute_fused_posterior(x_dict, attn_bias_cfg=attn_bias_cfg)
         else:
             mu_moe, logvar_moe = self.mixture_of_experts(mu_dict, logvar_dict)
 
@@ -842,7 +1060,7 @@ class UniVIMultiModalVAE(nn.Module):
             out["head_losses"] = head_loss_means
         return out
 
-    # ------------------------------ reconstruction loss (unchanged logic) ------------------------------
+    # ------------------------------ reconstruction loss (unchanged) ------------------------------
 
     def _unwrap_decoder_out(self, dec_out: Any) -> Any:
         if isinstance(dec_out, (tuple, list)):
@@ -981,14 +1199,15 @@ class UniVIMultiModalVAE(nn.Module):
         y: Optional[YType] = None,
         use_mean: bool = True,
         inject_label_expert: bool = True,
+        attn_bias_cfg: Optional[Mapping[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        mu_dict, logvar_dict = self.encode_modalities(x_dict)
+        mu_dict, logvar_dict = self.encode_modalities(x_dict, attn_bias_cfg=attn_bias_cfg)
         if len(mu_dict) == 0:
             raise ValueError("At least one modality must be present in x_dict.")
 
         use_fused = (self.fused_encoder_type == "multimodal_transformer") and self._can_use_fused_encoder(x_dict)
         if use_fused:
-            mu_z, logvar_z = self._compute_fused_posterior(x_dict)
+            mu_z, logvar_z = self._compute_fused_posterior(x_dict, attn_bias_cfg=attn_bias_cfg)
         else:
             mu_z, logvar_z = self.mixture_of_experts(mu_dict, logvar_dict)
 
@@ -1019,6 +1238,7 @@ class UniVIMultiModalVAE(nn.Module):
         use_mean: bool = True,
         inject_label_expert: bool = True,
         return_probs: bool = True,
+        attn_bias_cfg: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, torch.Tensor]:
         mu_z, logvar_z, z = self.encode_fused(
             x_dict,
@@ -1026,6 +1246,7 @@ class UniVIMultiModalVAE(nn.Module):
             y=y,
             use_mean=use_mean,
             inject_label_expert=inject_label_expert,
+            attn_bias_cfg=attn_bias_cfg,
         )
         out: Dict[str, torch.Tensor] = {}
 

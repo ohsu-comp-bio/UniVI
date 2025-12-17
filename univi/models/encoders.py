@@ -1,8 +1,8 @@
 # univi/models/encoders.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple, Union, Any
+from dataclasses import dataclass, replace
+from typing import Dict, List, Optional, Sequence, Tuple, Union, Any, Mapping
 
 import torch
 from torch import nn
@@ -56,8 +56,17 @@ class MLPGaussianEncoder(GaussianEncoder):
 
 
 # =============================================================================
-# Tokenization: vector -> tokens
+# Tokenization: vector -> tokens (+ optional embeddings / bias)
 # =============================================================================
+
+def _mlp(in_dim: int, out_dim: int, hidden: int = 128) -> nn.Module:
+    return nn.Sequential(
+        nn.LayerNorm(in_dim),
+        nn.Linear(in_dim, hidden),
+        nn.GELU(),
+        nn.Linear(hidden, out_dim),
+    )
+
 
 class _VectorToTokens(nn.Module):
     """
@@ -80,9 +89,20 @@ class _VectorToTokens(nn.Module):
     add_cls_token:
         If True, prepend a learned CLS token embedding to tokens.
 
+    NEW (optional)
+    --------------
+    - use_feature_embedding:
+        Adds learned embedding for selected feature IDs (topk modes), or patch IDs (patch mode).
+    - use_coord_embedding (ATAC):
+        Adds chromosome embedding + coordinate MLP for selected feature coords (topk modes).
+        Call set_feature_coords(chrom_ids, start, end) to attach coords.
+    - token_proj_dim:
+        If set (or implied by embeddings), project raw token channels/patches to token_proj_dim.
+
     Notes
     -----
     - Expects dense float input (B,F). If modality data is sparse, densify upstream.
+    - key_padding_mask uses True = PAD/ignore (MultiheadAttention convention).
     """
     def __init__(self, *, input_dim: int, tok: TokenizerConfig):
         super().__init__()
@@ -94,12 +114,35 @@ class _VectorToTokens(nn.Module):
             raise ValueError(f"Unknown tokenizer mode {tok.mode!r}")
 
         self.mode = mode
-        self.add_cls_token = bool(tok.add_cls_token)
+        self.add_cls_token = bool(getattr(tok, "add_cls_token", False))
 
-        # d_in per mode
+        # ------------------------------------------------------------------
+        # NEW options (all default to False/None -> no behavior change)
+        # ------------------------------------------------------------------
+        self.use_feature_emb = bool(getattr(tok, "use_feature_embedding", False))
+        self.feature_emb_mode = str(getattr(tok, "feature_emb_mode", "add")).lower().strip()
+        self.n_features = getattr(tok, "n_features", None)
+        self.feature_emb_dim = getattr(tok, "feature_emb_dim", None)
+
+        self.use_coord_emb = bool(getattr(tok, "use_coord_embedding", False))
+        self.coord_mode = str(getattr(tok, "coord_mode", "midpoint")).lower().strip()
+        self.coord_scale = float(getattr(tok, "coord_scale", 1e-6))
+        self.coord_emb_dim = getattr(tok, "coord_emb_dim", None)
+        self.n_chroms = getattr(tok, "n_chroms", None)
+        self.coord_mlp_hidden = int(getattr(tok, "coord_mlp_hidden", 128))
+
+        self.token_proj_dim = getattr(tok, "token_proj_dim", None)
+        self._has_coords = False
+        self.register_buffer("_chrom_ids", torch.empty(0, dtype=torch.long), persistent=False)
+        self.register_buffer("_start", torch.empty(0), persistent=False)
+        self.register_buffer("_end", torch.empty(0), persistent=False)
+
+        # ------------------------------------------------------------------
+        # Base token dims per mode (pre-projection)
+        # ------------------------------------------------------------------
         if self.mode == "topk_scalar":
             self.n_tokens = int(tok.n_tokens)
-            self.d_in = 1
+            base_d = 1
             self.channels: Sequence[str] = ("value",)
 
         elif self.mode == "topk_channels":
@@ -111,31 +154,227 @@ class _VectorToTokens(nn.Module):
             if bad:
                 raise ValueError(f"topk_channels invalid channels: {bad}")
             self.channels = tuple(ch)
-            self.d_in = len(self.channels)
+            base_d = len(self.channels)
 
         else:  # patch
             P = int(tok.patch_size)
             if P <= 0:
                 raise ValueError("patch_size must be > 0")
             self.patch_size = P
-
             T = (self.input_dim + P - 1) // P
             self.n_tokens = int(T)
 
             proj_dim = tok.patch_proj_dim
             if proj_dim is None:
                 self.patch_proj = None
-                self.d_in = P
+                base_d = P
             else:
                 proj_dim = int(proj_dim)
                 if proj_dim <= 0:
                     raise ValueError("patch_proj_dim must be > 0 if set")
                 self.patch_proj = nn.Linear(P, proj_dim)
-                self.d_in = proj_dim
+                base_d = proj_dim
 
+        # ------------------------------------------------------------------
+        # Decide final token dim (d_in)
+        #   - if token_proj_dim set -> project to it
+        #   - else if embeddings enabled -> pick a reasonable dim (feature/coord emb dim, or 64)
+        #   - else -> keep base_d (exact backward-compat)
+        # ------------------------------------------------------------------
+        implied_proj: Optional[int] = None
+        if self.token_proj_dim is not None:
+            implied_proj = int(self.token_proj_dim)
+        elif self.use_feature_emb or self.use_coord_emb:
+            implied_proj = int(self.feature_emb_dim or self.coord_emb_dim or 64)
+
+        self._d_in = int(implied_proj) if implied_proj is not None else int(base_d)
+
+        # ------------------------------------------------------------------
+        # Optional projection from base_d -> d_in
+        # ------------------------------------------------------------------
+        self.val_proj: Optional[nn.Module] = None
+        if self._d_in != int(base_d):
+            self.val_proj = _mlp(int(base_d), self._d_in, hidden=self.coord_mlp_hidden)
+
+        # ------------------------------------------------------------------
+        # NEW: feature ID embedding (topk) / patch ID embedding (patch)
+        # ------------------------------------------------------------------
+        self.id_emb: Optional[nn.Embedding] = None
+        self.id_fuse: Optional[nn.Linear] = None
+        if self.use_feature_emb:
+            if self.mode in ("topk_scalar", "topk_channels"):
+                if self.n_features is None or int(self.n_features) <= 0:
+                    raise ValueError("use_feature_embedding=True for topk requires tok.n_features > 0")
+                emb_dim = int(self.feature_emb_dim or self._d_in)
+                self.id_emb = nn.Embedding(int(self.n_features), emb_dim)
+                if self.feature_emb_mode == "concat":
+                    self.id_fuse = nn.Linear(self._d_in + emb_dim, self._d_in)
+            else:
+                # patch: embed patch index (0..T-1)
+                emb_dim = int(self.feature_emb_dim or self._d_in)
+                self.id_emb = nn.Embedding(int(self.n_tokens), emb_dim)
+                if self.feature_emb_mode == "concat":
+                    self.id_fuse = nn.Linear(self._d_in + emb_dim, self._d_in)
+
+        # ------------------------------------------------------------------
+        # NEW: coord embeddings (topk only)
+        # ------------------------------------------------------------------
+        self.chrom_emb: Optional[nn.Embedding] = None
+        self.coord_mlp: Optional[nn.Module] = None
+        if self.use_coord_emb:
+            if self.mode not in ("topk_scalar", "topk_channels"):
+                raise ValueError("use_coord_embedding=True is only supported for topk_* tokenizers.")
+            if self.n_chroms is None or int(self.n_chroms) <= 0:
+                raise ValueError("use_coord_embedding=True requires tok.n_chroms > 0")
+            self.chrom_emb = nn.Embedding(int(self.n_chroms), self._d_in)
+            cd_in = 1 if self.coord_mode == "midpoint" else 2
+            self.coord_mlp = _mlp(cd_in, self._d_in, hidden=self.coord_mlp_hidden)
+
+        # ------------------------------------------------------------------
+        # CLS token (learned, matches d_in)
+        # ------------------------------------------------------------------
         self.cls_token: Optional[nn.Parameter] = None
         if self.add_cls_token:
-            self.cls_token = nn.Parameter(torch.zeros(1, 1, self.d_in))
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, self._d_in))
+            nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
+
+    @property
+    def d_in(self) -> int:
+        return int(self._d_in)
+
+    def set_feature_coords(self, chrom_ids: torch.Tensor, start: torch.Tensor, end: torch.Tensor) -> None:
+        """
+        Attach per-feature genomic coordinates (for ATAC coordinate embeddings and distance bias).
+
+        Parameters
+        ----------
+        chrom_ids : LongTensor [F] with values in [0, n_chroms)
+        start/end : Float/LongTensor [F] in basepairs
+        """
+        chrom_ids = chrom_ids.long().contiguous()
+        start = start.to(dtype=torch.float32).contiguous()
+        end = end.to(dtype=torch.float32).contiguous()
+        if chrom_ids.ndim != 1 or start.ndim != 1 or end.ndim != 1:
+            raise ValueError("set_feature_coords expects 1D tensors: chrom_ids/start/end.")
+        if not (chrom_ids.shape[0] == start.shape[0] == end.shape[0] == self.input_dim):
+            raise ValueError(
+                f"set_feature_coords expects length F={self.input_dim}; got "
+                f"{chrom_ids.shape[0]}, {start.shape[0]}, {end.shape[0]}"
+            )
+        self._chrom_ids = chrom_ids
+        self._start = start
+        self._end = end
+        self._has_coords = True
+
+    def _apply_id_emb(self, tokens: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
+        if self.id_emb is None:
+            return tokens
+        idv = self.id_emb(ids)  # (..., E)
+
+        if self.feature_emb_mode == "add":
+            if idv.shape[-1] != tokens.shape[-1]:
+                raise ValueError(
+                    f"feature_emb_mode='add' requires emb_dim==d_in; got emb_dim={idv.shape[-1]} vs d_in={tokens.shape[-1]}"
+                )
+            return tokens + idv
+
+        if self.feature_emb_mode == "concat":
+            if self.id_fuse is None:
+                raise RuntimeError("id_fuse not initialized for concat mode.")
+            return self.id_fuse(torch.cat([tokens, idv], dim=-1))
+
+        raise ValueError(f"Unknown feature_emb_mode={self.feature_emb_mode!r}")
+
+    def _apply_coord_emb(self, tokens: torch.Tensor, topk_idx: torch.Tensor) -> torch.Tensor:
+        if not self.use_coord_emb:
+            return tokens
+        if not self._has_coords:
+            # coords not attached -> silently no-op (keeps things robust)
+            return tokens
+        if self.chrom_emb is None or self.coord_mlp is None:
+            return tokens
+
+        B, K = topk_idx.shape
+        Fdim = self.input_dim
+        if self._chrom_ids.numel() != Fdim:
+            raise ValueError(f"Tokenizer coords are for F={self._chrom_ids.numel()} but input_dim={Fdim}")
+
+        chrom = torch.gather(self._chrom_ids.view(1, Fdim).expand(B, Fdim), 1, topk_idx)  # (B,K)
+        start = torch.gather(self._start.view(1, Fdim).expand(B, Fdim), 1, topk_idx)       # (B,K)
+        end = torch.gather(self._end.view(1, Fdim).expand(B, Fdim), 1, topk_idx)           # (B,K)
+
+        chrom_e = self.chrom_emb(chrom)  # (B,K,D)
+
+        if self.coord_mode == "midpoint":
+            mid = 0.5 * (start + end)
+            pos = (mid * self.coord_scale).unsqueeze(-1)  # (B,K,1)
+        else:
+            pos = torch.stack([start * self.coord_scale, end * self.coord_scale], dim=-1)  # (B,K,2)
+
+        pos_e = self.coord_mlp(pos)  # (B,K,D)
+        return tokens + chrom_e + pos_e
+
+    def build_distance_attn_bias(
+        self,
+        topk_idx: torch.Tensor,
+        *,
+        lengthscale_bp: float = 50_000.0,
+        same_chrom_only: bool = True,
+        include_cls: bool = False,
+        cls_is_zero: bool = True,
+    ) -> torch.Tensor:
+        """
+        Build an additive attention bias matrix for topk tokens based on genomic distance.
+
+        Returns
+        -------
+        attn_bias : FloatTensor (B, T, T)
+          Additive bias to attention logits (higher = more attention).
+          Uses a Gaussian kernel: bias = - (dist / lengthscale)^2
+
+        Notes
+        -----
+        - Only valid when coords are attached via set_feature_coords().
+        - For CLS handling:
+            include_cls=True assumes your tokens will have CLS prepended at position 0.
+        """
+        if self.mode not in ("topk_scalar", "topk_channels"):
+            raise ValueError("build_distance_attn_bias is only supported for topk_* modes.")
+        if not self._has_coords:
+            raise ValueError("build_distance_attn_bias requires feature coords; call set_feature_coords first.")
+        if float(lengthscale_bp) <= 0:
+            raise ValueError("lengthscale_bp must be > 0")
+
+        B, K = topk_idx.shape
+        Fdim = self.input_dim
+
+        chrom = torch.gather(self._chrom_ids.view(1, Fdim).expand(B, Fdim), 1, topk_idx)  # (B,K)
+        start = torch.gather(self._start.view(1, Fdim).expand(B, Fdim), 1, topk_idx)       # (B,K)
+        end = torch.gather(self._end.view(1, Fdim).expand(B, Fdim), 1, topk_idx)           # (B,K)
+        mid = 0.5 * (start + end)  # (B,K)
+
+        # pairwise distances per batch: (B,K,K)
+        dist = (mid.unsqueeze(2) - mid.unsqueeze(1)).abs()
+
+        if same_chrom_only:
+            same = (chrom.unsqueeze(2) == chrom.unsqueeze(1))
+        else:
+            same = torch.ones((B, K, K), device=dist.device, dtype=torch.bool)
+
+        ls = float(lengthscale_bp)
+        bias = -((dist / ls) ** 2)
+        bias = torch.where(same, bias, torch.full_like(bias, -1e4))
+
+        if include_cls:
+            T = K + 1
+            out = torch.zeros((B, T, T), device=bias.device, dtype=bias.dtype)
+            out[:, 1:, 1:] = bias
+            if not cls_is_zero:
+                # (rare) you could choose to bias CLS-to-all; default keeps it neutral
+                pass
+            return out
+
+        return bias
 
     def forward(
         self,
@@ -163,6 +402,14 @@ class _VectorToTokens(nn.Module):
             if return_indices:
                 meta["topk_idx"] = idx  # (B,K)
 
+            if self.val_proj is not None:
+                tokens = self.val_proj(tokens)  # (B,K,D)
+
+            if self.use_feature_emb:
+                tokens = self._apply_id_emb(tokens, idx)
+
+            tokens = self._apply_coord_emb(tokens, idx)
+
         elif self.mode == "topk_channels":
             K = min(int(self.n_tokens), Fdim)
             vals, idx = torch.topk(x, k=K, dim=1, largest=True, sorted=True)  # (B,K)
@@ -185,6 +432,14 @@ class _VectorToTokens(nn.Module):
             key_padding_mask = None
             if return_indices:
                 meta["topk_idx"] = idx  # (B,K)
+
+            if self.val_proj is not None:
+                tokens = self.val_proj(tokens)  # (B,K,D)
+
+            if self.use_feature_emb:
+                tokens = self._apply_id_emb(tokens, idx)
+
+            tokens = self._apply_coord_emb(tokens, idx)
 
         else:  # patch
             P = int(self.patch_size)
@@ -211,6 +466,10 @@ class _VectorToTokens(nn.Module):
                 meta["patch_size"] = P
                 meta["n_patches"] = T
                 meta["pad"] = pad
+
+            if self.use_feature_emb and self.id_emb is not None:
+                pid = torch.arange(T, device=x.device).view(1, T).expand(B, T)  # (B,T)
+                tokens = self._apply_id_emb(tokens, pid)
 
         if self.add_cls_token:
             assert self.cls_token is not None
@@ -246,6 +505,10 @@ def _cfg_to_model_tcfg(cfg: CFGTransformerConfig) -> ModelTransformerConfig:
 class TransformerGaussianEncoder(GaussianEncoder):
     """
     (B,F) -> tokens (B,T,D_in) -> TransformerEncoder -> (mu, logvar)
+
+    New convenience:
+    - attach coords: self.vec2tok.set_feature_coords(...)
+    - optional attn_bias passthrough (e.g., distance bias)
     """
     def __init__(
         self,
@@ -276,6 +539,7 @@ class TransformerGaussianEncoder(GaussianEncoder):
         return_attn: bool = False,
         attn_average_heads: bool = True,
         return_token_meta: bool = False,
+        attn_bias: Optional[torch.Tensor] = None,
     ):
         if return_token_meta:
             tokens, key_padding_mask, meta = self.vec2tok(x, return_indices=True)
@@ -287,11 +551,17 @@ class TransformerGaussianEncoder(GaussianEncoder):
             h, attn_all = self.encoder(
                 tokens,
                 key_padding_mask=key_padding_mask,
+                attn_bias=attn_bias,
                 return_attn=True,
                 attn_average_heads=attn_average_heads,
             )
         else:
-            h = self.encoder(tokens, key_padding_mask=key_padding_mask, return_attn=False)
+            h = self.encoder(
+                tokens,
+                key_padding_mask=key_padding_mask,
+                attn_bias=attn_bias,
+                return_attn=False,
+            )
             attn_all = None
 
         mu, logvar = torch.chunk(h, 2, dim=-1)
@@ -306,14 +576,25 @@ class TransformerGaussianEncoder(GaussianEncoder):
 
 
 # =============================================================================
-# NEW: Multimodal concatenated-token transformer Gaussian encoder (fused)
+# Multimodal concatenated-token transformer Gaussian encoder (fused)
 # =============================================================================
+
+def _tokcfg_without_cls(tok_cfg_in: TokenizerConfig) -> TokenizerConfig:
+    # preserve all fields, only override add_cls_token=False
+    return replace(tok_cfg_in, add_cls_token=False)
+
 
 class MultiModalTransformerGaussianEncoder(nn.Module):
     """
     Fused encoder over multiple modalities by concatenating tokens.
 
     Produces ONE fused posterior q(z | x_all). It does not replace per-modality q(z|x_m).
+
+    Clean coord hook:
+      fused_encoder.set_feature_coords("atac", chrom_ids, start, end)
+
+    Attention bias:
+      You can pass attn_bias=... into forward, or pass attn_bias_fn(meta)->bias.
     """
     def __init__(
         self,
@@ -341,16 +622,7 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
         total_tokens = 0
         for m in self.modalities:
             tok_cfg_in = tokenizers[m]
-
-            # force per-modality CLS off; use only one global CLS if pooling="cls"
-            tok_cfg = TokenizerConfig(
-                mode=tok_cfg_in.mode,
-                n_tokens=int(tok_cfg_in.n_tokens),
-                channels=tuple(tok_cfg_in.channels),
-                patch_size=int(tok_cfg_in.patch_size),
-                patch_proj_dim=None if tok_cfg_in.patch_proj_dim is None else int(tok_cfg_in.patch_proj_dim),
-                add_cls_token=False,
-            )
+            tok_cfg = _tokcfg_without_cls(tok_cfg_in)  # force per-modality CLS off (one global CLS optional)
 
             tok = _VectorToTokens(input_dim=int(input_dims[m]), tok=tok_cfg)
             self.vec2tok[m] = tok
@@ -358,12 +630,15 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
 
             if self.mod_emb is not None:
                 self.mod_emb[m] = nn.Parameter(torch.zeros(1, 1, d_model))
+                nn.init.normal_(self.mod_emb[m], mean=0.0, std=0.02)
 
             total_tokens += int(tok.n_tokens)
 
         self.pooling = str(tcfg_model.pooling).lower().strip()
         self.use_global_cls = (self.pooling == "cls")
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model)) if self.use_global_cls else None
+        if self.cls_token is not None:
+            nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
 
         if use_positional_encoding and tcfg_model.max_tokens is None:
             tcfg_model.max_tokens = int(total_tokens + (1 if self.use_global_cls else 0))
@@ -375,6 +650,12 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
             use_positional_encoding=bool(use_positional_encoding),
         )
 
+    def set_feature_coords(self, modality: str, chrom_ids: torch.Tensor, start: torch.Tensor, end: torch.Tensor) -> None:
+        modality = str(modality)
+        if modality not in self.vec2tok:
+            raise KeyError(f"Unknown modality {modality!r}. Known: {list(self.vec2tok.keys())}")
+        self.vec2tok[modality].set_feature_coords(chrom_ids, start, end)
+
     def forward(
         self,
         x_dict: Dict[str, torch.Tensor],
@@ -382,6 +663,8 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
         return_token_meta: bool = False,
         return_attn: bool = False,
         attn_average_heads: bool = True,
+        attn_bias: Optional[torch.Tensor] = None,
+        attn_bias_fn: Optional[Any] = None,
     ):
         tokens_list: List[torch.Tensor] = []
         masks_list: List[Optional[torch.Tensor]] = []
@@ -435,7 +718,6 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
             cls = self.cls_token.expand(tokens.shape[0], -1, -1)  # (B,1,D)
             tokens = torch.cat([cls, tokens], dim=1)
 
-            # shift slice indices by +1 since we inserted CLS at position 0
             meta["slices_with_cls"] = {k: (a + 1, b + 1) for k, (a, b) in meta["slices"].items()}
 
             if key_padding_mask is not None:
@@ -444,16 +726,26 @@ class MultiModalTransformerGaussianEncoder(nn.Module):
         else:
             meta["slices_with_cls"] = dict(meta["slices"])
 
+        # Optionally let user build bias from meta
+        if attn_bias is None and attn_bias_fn is not None:
+            attn_bias = attn_bias_fn(meta)
+
         # Run transformer (+ optional attn collection)
         if return_attn:
             h, attn_all = self.encoder(
                 tokens,
                 key_padding_mask=key_padding_mask,
+                attn_bias=attn_bias,
                 return_attn=True,
                 attn_average_heads=attn_average_heads,
             )
         else:
-            h = self.encoder(tokens, key_padding_mask=key_padding_mask, return_attn=False)
+            h = self.encoder(
+                tokens,
+                key_padding_mask=key_padding_mask,
+                attn_bias=attn_bias,
+                return_attn=False,
+            )
             attn_all = None
 
         mu, logvar = torch.chunk(h, 2, dim=-1)
@@ -500,7 +792,7 @@ def build_gaussian_encoder(*, uni_cfg: UniVIConfig, mod_cfg: ModalityConfig) -> 
 
         tokenizer = _VectorToTokens(
             input_dim=int(mod_cfg.input_dim),
-            tok=mod_cfg.tokenizer,  # ✅ signature is tok=TokenizerConfig
+            tok=mod_cfg.tokenizer,
         )
 
         tcfg = _cfg_to_model_tcfg(mod_cfg.transformer)
