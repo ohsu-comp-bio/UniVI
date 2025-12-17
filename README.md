@@ -1,14 +1,14 @@
 # UniVI
 
 [![PyPI version](https://img.shields.io/pypi/v/univi)](https://pypi.org/project/univi/)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.3.2)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.3.3)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.2/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.3/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.2/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.3/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
@@ -22,7 +22,9 @@ It’s designed for experiments like:
 - **Cross-modal reconstruction / imputation** (RNA→ADT, ATAC→RNA, etc.)
 - **Denoising** via learned generative decoders
 - **Evaluation** (FOSCTTM, modality mixing, label transfer, feature recovery)
-- **Optional supervised heads** for harmonized annotation / domain confusion
+- **Optional supervised heads** for harmonized annotation and domain confusion
+- **Optional transformer encoders** (per-modality and/or fused multimodal transformer posterior)
+- **Token-level hooks** for interpretability (top-k indices; optional attention maps if enabled)
 
 ---
 
@@ -106,10 +108,10 @@ UniVI/
     ├── models/                            # VAE architectures + building blocks
     │   ├── __init__.py
     │   ├── mlp.py                         # Shared MLP building blocks
-    │   ├── encoders.py                    # Modality encoders
+    │   ├── encoders.py                    # Modality encoders (MLP + transformer + fused transformer)
     │   ├── decoders.py                    # Likelihood-specific decoders (NB, ZINB, Gaussian, etc.)
-    │   ├── transformer.py                 # Transformer blocks + encoder
-    │   ├── tokenizer.py                   # Handles token i/o for transformer blocks
+    │   ├── transformer.py                 # Transformer blocks + encoder (+ optional attn bias support)
+    │   ├── tokenizer.py                   # Tokenization configs/helpers (top-k / patch)
     │   └── univi.py                       # Core UniVI multi-modal VAE
     ├── hyperparam_optimization/           # Hyperparameter search scripts
     │   ├── __init__.py
@@ -139,26 +141,45 @@ A typical `runs/` folder produced by `scripts/revision_reproduce_all.sh` looks l
 
 ```text
 runs/
-└── <run_name>/
-    ├── checkpoints/
-    │   └── univi_checkpoint.pt
-    ├── eval/
-    │   ├── metrics.json
-    │   └── metrics.csv
-    ├── robustness/
+└── <run_name>/                             # user-chosen run name (often includes dataset + date)
+    ├── checkpoints/                        # model/trainer state for resuming or export
+    │   ├── univi_checkpoint.pt             # primary checkpoint (model + optimizer + config, if enabled)
+    │   └── best.pt                         # optional: best-val checkpoint (if early stopping enabled)
+    ├── eval/                               # evaluation summaries and derived plots
+    │   ├── metrics.json                    # machine-readable metrics summary
+    │   ├── metrics.csv                     # flat table for quick comparisons
+    │   └── plots/                          # optional: UMAPs, heatmaps, and benchmark figures
+    ├── embeddings/                         # optional: exported latents for downstream analysis
+    │   ├── mu_z.npy                        # fused mean embedding (cells x latent_dim)
+    │   ├── modality_mu/                    # per-modality embeddings q(z|x_m)
+    │   │   ├── rna.npy
+    │   │   ├── adt.npy
+    │   │   └── atac.npy
+    │   └── obs_names.txt                   # row order for embeddings (safe joins)
+    ├── reconstructions/                    # optional: recon and cross-recon exports
+    │   ├── rna_from_rna.npy                # denoised reconstruction
+    │   ├── adt_from_adt.npy
+    │   ├── adt_from_rna.npy                # cross-modal imputation example
+    │   └── rna_from_atac.npy
+    ├── robustness/                         # robustness experiments (frequency mismatch, DnI, etc.)
     │   ├── frequency_perturbation_results.csv
     │   ├── frequency_perturbation_plot.png
     │   ├── frequency_perturbation_plot.pdf
     │   ├── do_not_integrate_summary.csv
     │   ├── do_not_integrate_plot.png
     │   └── do_not_integrate_plot.pdf
-    ├── benchmarks/
+    ├── benchmarks/                         # baseline comparisons (optionally includes Harmony, etc.)
     │   ├── results.csv
     │   ├── results.png
     │   └── results.pdf
-    └── tables/
-        └── Supplemental_Table_S1.xlsx
+    ├── tables/
+    │   └── Supplemental_Table_S1.xlsx       # environment + hparams + dataset statistics snapshot
+    └── logs/
+        ├── train.log                        # training log (stdout/stderr capture)
+        └── history.csv                      # per-epoch train/val traces (if enabled)
 ```
+
+(Exact subfolders vary by script and flags; the layout above shows the common outputs across the pipeline.)
 
 ---
 
@@ -229,7 +250,7 @@ UniVI supports two main training regimes:
   Per-modality posteriors + flexible reconstruction scheme (cross/self/avg) + posterior alignment across modalities.
 
 * **UniVI v2 / lite**
-  A fused posterior (precision-weighted MoE/PoE-style) + per-modality recon + β·KL + γ·alignment.
+  A fused posterior (precision-weighted MoE/PoE-style by default; optional fused transformer) + per-modality recon + β·KL + γ·alignment.
   Convenient for 3+ modalities and “loosely paired” settings.
 
 You choose via `loss_mode` at model construction (Python) or config JSON (CLI scripts).
@@ -341,6 +362,29 @@ history = trainer.fit()
 
 ---
 
+## Mixed precision (AMP)
+
+AMP (automatic mixed precision) can reduce VRAM usage and speed up training on GPUs by running selected ops in lower precision (fp16 or bf16) while keeping numerically sensitive parts in fp32.
+
+If your trainer supports AMP flags, prefer bf16 where available. If using fp16, gradient scaling is typically used internally to avoid underflow.
+
+---
+
+## Checkpointing and resuming
+
+Training is often run on clusters, so checkpoints are treated as first-class outputs.
+
+Typical checkpoints contain:
+
+* model weights
+* optimizer state (for faithful resumption)
+* training config/model config (for reproducibility)
+* optional AMP scaler state (when using fp16 AMP)
+
+See `univi/utils/io.py` for the exact checkpoint read/write helpers used by the trainer.
+
+---
+
 ## Classification (built-in heads)
 
 UniVI supports **in-model supervised classification heads** (single “legacy” label head and/or multi-head auxiliary decoders). This is useful for:
@@ -397,24 +441,18 @@ univi_cfg = UniVIConfig(
 Optional: attach readable label names (for your own decoding later):
 
 ```python
-# for multi-heads
 model.set_head_label_names("celltype", list(rna.obs["celltype"].astype("category").cat.categories))
 model.set_head_label_names("batch",    list(rna.obs["batch"].astype("category").cat.categories))
-
-# for legacy single head (if you use n_label_classes>0)
-# model.set_label_names([...])
 ```
 
 ### 2) Pass `y` to the model during training
 
-Your dataloader typically yields only `x_dict`. You can construct `y` from your dataset indices (or store labels inside your dataset object). Example pattern:
+Example pattern (construct labels from arrays aligned to dataset order):
 
 ```python
-# Suppose you have per-cell label arrays aligned to dataset order:
 celltype_codes = rna.obs["celltype"].astype("category").cat.codes.to_numpy()
 batch_codes    = rna.obs["batch"].astype("category").cat.codes.to_numpy()
 
-# In your training loop / trainer, for a batch of indices `batch_idx`:
 y = {
     "celltype": torch.tensor(celltype_codes[batch_idx], device=device),
     "batch":    torch.tensor(batch_codes[batch_idx], device=device),
@@ -425,7 +463,7 @@ loss = out["loss"]
 loss.backward()
 ```
 
-What you get back in `out` (when labels are provided) includes:
+When labels are provided, the forward output can include:
 
 * `out["head_logits"]`: dict of logits `(B, n_classes)` per head
 * `out["head_losses"]`: mean CE per head (masked by `ignore_index`)
@@ -458,56 +496,163 @@ print(meta)
 UniVI isn’t just “map to latent”. With a trained model you can typically:
 
 * **Encode modality-specific posteriors** `q(z|x_rna)`, `q(z|x_adt)`, …
-* **Encode a fused posterior** (MoE/PoE; or an optional fused transformer encoder)
-* **Reconstruct** inputs via decoders (denoising)
-* **Cross-reconstruct / impute** across modalities (RNA→ADT, ADT→RNA, RNA→ATAC, …)
-* **Predict supervised targets** via built-in classification heads
-* **Inspect per-modality posterior means/variances** for debugging and uncertainty
-* (Optional) **Inspect transformer token selection meta** (top-k indices) and (with a small patch) attention weights
+* **Encode a fused posterior** (MoE/PoE by default; optional fused multimodal transformer posterior)
+* **Denoise / reconstruct** inputs via the learned decoders
+* **Cross-reconstruct / impute** across modalities (RNA→ADT, ATAC→RNA, etc.)
+* **Evaluate alignment** (FOSCTTM, Recall@k, modality mixing, label transfer)
+* **Predict supervised targets** via built-in classification heads (if enabled)
+* **Inspect uncertainty** via per-modality posterior means/variances
+* (Optional) **Inspect transformer token metadata** (top-k indices; attention maps when enabled)
 
-### 1) Encode fused latent (deterministic) for plotting / neighbors
+### Fused posterior options
+
+UniVI can produce a fused latent in two ways:
+
+* Default: **precision-weighted MoE/PoE fusion** over per-modality posteriors
+* Optional: **fused multimodal transformer posterior** (`fused_encoder_type="multimodal_transformer"`)
+
+In both cases, the standard embedding used for plotting/neighbors is the fused mean:
 
 ```python
+mu_z, logvar_z, z = model.encode_fused(x_dict, use_mean=True)
+````
+
+### 1) Encode embeddings for plotting / neighbors (built-in)
+
+Use `encode_adata` to get either fused (MoE/PoE) or modality-specific latents directly from an AnnData.
+
+```python
+import scanpy as sc
+import torch
+from univi.evaluation import encode_adata
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
 model.eval()
-batch = next(iter(val_loader))  # dict: {"rna": (B,F), "adt": (B,F)}
+
+# Fused latent (MoE/PoE) from a single observed modality
+Z_fused = encode_adata(
+    model,
+    rna,
+    modality="rna",
+    device=device,
+    layer="counts",       # or None to use .X
+    latent="moe_mean",    # {"moe_mean","moe_sample","modality_mean","modality_sample"}
+)
+
+# Modality-specific latent (projection / diagnostics)
+Z_rna = encode_adata(
+    model,
+    rna,
+    modality="rna",
+    device=device,
+    layer="counts",
+    latent="modality_mean",
+)
+
+rna.obsm["X_univi_fused"] = Z_fused
+rna.obsm["X_univi_rna"] = Z_rna
+
+sc.pp.neighbors(rna, use_rep="X_univi_fused")
+sc.tl.umap(rna)
+sc.pl.umap(rna, color=["celltype"], frameon=False)
+```
+
+### 2) Evaluate paired alignment (FOSCTTM, Recall@k, mixing, label transfer)
+
+`evaluate_alignment` is a figure-ready wrapper. It can take precomputed `Z1/Z2`, or compute embeddings from AnnData via `encode_adata`.
+
+```python
+from univi.evaluation import evaluate_alignment
+
+# For paired data, you typically pass modality-specific latents for the two modalities
+res = evaluate_alignment(
+    model=model,
+    adata1=rna,
+    adata2=adt,
+    mod1="rna",
+    mod2="adt",
+    device=device,
+    layer1="counts",
+    layer2="counts",
+    latent="modality_mean",
+    metric="euclidean",
+    recall_ks=(1, 5, 10),
+    k_mixing=20,
+    k_transfer=15,
+    # optional label transfer inputs:
+    # labels_source=rna.obs["celltype"].to_numpy(),
+    # labels_target=adt.obs["celltype"].to_numpy(),
+)
+
+print(res)  # dict includes foscttm(+sem), recall@k(+sem), modality_mixing(+sem), label transfer (optional)
+```
+
+### 3) Denoise / reconstruct a modality (built-in)
+
+`denoise_adata` runs “encode modality → decode same modality” and can write to a layer.
+
+```python
+from univi.evaluation import denoise_adata
+
+Xhat_rna = denoise_adata(
+    model,
+    rna,
+    modality="rna",
+    device=device,
+    layer="counts",
+    out_layer="univi_denoised",  # writes rna.layers["univi_denoised"]
+)
+
+# Quick marker plots from denoised values:
+import scanpy as sc
+markers = ["TRAC", "NKG7", "LYZ", "MS4A1", "CD79A"]
+
+rna_d = rna.copy()
+rna_d.X = rna_d.layers["univi_denoised"]
+sc.pl.umap(rna_d, color=markers, frameon=False, title=[f"{g} (denoised)" for g in markers])
+```
+
+### 4) Cross-modal reconstruction / imputation (built-in)
+
+`cross_modal_predict` runs “encode src modality → decode target modality” and returns a dense numpy array.
+
+```python
+from univi.evaluation import cross_modal_predict
+
+# Example: RNA -> predicted ADT
+adt_from_rna = cross_modal_predict(
+    model,
+    adata_src=rna,
+    src_mod="rna",
+    tgt_mod="adt",
+    device=device,
+    layer="counts",
+    batch_size=512,
+    use_moe=True,   # for src-only input, MoE reduces to the src posterior
+)
+print(adt_from_rna.shape)  # (cells, adt_features)
+```
+
+### 5) Direct model calls (advanced / debugging)
+
+If you want full control (or want posterior means/variances explicitly), call the model methods directly.
+
+```python
+import torch
+
+model.eval()
+batch = next(iter(val_loader))
 x_dict = {k: v.to(device) for k, v in batch.items()}
 
 with torch.no_grad():
-    mu_z, logvar_z, z = model.encode_fused(x_dict, use_mean=True)
-
-Z = mu_z.detach().cpu().numpy()
-print(Z.shape)
-```
-
-### 2) Encode per-modality latents (useful for projection + diagnostics)
-
-```python
-with torch.no_grad():
+    # Per-modality posteriors
     mu_dict, logvar_dict = model.encode_modalities(x_dict)
 
-Z_rna = mu_dict["rna"].detach().cpu().numpy()
-Z_adt = mu_dict["adt"].detach().cpu().numpy()
-```
+    # Fused posterior (MoE/PoE or fused transformer, depending on config)
+    mu_z, logvar_z, z = model.encode_fused(x_dict, use_mean=True)
 
-### 3) Reconstruct (denoise) all modalities from the fused latent
-
-```python
-with torch.no_grad():
-    out = model(x_dict, epoch=0)
-    xhat = out["xhat"]  # dict(modality -> decoder output)
-```
-
-### 4) Cross-modal reconstruction / imputation (encode one modality, decode another)
-
-Example: **RNA → predicted ADT**
-
-```python
-x_rna_only = {"rna": x_dict["rna"]}
-
-with torch.no_grad():
-    mu_dict, lv_dict = model.encode_modalities(x_rna_only)
-    z_rna = mu_dict["rna"]  # deterministic
-    adt_pred = model.decoders["adt"](z_rna)
+    # Decode all modalities from a chosen latent (implementation-dependent keys)
+    xhat_dict = model.decode_modalities(mu_z)
 ```
 
 ---
@@ -538,7 +683,7 @@ python scripts/evaluate_univi.py \
 
 ## Optional: Transformer encoders (per-modality)
 
-By default, UniVI uses **MLP encoders** (`encoder_type="mlp"`), and all classic workflows work unchanged.
+By default, UniVI uses **MLP encoders** (`encoder_type="mlp"`), and classic workflows work unchanged.
 
 If you want a transformer encoder for a modality, set:
 
@@ -583,11 +728,67 @@ univi_cfg = UniVIConfig(
 )
 ```
 
-Why bother?
+Notes:
 
-* Better inductive bias for **feature interaction modeling**
-* Tokenizers focus attention on the most informative features per cell (top-k)
-* Interpretability hooks: token indices (and optional attention maps)
+* Tokenizers focus attention on the most informative features per cell (top-k) or local structure (patching).
+* Transformer encoders expose optional interpretability hooks (token indices and, when enabled, attention maps).
+
+---
+
+## Optional: ATAC coordinate embeddings and distance attention bias (advanced)
+
+For top-k tokenizers, UniVI can optionally incorporate genomic context:
+
+* **Coordinate embeddings**: chromosome embedding + coordinate MLP per selected feature
+* **Distance-based attention bias**: encourages attention between nearby peaks (same chromosome)
+
+### Enable in the tokenizer config (ATAC example)
+
+```python
+TokenizerConfig(
+    mode="topk_channels",
+    n_tokens=512,
+    channels=("value","rank","dropout"),
+    use_coord_embedding=True,
+    n_chroms=<num_chromosomes>,
+    coord_scale=1e-6,
+)
+```
+
+### Attach coordinates and configure distance bias via `UniVITrainer`
+
+If your `UniVITrainer` supports `feature_coords` and `attn_bias_cfg`, you can attach genomic coordinates once and let the trainer build the bias for you:
+
+```python
+feature_coords = {
+    "atac": {
+        "chrom_ids": chrom_ids_long,   # (F,)
+        "start": start_bp,             # (F,)
+        "end": end_bp,                 # (F,)
+    }
+}
+
+attn_bias_cfg = {
+    "atac": {
+        "type": "distance",
+        "lengthscale_bp": 50_000.0,
+        "same_chrom_only": True,
+    }
+}
+
+trainer = UniVITrainer(
+    model,
+    train_loader,
+    val_loader=val_loader,
+    train_cfg=TrainingConfig(...),
+    device="cuda",
+    feature_coords=feature_coords,
+    attn_bias_cfg=attn_bias_cfg,
+)
+trainer.fit()
+```
+
+This path keeps the model code clean and makes the feature-coordinate plumbing consistent across runs.
 
 ---
 
@@ -618,7 +819,7 @@ univi_cfg = UniVIConfig(
 Notes:
 
 * Every modality in `fused_modalities` must define a `tokenizer` (even if its per-modality encoder is MLP).
-* If `fused_require_all_modalities=True` and any fused modality is missing at inference, UniVI falls back to MoE/PoE fusion.
+* If `fused_require_all_modalities=True` and a fused modality is missing at inference, UniVI falls back to MoE/PoE fusion.
 
 ---
 
@@ -649,4 +850,3 @@ See `univi/hyperparam_optimization/` and `notebooks/` for examples.
   * stack trace + OS/CUDA/PyTorch versions
 * **Feature requests:** open an Issue describing the use-case + expected inputs/outputs (a tiny example is ideal).
 
----
