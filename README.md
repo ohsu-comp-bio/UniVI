@@ -100,6 +100,7 @@ UniVI/
     ├── objectives.py                      # Losses (ELBO variants, KL/alignment annealing, etc.)
     ├── plotting.py                        # Plotting helpers + consistent style defaults
     ├── trainer.py                         # UniVITrainer: training loop, logging, checkpointing
+    ├── interpretability.py                # Helper scripts for transformer token weight interpretability
     ├── figures/                           # Package-internal figure assets (placeholder)
     │   └── .gitkeep
     ├── models/                            # VAE architectures + building blocks
