@@ -1,14 +1,14 @@
 # UniVI
 
 [![PyPI version](https://img.shields.io/pypi/v/univi)](https://pypi.org/project/univi/)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.3.5)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.3.6)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.5/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.6/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.5/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.6/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
@@ -345,6 +345,65 @@ model = UniVIMultiModalVAE(
 # Or: v2/lite
 # model = UniVIMultiModalVAE(univi_cfg, loss_mode="v2").to(device)
 ```
+
+### 3a) Reconstruction loss balancing across modalities (recommended)
+
+In multimodal training, reconstruction losses are often **summed over features** (e.g., RNA has many more features than ADT), which can cause high-dimensional modalities to dominate gradients.
+
+To keep modalities more balanced, `UniVIMultiModalVAE` supports **feature-dimension normalization** of reconstruction loss terms:
+
+- For most likelihoods (`nb`, `zinb`, `poisson`, `bernoulli`, `gaussian`, `categorical`): recon loss is scaled by  
+  **`1 / D**recon_dim_power`**, where `D` is the modality feature dimension.
+- For `likelihood="mse"`: recon already uses `mean(dim=-1)`, so dimension normalization is **not applied again**.
+
+Defaults:
+
+- `recon_normalize_by_dim=True`
+- `recon_dim_power=1.0` (divide by `D`)
+
+```python
+# v2/lite with recon balancing (defaults shown explicitly)
+model = UniVIMultiModalVAE(
+    univi_cfg,
+    loss_mode="v2",
+    # recon balancing
+    recon_normalize_by_dim=True,
+    recon_dim_power=1.0,   # try 0.5 to divide by sqrt(D)
+).to(device)
+````
+
+### 3b) Per-modality reconstruction weights (optional)
+
+You can also apply a manual weight per modality (useful if you want ADT/ATAC to “matter more” than raw dimension normalization would imply).
+
+Set `recon_weight` on each `ModalityConfig` (defaults to `1.0` if omitted):
+
+```python
+univi_cfg = UniVIConfig(
+    latent_dim=40,
+    beta=1.5,
+    gamma=2.5,
+    modalities=[
+        ModalityConfig(
+            "rna", rna.n_vars,
+            [512, 256, 128], [128, 256, 512],
+            likelihood="nb",
+            recon_weight=1.0,
+        ),
+        ModalityConfig(
+            "adt", adt.n_vars,
+            [128, 64], [64, 128],
+            likelihood="nb",
+            recon_weight=2.0,  # emphasize ADT recon
+        ),
+    ],
+)
+
+model = UniVIMultiModalVAE(univi_cfg, loss_mode="v2").to(device)
+```
+
+Tip: You can combine both approaches: **dimension normalization (global)** + **per-modality weights (local tuning)**.
+
 
 ### 4) Train
 

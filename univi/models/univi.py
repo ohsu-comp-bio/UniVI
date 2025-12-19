@@ -60,6 +60,15 @@ class UniVIMultiModalVAE(nn.Module):
       supports topk indices + coords and exposes build_distance_attn_bias().
     - Fused multimodal transformer encoder: will fill within-modality blocks (e.g. ATAC slice) and
       keep cross-modality blocks neutral (0).
+
+    Recon scaling (IMPORTANT)
+    ------------------------
+    Recon losses in _recon_loss are typically sums over features (dim=-1). In multi-modal settings
+    with very different feature dims (RNA >> ADT/ATAC-LSI), RNA can dominate gradients.
+
+    This class supports:
+      - recon_normalize_by_dim: divide per-cell recon by D**recon_dim_power
+      - per-modality weights via ModalityConfig.recon_weight (default 1.0)
     """
 
     LOGVAR_MIN = -10.0
@@ -74,6 +83,10 @@ class UniVIMultiModalVAE(nn.Module):
         v1_recon: str = "cross",
         v1_recon_mix: float = 0.0,
         normalize_v1_terms: bool = True,
+
+        # ---- recon scaling controls ----
+        recon_normalize_by_dim: bool = True,
+        recon_dim_power: float = 1.0,  # 1.0 => divide by D; 0.5 => divide by sqrt(D)
 
         # ---- legacy single label head (kept) ----
         n_label_classes: int = 0,
@@ -94,6 +107,10 @@ class UniVIMultiModalVAE(nn.Module):
         self.v1_recon = str(v1_recon).lower().strip()
         self.v1_recon_mix = float(v1_recon_mix)
         self.normalize_v1_terms = bool(normalize_v1_terms)
+
+        # recon scaling
+        self.recon_normalize_by_dim = bool(recon_normalize_by_dim)
+        self.recon_dim_power = float(recon_dim_power)
 
         self.latent_dim = int(cfg.latent_dim)
         self.beta_max = float(cfg.beta)
@@ -282,7 +299,13 @@ class UniVIMultiModalVAE(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def _kl_gaussian(self, mu_q: torch.Tensor, logvar_q: torch.Tensor, mu_p: torch.Tensor, logvar_p: torch.Tensor) -> torch.Tensor:
+    def _kl_gaussian(
+        self,
+        mu_q: torch.Tensor,
+        logvar_q: torch.Tensor,
+        mu_p: torch.Tensor,
+        logvar_p: torch.Tensor,
+    ) -> torch.Tensor:
         var_q = torch.exp(logvar_q)
         var_p = torch.exp(logvar_p)
         kl = logvar_p - logvar_q + (var_q + (mu_q - mu_p) ** 2) / var_p - 1.0
@@ -291,10 +314,11 @@ class UniVIMultiModalVAE(nn.Module):
     def _alignment_loss_l2mu_pairwise(self, mu_per_mod: Dict[str, torch.Tensor]) -> torch.Tensor:
         names = list(mu_per_mod.keys())
         if len(names) < 2:
-            if len(names) == 0:
-                return torch.tensor(0.0, device=next(self.parameters()).device).expand(1)
-            k = names[0]
-            return torch.zeros(mu_per_mod[k].size(0), device=mu_per_mod[k].device)
+            # return per-cell zeros if we can infer B, else scalar 0
+            if len(names) == 1:
+                k = names[0]
+                return torch.zeros(mu_per_mod[k].size(0), device=mu_per_mod[k].device)
+            return torch.tensor(0.0, device=next(self.parameters()).device)
 
         losses = []
         for i in range(len(names)):
@@ -312,6 +336,42 @@ class UniVIMultiModalVAE(nn.Module):
     def _is_categorical_likelihood(likelihood: Optional[str]) -> bool:
         lk = (likelihood or "").lower().strip()
         return lk in ("categorical", "cat", "ce", "cross_entropy", "multinomial", "softmax")
+
+    # -------------------------- recon scaling --------------------------
+
+    def _recon_scale(self, mod_name: str, x: torch.Tensor, likelihood: Optional[str]) -> float:
+        """
+        Scalar multiplier applied to per-cell recon loss for this modality.
+
+        - Optional per-modality config: ModalityConfig.recon_weight (default 1.0)
+        - Optional dim normalization: divide by D**recon_dim_power
+        - Avoid double-normalizing for likelihood == 'mse' when _recon_loss already uses mean(dim=-1)
+        """
+        m_cfg = self.mod_cfg_by_name[mod_name]
+        w = float(getattr(m_cfg, "recon_weight", 1.0))
+
+        if not self.recon_normalize_by_dim:
+            return w
+
+        lk = (likelihood or "gaussian").lower().strip()
+        if lk == "mse":
+            return w
+
+        D = 0
+        try:
+            D = int(getattr(m_cfg, "input_dim", 0))
+        except Exception:
+            D = 0
+        if D <= 0 and x is not None and x.dim() == 2:
+            D = int(x.shape[1])
+        if D <= 0:
+            D = 1
+
+        denom = float(D) ** float(self.recon_dim_power)
+        denom = max(denom, 1.0)
+        return w / denom
+
+    # ------------------------------ categorical utilities ------------------------------
 
     def _categorical_targets_and_mask(
         self,
@@ -430,8 +490,11 @@ class UniVIMultiModalVAE(nn.Module):
         if vec2tok_map is None:
             return None
 
-        # only bother if any modality is configured for distance bias
-        want_any = any(str(v.get("type", "")).lower().strip() == "distance" for v in attn_bias_cfg.values() if isinstance(v, Mapping))
+        want_any = any(
+            str(v.get("type", "")).lower().strip() == "distance"
+            for v in attn_bias_cfg.values()
+            if isinstance(v, Mapping)
+        )
         if not want_any:
             return None
 
@@ -439,7 +502,6 @@ class UniVIMultiModalVAE(nn.Module):
             if not meta:
                 return None
 
-            # batch size
             any_x = next(iter(sub_x_dict.values()))
             B = int(any_x.shape[0])
 
@@ -447,7 +509,6 @@ class UniVIMultiModalVAE(nn.Module):
             if not slices:
                 return None
 
-            # total token length in fused space (already includes global CLS if present)
             T = 0
             for _, (a, b) in slices.items():
                 T = max(T, int(b))
@@ -483,13 +544,14 @@ class UniVIMultiModalVAE(nn.Module):
                         topk_idx,
                         lengthscale_bp=lengthscale_bp,
                         same_chrom_only=same_chrom_only,
-                        include_cls=False,  # per-modality cls is forced off in fused encoder
-                    )  # (B, K, K)
+                        include_cls=False,
+                    )
                 except Exception:
                     continue
 
                 a, b = slices[m]
-                a = int(a); b = int(b)
+                a = int(a)
+                b = int(b)
                 if (b - a) != int(local.shape[1]):
                     continue
 
@@ -517,7 +579,6 @@ class UniVIMultiModalVAE(nn.Module):
             x_in = self._encode_categorical_input_if_needed(m, x_dict[m])
             enc = self.encoders[m]
 
-            # optional: transformer distance bias (single-pass through core encoder)
             tokens = key_padding_mask = attn_bias = None
             if attn_bias_cfg is not None and isinstance(attn_bias_cfg, Mapping):
                 cfg_m = attn_bias_cfg.get(m, None)
@@ -525,7 +586,6 @@ class UniVIMultiModalVAE(nn.Module):
                     tokens, key_padding_mask, attn_bias = self._build_distance_bias_for_permod_transformer(enc, x_in, cfg_m)
 
             if tokens is not None and getattr(enc, "encoder", None) is not None:
-                # enc is TransformerGaussianEncoder-like; run core directly
                 h = enc.encoder(
                     tokens,
                     key_padding_mask=key_padding_mask,
@@ -534,9 +594,8 @@ class UniVIMultiModalVAE(nn.Module):
                 )
                 mu, logvar = torch.chunk(h, 2, dim=-1)
             else:
-                # fallback: standard encoder call
                 try:
-                    mu, logvar = enc(x_in, attn_bias=attn_bias)  # transformer supports attn_bias kw
+                    mu, logvar = enc(x_in, attn_bias=attn_bias)
                 except TypeError:
                     mu, logvar = enc(x_in)
 
@@ -548,7 +607,11 @@ class UniVIMultiModalVAE(nn.Module):
 
         return mu_dict, logvar_dict
 
-    def mixture_of_experts(self, mu_dict: Dict[str, torch.Tensor], logvar_dict: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def mixture_of_experts(
+        self,
+        mu_dict: Dict[str, torch.Tensor],
+        logvar_dict: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         mus = list(mu_dict.values())
         logvars = list(logvar_dict.values())
 
@@ -758,12 +821,19 @@ class UniVIMultiModalVAE(nn.Module):
         for name, m_cfg in self.mod_cfg_by_name.items():
             if name not in x_dict or x_dict[name] is None:
                 continue
+
             loss_m = self._recon_loss(
                 x=x_dict[name],
                 raw_dec_out=xhat_dict[name],
                 likelihood=m_cfg.likelihood,
                 mod_name=name,
             )
+
+            # apply recon scaling (dim normalization + optional per-modality recon_weight)
+            s = self._recon_scale(name, x_dict[name], m_cfg.likelihood)
+            if s != 1.0:
+                loss_m = loss_m * float(s)
+
             recon_losses[name] = loss_m
             recon_total = loss_m if recon_total is None else (recon_total + loss_m)
 
@@ -824,13 +894,14 @@ class UniVIMultiModalVAE(nn.Module):
             "loss": loss.mean(),
             "recon_total": recon_total.mean(),
             "kl": kl.mean(),
-            "align": align_loss.mean(),
+            "align": align_loss.mean() if torch.is_tensor(align_loss) else torch.tensor(float(align_loss), device=loss.device),
             "mu_z": mu_z,
             "logvar_z": logvar_z,
             "z": z,
             "xhat": xhat_dict,
             "mu_dict": mu_dict,
             "logvar_dict": logvar_dict,
+            # these are after scaling
             "recon_per_modality": {k: v.mean() for k, v in recon_losses.items()},
             "beta": torch.tensor(beta_t, device=loss.device),
             "gamma": torch.tensor(gamma_t, device=loss.device),
@@ -878,7 +949,16 @@ class UniVIMultiModalVAE(nn.Module):
         def recon_from_z_to_target(z_src: torch.Tensor, target_mod: str) -> torch.Tensor:
             raw = self.decoders[target_mod](z_src)
             m_cfg = self.mod_cfg_by_name[target_mod]
-            return self._recon_loss(x=x_dict[target_mod], raw_dec_out=raw, likelihood=m_cfg.likelihood, mod_name=target_mod)
+            loss_t = self._recon_loss(
+                x=x_dict[target_mod],
+                raw_dec_out=raw,
+                likelihood=m_cfg.likelihood,
+                mod_name=target_mod,
+            )
+            s = self._recon_scale(target_mod, x_dict[target_mod], m_cfg.likelihood)
+            if s != 1.0:
+                loss_t = loss_t * float(s)
+            return loss_t
 
         device = next(iter(mu_dict.values())).device
         B = next(iter(mu_dict.values())).shape[0]
@@ -1040,6 +1120,7 @@ class UniVIMultiModalVAE(nn.Module):
             "xhat": xhat_dict,
             "mu_dict": mu_dict,
             "logvar_dict": logvar_dict,
+            # these are after scaling
             "recon_per_modality": {k: v.mean() for k, v in recon_per_target_mean.items()},
             "beta": torch.tensor(beta_t, device=loss.device),
             "gamma": torch.tensor(gamma_t, device=loss.device),
@@ -1060,7 +1141,7 @@ class UniVIMultiModalVAE(nn.Module):
             out["head_losses"] = head_loss_means
         return out
 
-    # ------------------------------ reconstruction loss (unchanged) ------------------------------
+    # ------------------------------ reconstruction loss ------------------------------
 
     def _unwrap_decoder_out(self, dec_out: Any) -> Any:
         if isinstance(dec_out, (tuple, list)):
