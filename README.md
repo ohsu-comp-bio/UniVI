@@ -356,7 +356,7 @@ To keep modalities more balanced, `UniVIMultiModalVAE` supports **feature-dimens
   **`1 / D**recon_dim_power`**, where `D` is the modality feature dimension.
 - For `likelihood="mse"`: recon already uses `mean(dim=-1)`, so dimension normalization is **not applied again**.
 
-Defaults:
+Defaults v2/lite:
 
 - `recon_normalize_by_dim=True`
 - `recon_dim_power=1.0` (divide by `D`)
@@ -371,6 +371,26 @@ model = UniVIMultiModalVAE(
     recon_dim_power=1.0,   # try 0.5 to divide by sqrt(D)
 ).to(device)
 ````
+
+Defaults v1 (turned off, 0.5 power default if turned on):
+
+- `recon_normalize_by_dim=False`
+- `recon_dim_power=0.5`
+
+```python
+# v1 with recon balancing:
+model = UniVIMultiModalVAE(
+    univi_cfg,
+    loss_mode="v1",
+    v1_recon="avg",        # or "cross", "self", etc..
+    normalize_v1_terms=True,
+    # recon balancing
+    recon_normalize_by_dim=True,
+    recon_dim_power=0.5,
+).to(device)
+````
+
+Note: If using this feature with `loss_mode="v1"` and `normalize_v1_terms=True` in conjunciton, tune `recon_dim_power` to around `0.5` instead of `1.0` to avoid a giant shrinkage in the reconstruction loss term during training via double-normalization by both terms.
 
 ### 3b) Per-modality reconstruction weights (optional)
 

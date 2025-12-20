@@ -69,6 +69,16 @@ class UniVIMultiModalVAE(nn.Module):
     This class supports:
       - recon_normalize_by_dim: divide per-cell recon by D**recon_dim_power
       - per-modality weights via ModalityConfig.recon_weight (default 1.0)
+
+    Mode-dependent DEFAULTS (requested)
+    -----------------------------------
+    If recon_normalize_by_dim/recon_dim_power are NOT explicitly provided:
+      - loss_mode in {"v1","paper","cross"}:
+          recon_normalize_by_dim = False
+          recon_dim_power        = 0.5
+      - loss_mode in {"v2","lite","light","moe","poe","fused"} (and anything else):
+          recon_normalize_by_dim = True
+          recon_dim_power        = 1.0
     """
 
     LOGVAR_MIN = -10.0
@@ -85,8 +95,11 @@ class UniVIMultiModalVAE(nn.Module):
         normalize_v1_terms: bool = True,
 
         # ---- recon scaling controls ----
-        recon_normalize_by_dim: bool = True,
-        recon_dim_power: float = 1.0,  # 1.0 => divide by D; 0.5 => divide by sqrt(D)
+        # If left as None, defaults depend on loss_mode:
+        #   v1/paper/cross -> (False, 0.5)
+        #   v2/lite/etc    -> (True,  1.0)
+        recon_normalize_by_dim: Optional[bool] = None,
+        recon_dim_power: Optional[float] = None,  # 1.0 => divide by D; 0.5 => divide by sqrt(D)
 
         # ---- legacy single label head (kept) ----
         n_label_classes: int = 0,
@@ -108,7 +121,17 @@ class UniVIMultiModalVAE(nn.Module):
         self.v1_recon_mix = float(v1_recon_mix)
         self.normalize_v1_terms = bool(normalize_v1_terms)
 
-        # recon scaling
+        # ----------------------------
+        # recon scaling: mode defaults
+        # ----------------------------
+        mode = (self.loss_mode or "v2").lower()
+        is_v1 = mode in ("v1", "paper", "cross")
+
+        if recon_normalize_by_dim is None:
+            recon_normalize_by_dim = False if is_v1 else True
+        if recon_dim_power is None:
+            recon_dim_power = 0.5 if is_v1 else 1.0
+
         self.recon_normalize_by_dim = bool(recon_normalize_by_dim)
         self.recon_dim_power = float(recon_dim_power)
 
@@ -344,8 +367,11 @@ class UniVIMultiModalVAE(nn.Module):
         Scalar multiplier applied to per-cell recon loss for this modality.
 
         - Optional per-modality config: ModalityConfig.recon_weight (default 1.0)
-        - Optional dim normalization: divide by D**recon_dim_power
+        - Optional dim normalization: divide per-cell recon by D**recon_dim_power
         - Avoid double-normalizing for likelihood == 'mse' when _recon_loss already uses mean(dim=-1)
+
+        NOTE: Prefer x.shape[1] (actual tensor width) when available, to avoid mismatches between
+        cfg.input_dim and the tensor you're actually feeding/decoding (common for ATAC-LSI / HVGs / etc.).
         """
         m_cfg = self.mod_cfg_by_name[mod_name]
         w = float(getattr(m_cfg, "recon_weight", 1.0))
@@ -358,12 +384,13 @@ class UniVIMultiModalVAE(nn.Module):
             return w
 
         D = 0
-        try:
-            D = int(getattr(m_cfg, "input_dim", 0))
-        except Exception:
-            D = 0
-        if D <= 0 and x is not None and x.dim() == 2:
+        if x is not None and torch.is_tensor(x) and x.dim() == 2:
             D = int(x.shape[1])
+        if D <= 0:
+            try:
+                D = int(getattr(m_cfg, "input_dim", 0))
+            except Exception:
+                D = 0
         if D <= 0:
             D = 1
 
