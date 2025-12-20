@@ -11,16 +11,6 @@ from typing import Dict, List, Optional, Literal, Sequence, Any
 
 @dataclass
 class TransformerConfig:
-    """
-    Configuration for transformer encoder backends.
-
-    Notes
-    -----
-    - Mirrors fields expected by univi/models/transformer.py:TransformerConfig.
-    - max_tokens is only needed if you enable learned positional embeddings.
-    - Relative positional bias is optional and intended mainly for ATAC peaks
-      when you provide token_pos (basepair midpoints) at runtime.
-    """
     d_model: int
     num_heads: int
     num_layers: int
@@ -31,7 +21,6 @@ class TransformerConfig:
     pooling: Literal["cls", "mean"] = "mean"
     max_tokens: Optional[int] = None
 
-    # Optional: binned relative-position attention bias (e.g., genomic distance)
     use_relpos_bias: bool = False
     relpos_num_bins: int = 32
     relpos_max_dist: float = 1e6  # basepairs
@@ -39,57 +28,23 @@ class TransformerConfig:
 
 @dataclass
 class TokenizerConfig:
-    """
-    Turns (B, F) into (B, T, D_in) + optional key_padding_mask.
-
-    Modes
-    -----
-    - "topk_scalar":   top-k features per cell, scalar value only -> (B, K, 1)
-    - "topk_channels": top-k features per cell, multiple channels -> (B, K, C)
-                       channels from: "value", "rank", "dropout"
-    - "patch":         split features into contiguous patches -> (B, T, patch_size)
-                       OR project each patch -> (B, T, patch_proj_dim)
-    - "topk_embed":    top-k features per cell with explicit feature identity:
-                       token = Emb(feature_id) + MLP(channels)
-                       -> (B, K, d_model)
-
-                       Optionally add ATAC coordinate embeddings:
-                       token += Emb(chrom_id) + MLP(midpoint_bp / coord_scale)
-
-    Notes
-    -----
-    - topk_embed is the recommended way to use attention over sparse omics features
-      without losing feature identity.
-    - If you need relative bias, you should pass token_pos (bp midpoints) into the
-      transformer at runtime. The tokenizer will stash it in tokenizer.last_meta["token_pos"].
-    """
     mode: Literal["topk_scalar", "topk_channels", "patch", "topk_embed"] = "topk_scalar"
 
-    # top-k settings
     n_tokens: int = 256
     channels: Sequence[Literal["value", "rank", "dropout"]] = ("value",)
 
-    # patch settings
     patch_size: int = 32
     patch_proj_dim: Optional[int] = None
 
-    # general
     add_cls_token: bool = False
 
-    # ---- topk_embed settings ----
-    # required for topk_embed
     n_features: Optional[int] = None
     d_model: Optional[int] = None
     value_mlp_hidden: int = 256
 
-    # optional coord embeddings (mainly ATAC)
     use_coords: bool = False
     chrom_vocab_size: int = 0
-    coord_scale: float = 1e6  # divide bp midpoints by this before coord MLP
-
-    # Optional per-feature metadata for coords (set at runtime; not great for JSON)
-    # Expected keys: {"chrom": ..., "start": ..., "end": ...}
-    # Values can be lists/arrays/torch tensors; tokenizer will convert to tensors.
+    coord_scale: float = 1e6
     feature_info: Optional[Dict[str, Any]] = None
 
 
@@ -102,26 +57,23 @@ class ModalityConfig:
     """
     Configuration for a single modality.
 
-    Notes
-    -----
-    - For categorical modalities, set:
-        likelihood="categorical"
-        input_dim = n_classes (C)
-
-      and optionally set:
-        input_kind="obs"
-        obs_key="your_obs_column"
-
-      The dataset returns a (B,1) tensor of label codes; the model converts
-      to one-hot for encoding and to class indices for CE.
-
-    - ignore_index is used for unlabeled entries (masked in CE).
+    Added:
+    - recon_weight: per-modality scalar weight applied to per-cell reconstruction loss.
+      This composes with model-level recon_dim normalization.
     """
     name: str
     input_dim: int
     encoder_hidden: List[int]
     decoder_hidden: List[int]
     likelihood: str = "gaussian"
+
+    # ---- NEW: per-modality reconstruction weight ----
+    recon_weight: float = 1.0
+
+    # ---- Optional NB / ZINB decoder settings (model already checks these) ----
+    # dispersion: "gene" or "cell" or "gene-cell" depending on your decoder implementation
+    dispersion: str = "gene"
+    init_log_theta: float = 0.0
 
     # categorical modality support
     ignore_index: int = -1
@@ -136,15 +88,6 @@ class ModalityConfig:
 
 @dataclass
 class ClassHeadConfig:
-    """
-    Configuration for an auxiliary supervised classification head p(y_h | z).
-
-    Notes
-    -----
-    - from_mu=True: classify from mu_z (more stable), else from sampled z.
-    - warmup: epoch before enabling this head's loss.
-    - adversarial=True: gradient reversal head (domain/tech confusion).
-    """
     name: str
     n_classes: int
     loss_weight: float = 1.0
@@ -177,20 +120,16 @@ class UniVIConfig:
     class_heads: Optional[List[ClassHeadConfig]] = None
     label_head_name: str = "label"
 
-    # ---------------------------------------------------------------------
-    # Optional fused multimodal encoder over concatenated tokens
-    # ---------------------------------------------------------------------
     fused_encoder_type: Literal["moe", "multimodal_transformer"] = "moe"
     fused_transformer: Optional[TransformerConfig] = None
-    fused_modalities: Optional[Sequence[str]] = None  # default: all modalities
+    fused_modalities: Optional[Sequence[str]] = None
     fused_add_modality_embeddings: bool = True
-    fused_require_all_modalities: bool = True  # if True: fall back to MoE when missing
+    fused_require_all_modalities: bool = True
 
     def validate(self) -> None:
         if int(self.latent_dim) <= 0:
             raise ValueError(f"latent_dim must be > 0, got {self.latent_dim}")
 
-        # modality name sanity
         names = [m.name for m in self.modalities]
         if len(set(names)) != len(names):
             dupes = sorted({n for n in names if names.count(n) > 1})
@@ -201,6 +140,10 @@ class UniVIConfig:
         for m in self.modalities:
             if int(m.input_dim) <= 0:
                 raise ValueError(f"Modality {m.name!r}: input_dim must be > 0, got {m.input_dim}")
+
+            # ---- NEW: recon_weight sanity ----
+            if float(getattr(m, "recon_weight", 1.0)) < 0.0:
+                raise ValueError(f"Modality {m.name!r}: recon_weight must be >= 0, got {m.recon_weight}")
 
             lk = (m.likelihood or "").lower().strip()
             if lk in ("categorical", "cat", "ce", "cross_entropy", "multinomial", "softmax"):
@@ -222,7 +165,6 @@ class UniVIConfig:
                     raise ValueError(f"Modality {m.name!r}: encoder_type='transformer' requires tokenizer config.")
                 _validate_tokenizer(m.name, m.tokenizer)
 
-        # fused encoder sanity
         fe = (self.fused_encoder_type or "moe").lower().strip()
         if fe not in ("moe", "multimodal_transformer"):
             raise ValueError(
@@ -249,7 +191,6 @@ class UniVIConfig:
                     )
                 _validate_tokenizer(n, tok)
 
-        # class head sanity
         if self.class_heads is not None:
             hn = [h.name for h in self.class_heads]
             if len(set(hn)) != len(hn):
@@ -265,7 +206,6 @@ class UniVIConfig:
                 if float(getattr(h, "adv_lambda", 1.0)) < 0.0:
                     raise ValueError(f"Class head {h.name!r}: adv_lambda must be >= 0.")
 
-        # anneal sanity
         for k in ("kl_anneal_start", "kl_anneal_end", "align_anneal_start", "align_anneal_end"):
             v = int(getattr(self, k))
             if v < 0:
@@ -307,7 +247,6 @@ def _validate_tokenizer(mod_name: str, tok: TokenizerConfig) -> None:
                 raise ValueError(
                     f"Modality {mod_name!r}: tokenizer.chrom_vocab_size must be > 0 when use_coords=True"
                 )
-            # feature_info may be injected at runtime; validate if present
             if tok.feature_info is not None:
                 for k in ("chrom", "start", "end"):
                     if k not in tok.feature_info:
