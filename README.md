@@ -45,7 +45,7 @@ If you use UniVI in your work, please cite:
   doi     = {10.1101/2025.02.28.640429},
   url     = {https://www.biorxiv.org/content/10.1101/2025.02.28.640429v1}
 }
-````
+```
 
 ---
 
@@ -206,20 +206,12 @@ conda activate univi_env
 pip install -e .
 ```
 
-### (Optional) Install via conda / mamba
+### Install via conda / mamba
 
 ```bash
 conda install -c conda-forge univi
 # or
 mamba install -c conda-forge univi
-```
-
-UniVI is also installable from a custom channel:
-
-```bash
-conda install ashford-a::univi
-# or
-mamba install ashford-a::univi
 ```
 
 ---
@@ -346,7 +338,7 @@ model = UniVIMultiModalVAE(
 # model = UniVIMultiModalVAE(univi_cfg, loss_mode="v2").to(device)
 ```
 
-### 3a) Reconstruction loss balancing across modalities (recommended)
+### 3a) Reconstruction loss balancing across modalities (optional)
 
 In multimodal training, reconstruction losses are often **summed over features** (e.g., RNA has many more features than ADT), which can cause high-dimensional modalities to dominate gradients.
 
@@ -355,6 +347,25 @@ To keep modalities more balanced, `UniVIMultiModalVAE` supports **feature-dimens
 - For most likelihoods (`nb`, `zinb`, `poisson`, `bernoulli`, `gaussian`, `categorical`): recon loss is scaled by  
   **`1 / D**recon_dim_power`**, where `D` is the modality feature dimension.
 - For `likelihood="mse"`: recon already uses `mean(dim=-1)`, so dimension normalization is **not applied again**.
+
+Defaults v1 (turned off, 0.5 power default if turned on):
+
+- `recon_normalize_by_dim=False`
+
+```python
+# v1 with recon balancing:
+model = UniVIMultiModalVAE(
+    univi_cfg,
+    loss_mode="v1",
+    v1_recon="avg",        # or "cross", "self", etc..
+    normalize_v1_terms=True,
+    # recon balancing
+    recon_normalize_by_dim=True,
+    recon_dim_power=0.5,
+).to(device)
+```
+
+Note: If using this feature in conjunction with `loss_mode="v1"` and `normalize_v1_terms=True`, tune `recon_dim_power` to around `0.25-0.55` instead of `1.00`. Doing so avoids a double hyperparameter normalization in the reconstruction loss term during training since `normalize_v1_terms` normalizes by total number of modalities and `recon_normalize_by_dim` normalizes by total number of features per modality.
 
 Defaults v2/lite:
 
@@ -370,27 +381,7 @@ model = UniVIMultiModalVAE(
     recon_normalize_by_dim=True,
     recon_dim_power=1.0,   # try 0.5 to divide by sqrt(D)
 ).to(device)
-````
-
-Defaults v1 (turned off, 0.5 power default if turned on):
-
-- `recon_normalize_by_dim=False`
-- `recon_dim_power=0.5`
-
-```python
-# v1 with recon balancing:
-model = UniVIMultiModalVAE(
-    univi_cfg,
-    loss_mode="v1",
-    v1_recon="avg",        # or "cross", "self", etc..
-    normalize_v1_terms=True,
-    # recon balancing
-    recon_normalize_by_dim=True,
-    recon_dim_power=0.5,
-).to(device)
-````
-
-Note: If using this feature with `loss_mode="v1"` and `normalize_v1_terms=True` in conjunciton, tune `recon_dim_power` to around `0.5` instead of `1.0` to avoid a giant shrinkage in the reconstruction loss term during training via double-normalization by both terms.
+```
 
 ### 3b) Per-modality reconstruction weights (optional)
 
@@ -594,7 +585,7 @@ In both cases, the standard embedding used for plotting/neighbors is the fused m
 
 ```python
 mu_z, logvar_z, z = model.encode_fused(x_dict, use_mean=True)
-````
+```
 
 ### 1) Encode embeddings for plotting / neighbors (built-in)
 
