@@ -43,7 +43,8 @@ If you use UniVI in your work, please cite:
   journal = {bioRxiv},
   year    = {2025},
   doi     = {10.1101/2025.02.28.640429},
-  url     = {https://www.biorxiv.org/content/10.1101/2025.02.28.640429v1}
+  url     = {https://www.biorxiv.org/content/10.1101/2025.02.28.640429},
+  note    = {Preprint}
 }
 ```
 
