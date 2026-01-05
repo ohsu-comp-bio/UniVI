@@ -352,6 +352,8 @@ Defaults v1 (turned off, 0.5 power default if turned on):
 
 - `recon_normalize_by_dim=False`
 
+If using with v1, your `UniVIMultiModalVAE` instantiation might look something like:
+
 ```python
 # v1 with recon balancing:
 model = UniVIMultiModalVAE(
@@ -365,7 +367,7 @@ model = UniVIMultiModalVAE(
 ).to(device)
 ```
 
-Note: If using this feature in conjunction with `loss_mode="v1"` and `normalize_v1_terms=True`, tune `recon_dim_power` to around `0.25-0.55` instead of `1.00`. Doing so avoids a double hyperparameter normalization in the reconstruction loss term during training since `normalize_v1_terms` normalizes by total number of modalities and `recon_normalize_by_dim` normalizes by total number of features per modality.
+Note: If using this feature in conjunction with `loss_mode="v1"` and `normalize_v1_terms=True`, tune `recon_dim_power` to around `0.25-0.55` instead of `1.00`. Doing so avoids a double hyperparameter normalization shrinkage in the reconstruction loss term during training since `normalize_v1_terms` normalizes by total number of modalities and `recon_normalize_by_dim` normalizes by total number of features per modality.
 
 Defaults v2/lite:
 
