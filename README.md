@@ -3,8 +3,8 @@
 [![PyPI version](https://img.shields.io/pypi/v/univi)](https://pypi.org/project/univi/)
 [![Conda version](https://anaconda.org/conda-forge/univi/badges/version.svg)](https://anaconda.org/conda-forge/univi)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.3.7)](https://pypi.org/project/univi/)
-[![License](https://anaconda.org/conda-forge/univi/badges/license.svg)](https://anaconda.org/conda-forge/univi)
 [![Platforms](https://anaconda.org/conda-forge/univi/badges/platforms.svg)](https://anaconda.org/conda-forge/univi)
+[![License](https://anaconda.org/conda-forge/univi/badges/license.svg)](https://anaconda.org/conda-forge/univi)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
