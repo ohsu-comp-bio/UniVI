@@ -195,6 +195,14 @@ pip install univi
 > **Note:** UniVI requires `torch`. If `import torch` fails, install PyTorch for your platform/CUDA from:
 > [https://pytorch.org/get-started/locally/](https://pytorch.org/get-started/locally/)
 
+### Install via conda / mamba
+
+```bash
+conda install -c conda-forge univi
+# or
+mamba install -c conda-forge univi
+```
+
 ### Development install (from source)
 
 ```bash
@@ -205,14 +213,6 @@ conda env create -f envs/univi_env.yml
 conda activate univi_env
 
 pip install -e .
-```
-
-### Install via conda / mamba
-
-```bash
-conda install -c conda-forge univi
-# or
-mamba install -c conda-forge univi
 ```
 
 ---
