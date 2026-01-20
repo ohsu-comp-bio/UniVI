@@ -1,6 +1,6 @@
 # UniVI
 
-[![PyPI version](https://img.shields.io/pypi/v/univi)](https://pypi.org/project/univi/)
+[![PyPI version](https://img.shields.io/pypi/v/univi?v=0.3.8)](https://pypi.org/project/univi/)
 [![Conda version](https://anaconda.org/conda-forge/univi/badges/version.svg)](https://anaconda.org/conda-forge/univi)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.3.8)](https://pypi.org/project/univi/)
 
