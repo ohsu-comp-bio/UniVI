@@ -245,7 +245,7 @@ UniVI supports two main training regimes:
 
 * **UniVI v2 / lite**
   A fused posterior (precision-weighted MoE/PoE-style by default; optional fused transformer) + per-modality recon + β·KL + γ·alignment (where alignment is the L2-normed latent means instead of the cross-modal KL term seen in v1).
-  Convenient for 3+ modalities and “loosely paired” settings.
+  Convenient for 3+ modalities and “loosely paired” settings, but with the tradeoff of a weaker one-to-one latent correspondence versus v1.
 
 You choose via `loss_mode` at model construction (Python) or config JSON (CLI scripts).
 
