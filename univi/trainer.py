@@ -1,5 +1,4 @@
 # univi/trainer.py
-
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -32,6 +31,11 @@ class UniVITrainer:
       - optional coordinate metadata and attention-bias configuration for tokenized ATAC
         (passed through to model forward when supported)
       - checkpoint save/load via utils.io helpers
+
+    Behavior notes:
+      - If val_loader is provided, we ALWAYS track the best validation epoch + weights.
+      - Early stopping (patience) is optional and only controls stopping; it does NOT control best tracking.
+      - If best weights were tracked, we restore them at the end of fit().
     """
 
     def __init__(
@@ -79,10 +83,13 @@ class UniVITrainer:
 
         self.logger = get_logger("UniVITrainer")
 
+        # Best tracking (independent of early stopping)
         self.best_val_loss = float("inf")
         self.best_state_dict: Optional[Dict[str, Any]] = None
-        self.epochs_no_improve = 0
         self.best_epoch: Optional[int] = None
+
+        # Early stopping counters
+        self.epochs_no_improve = 0
 
         self.history: Dict[str, List[float]] = {
             "train_loss": [],
@@ -115,10 +122,17 @@ class UniVITrainer:
                     gamma="%.3f" % tr_gamma,
                 )
 
-                self._maybe_early_stop(va_loss, epoch)
+                # Always update best tracking when val is available
+                improved = self._update_best(va_loss, epoch)
+
+                # Only update patience/stop logic if early stopping is enabled
+                if self.cfg.early_stopping:
+                    self._update_patience(improved)
+
                 if self._should_stop():
                     self.logger.info(
-                        "Early stopping at epoch %d (best val loss=%.4f)" % (epoch, self.best_val_loss)
+                        "Early stopping at epoch %d (best val loss=%.4f, best epoch=%s)"
+                        % (epoch, self.best_val_loss, str(self.best_epoch))
                     )
                     break
             else:
@@ -128,6 +142,7 @@ class UniVITrainer:
                     gamma="%.3f" % tr_gamma,
                 )
 
+        # Restore best model if we have it
         if self.val_loader is not None and self.best_state_dict is not None:
             self.model.load_state_dict(self.best_state_dict)
             if self.best_epoch is not None:
@@ -152,7 +167,11 @@ class UniVITrainer:
         }
 
     def save(self, path: str, *, extra: Optional[Dict[str, Any]] = None, save_best: bool = False) -> None:
-        model_state = self.best_state_dict if (save_best and self.best_state_dict is not None) else self.model.state_dict()
+        model_state = (
+            self.best_state_dict
+            if (save_best and self.best_state_dict is not None)
+            else self.model.state_dict()
+        )
 
         scaler_state = None
         if self._scaler is not None and self._scaler.is_enabled():
@@ -375,19 +394,43 @@ class UniVITrainer:
 
         return avg_loss, avg_beta, avg_gamma
 
-    # ------------------------------ early stopping ------------------------------
+    # ------------------------------ best tracking + early stopping ------------------------------
 
-    def _maybe_early_stop(self, val_loss: float, epoch: int) -> None:
-        if not self.cfg.early_stopping:
-            return
+    def _update_best(self, val_loss: float, epoch: int) -> bool:
+        """
+        Update best validation metrics + weights.
+        This runs regardless of cfg.early_stopping.
 
-        improved = (self.best_val_loss - float(val_loss)) > float(self.cfg.min_delta)
-        if improved:
-            self.best_val_loss = float(val_loss)
+        Returns:
+          improved: bool (whether this epoch counted as a new best).
+        """
+        val_loss_f = float(val_loss)
+
+        # First val epoch should always initialize best_state_dict.
+        if self.best_state_dict is None or self.best_epoch is None:
+            self.best_val_loss = val_loss_f
             self.best_state_dict = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
             self.best_epoch = int(epoch)
+            self.logger.info("[Epoch %03d] New best val loss: %.4f" % (epoch, val_loss_f))
+            return True
+
+        improved = (self.best_val_loss - val_loss_f) > float(self.cfg.min_delta)
+        if improved:
+            self.best_val_loss = val_loss_f
+            self.best_state_dict = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
+            self.best_epoch = int(epoch)
+            self.logger.info("[Epoch %03d] New best val loss: %.4f" % (epoch, val_loss_f))
+            return True
+
+        return False
+
+    def _update_patience(self, improved: bool) -> None:
+        """
+        Update epochs_no_improve counter given whether validation improved.
+        Only called when cfg.early_stopping is True.
+        """
+        if improved:
             self.epochs_no_improve = 0
-            self.logger.info("[Epoch %03d] New best val loss: %.4f" % (epoch, val_loss))
         else:
             self.epochs_no_improve += 1
 
