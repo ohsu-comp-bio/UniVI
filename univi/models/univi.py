@@ -29,6 +29,78 @@ class _GradReverseFn(torch.autograd.Function):
         return -ctx.lambd * grad_output, None
 
 
+class _LogitsMLPHead(nn.Module):
+    """
+    Simple MLP head that returns logits in a dict for API compatibility with decoders.
+
+    Used for binary heads (and can be used for categorical if desired),
+    but we keep categorical default as build_decoder("categorical") to preserve behavior.
+    """
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        *,
+        hidden_dims: List[int],
+        dropout: float = 0.0,
+        batchnorm: bool = False,
+        activation: Optional[nn.Module] = None,
+    ):
+        super().__init__()
+        act = activation if activation is not None else nn.ReLU()
+        self.net = build_mlp(
+            in_dim=int(in_dim),
+            hidden_dims=list(hidden_dims) if hidden_dims else [max(64, int(in_dim))],
+            out_dim=int(out_dim),
+            activation=act,
+            dropout=float(dropout),
+            batchnorm=bool(batchnorm),
+        )
+
+    def forward(self, z: torch.Tensor) -> Dict[str, torch.Tensor]:
+        logits = self.net(z)
+        return {"logits": logits}
+
+
+def _as_list_int(x: Any) -> Optional[List[int]]:
+    if x is None:
+        return None
+    if isinstance(x, (list, tuple)):
+        out = []
+        for v in x:
+            if v is None:
+                continue
+            out.append(int(v))
+        return out
+    # allow single int
+    try:
+        return [int(x)]
+    except Exception:
+        return None
+
+
+def _parse_activation(act: Any) -> Optional[nn.Module]:
+    if act is None:
+        return None
+    if isinstance(act, nn.Module):
+        return act
+    s = str(act).lower().strip()
+    if s in ("relu",):
+        return nn.ReLU()
+    if s in ("gelu",):
+        return nn.GELU()
+    if s in ("elu",):
+        return nn.ELU()
+    if s in ("leakyrelu", "leaky_relu", "lrelu"):
+        return nn.LeakyReLU(0.01)
+    if s in ("silu", "swish"):
+        return nn.SiLU()
+    if s in ("tanh",):
+        return nn.Tanh()
+    # unknown -> None (falls back to default)
+    return None
+
+
 class UniVIMultiModalVAE(nn.Module):
     """
     Multi-modal β-VAE with per-modality encoders and decoders.
@@ -70,15 +142,20 @@ class UniVIMultiModalVAE(nn.Module):
       - recon_normalize_by_dim: divide per-cell recon by D**recon_dim_power
       - per-modality weights via ModalityConfig.recon_weight (default 1.0)
 
-    Mode-dependent DEFAULTS (requested)
-    -----------------------------------
-    If recon_normalize_by_dim/recon_dim_power are NOT explicitly provided:
-      - loss_mode in {"v1","paper","cross"}:
-          recon_normalize_by_dim = False
-          recon_dim_power        = 0.5
-      - loss_mode in {"v2","lite","light","moe","poe","fused"} (and anything else):
-          recon_normalize_by_dim = True
-          recon_dim_power        = 1.0
+    Classification heads (UPDATED, backwards-compatible)
+    ----------------------------------------------------
+    cfg.class_heads can specify any number of heads. Each head may be:
+
+      - categorical (default): softmax + cross-entropy
+      - binary: sigmoid + BCEWithLogitsLoss
+
+    New optional per-head attributes (read via getattr, so old configs still work):
+      - head_type / type / task: "categorical" or "binary"
+      - hidden_dims / head_hidden / mlp_hidden / layers: e.g. [128, 64]
+      - dropout: float
+      - batchnorm: bool
+      - activation: "relu", "gelu", "silu", ...
+      - pos_weight: float (binary only; for imbalance)
     """
 
     LOGVAR_MIN = -10.0
@@ -244,7 +321,9 @@ class UniVIMultiModalVAE(nn.Module):
         else:
             self.label_encoder = None
 
-        # Multi-head supervised decoders (incl. adversarial heads)
+        # ------------------------------------------------------------
+        # Multi-head supervised decoders (incl. adversarial heads) (UPDATED)
+        # ------------------------------------------------------------
         self.class_heads = nn.ModuleDict()
         self.class_heads_cfg: Dict[str, Dict[str, Any]] = {}
         self.head_label_names: Dict[str, List[str]] = {}
@@ -256,23 +335,78 @@ class UniVIMultiModalVAE(nn.Module):
                     raise TypeError(f"cfg.class_heads must contain ClassHeadConfig, got {type(h)}")
 
                 name = str(h.name)
-                n_classes = int(h.n_classes)
 
-                dec_cfg = DecoderConfig(
-                    output_dim=n_classes,
-                    hidden_dims=[max(64, self.latent_dim)],
-                    dropout=float(cfg.decoder_dropout),
-                    batchnorm=bool(cfg.decoder_batchnorm),
+                # Backwards-compatible defaults:
+                n_classes = int(getattr(h, "n_classes", 0))
+
+                # New: head type (binary vs categorical), with compatibility defaults
+                head_type = (
+                    getattr(h, "head_type", None)
+                    or getattr(h, "type", None)
+                    or getattr(h, "task", None)
                 )
-                self.class_heads[name] = build_decoder("categorical", cfg=dec_cfg, latent_dim=self.latent_dim)
+                head_type = (str(head_type).lower().strip() if head_type is not None else None)
+
+                if head_type is None:
+                    # preserve old behavior: categorical CE always (even for n_classes==2)
+                    head_type = "categorical"
+
+                if head_type in ("bin", "binary", "bce", "bernoulli", "logistic"):
+                    head_type = "binary"
+                elif head_type in ("cat", "categorical", "softmax", "multiclass", "ce"):
+                    head_type = "categorical"
+                else:
+                    # unknown -> safe default matching old behavior
+                    head_type = "categorical"
+
+                # New: hidden dims / dropout / batchnorm / activation
+                hidden_dims = (
+                    _as_list_int(getattr(h, "hidden_dims", None))
+                    or _as_list_int(getattr(h, "head_hidden", None))
+                    or _as_list_int(getattr(h, "mlp_hidden", None))
+                    or _as_list_int(getattr(h, "layers", None))
+                )
+                if not hidden_dims:
+                    hidden_dims = [max(64, self.latent_dim)]
+
+                h_dropout = float(getattr(h, "dropout", cfg.decoder_dropout))
+                h_batchnorm = bool(getattr(h, "batchnorm", cfg.decoder_batchnorm))
+                h_act = _parse_activation(getattr(h, "activation", None))
+
+                if head_type == "categorical":
+                    # Keep categorical as the original path to minimize downstream differences
+                    dec_cfg = DecoderConfig(
+                        output_dim=n_classes,
+                        hidden_dims=list(hidden_dims),
+                        dropout=h_dropout,
+                        batchnorm=h_batchnorm,
+                    )
+                    self.class_heads[name] = build_decoder("categorical", cfg=dec_cfg, latent_dim=self.latent_dim)
+                    out_dim = n_classes
+                else:
+                    # binary -> single logit
+                    self.class_heads[name] = _LogitsMLPHead(
+                        in_dim=self.latent_dim,
+                        out_dim=1,
+                        hidden_dims=list(hidden_dims),
+                        dropout=h_dropout,
+                        batchnorm=h_batchnorm,
+                        activation=h_act,
+                    )
+                    out_dim = 1
+
                 self.class_heads_cfg[name] = {
-                    "n_classes": n_classes,
-                    "loss_weight": float(h.loss_weight),
-                    "ignore_index": int(h.ignore_index),
-                    "from_mu": bool(h.from_mu),
-                    "warmup": int(h.warmup),
+                    "type": head_type,  # NEW (but safe)
+                    "n_classes": n_classes,  # keep for meta / decoding
+                    "out_dim": out_dim,      # NEW
+                    "loss_weight": float(getattr(h, "loss_weight", 1.0)),
+                    "ignore_index": int(getattr(h, "ignore_index", -1)),
+                    "from_mu": bool(getattr(h, "from_mu", True)),
+                    "warmup": int(getattr(h, "warmup", 0)),
                     "adversarial": bool(getattr(h, "adversarial", False)),
                     "adv_lambda": float(getattr(h, "adv_lambda", 1.0)),
+                    # binary-only optional
+                    "pos_weight": float(getattr(h, "pos_weight", 1.0)),
                 }
 
     # ----------------------------- label name utilities -----------------------------
@@ -337,7 +471,6 @@ class UniVIMultiModalVAE(nn.Module):
     def _alignment_loss_l2mu_pairwise(self, mu_per_mod: Dict[str, torch.Tensor]) -> torch.Tensor:
         names = list(mu_per_mod.keys())
         if len(names) < 2:
-            # return per-cell zeros if we can infer B, else scalar 0
             if len(names) == 1:
                 k = names[0]
                 return torch.zeros(mu_per_mod[k].size(0), device=mu_per_mod[k].device)
@@ -363,16 +496,6 @@ class UniVIMultiModalVAE(nn.Module):
     # -------------------------- recon scaling --------------------------
 
     def _recon_scale(self, mod_name: str, x: torch.Tensor, likelihood: Optional[str]) -> float:
-        """
-        Scalar multiplier applied to per-cell recon loss for this modality.
-
-        - Optional per-modality config: ModalityConfig.recon_weight (default 1.0)
-        - Optional dim normalization: divide per-cell recon by D**recon_dim_power
-        - Avoid double-normalizing for likelihood == 'mse' when _recon_loss already uses mean(dim=-1)
-
-        NOTE: Prefer x.shape[1] (actual tensor width) when available, to avoid mismatches between
-        cfg.input_dim and the tensor you're actually feeding/decoding (common for ATAC-LSI / HVGs / etc.).
-        """
         m_cfg = self.mod_cfg_by_name[mod_name]
         w = float(getattr(m_cfg, "recon_weight", 1.0))
 
@@ -451,15 +574,6 @@ class UniVIMultiModalVAE(nn.Module):
         x_in: torch.Tensor,
         cfg_m: Mapping[str, Any],
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """
-        Attempt to build (tokens, key_padding_mask, attn_bias) for a TransformerGaussianEncoder-like module.
-
-        Returns (None, None, None) if:
-          - encoder isn't transformer-style,
-          - tokenizer doesn't expose topk indices,
-          - coords aren't attached,
-          - config isn't distance type, etc.
-        """
         typ = str(cfg_m.get("type", "")).lower().strip()
         if typ != "distance":
             return None, None, None
@@ -502,13 +616,6 @@ class UniVIMultiModalVAE(nn.Module):
         attn_bias_cfg: Mapping[str, Any],
         sub_x_dict: Dict[str, torch.Tensor],
     ) -> Optional[Callable[[Dict[str, Any]], Optional[torch.Tensor]]]:
-        """
-        Build a callable(meta)->(B,T,T) for MultiModalTransformerGaussianEncoder.
-
-        Behavior:
-          - fills ONLY within-modality blocks for modalities configured as distance bias
-          - keeps cross-modality logits neutral (0)
-        """
         fused = self.fused_encoder
         if fused is None:
             return None
@@ -734,6 +841,8 @@ class UniVIMultiModalVAE(nn.Module):
     def _grad_reverse(self, x: torch.Tensor, lambd: float = 1.0) -> torch.Tensor:
         return _GradReverseFn.apply(x, float(lambd))
 
+    # -------------------- UPDATED multihead losses --------------------
+
     def _apply_multihead_losses(
         self,
         *,
@@ -763,9 +872,7 @@ class UniVIMultiModalVAE(nn.Module):
             if y_h is None:
                 continue
 
-            y_h = y_h.long()
             z_in = mu_z if bool(cfg_h["from_mu"]) else z
-
             if bool(cfg_h.get("adversarial", False)):
                 z_in = self._grad_reverse(z_in, cfg_h.get("adv_lambda", 1.0))
 
@@ -774,10 +881,35 @@ class UniVIMultiModalVAE(nn.Module):
             head_logits[name] = logits
 
             ignore_index = int(cfg_h["ignore_index"])
-            mask = (y_h != ignore_index) & (y_h >= 0)
             per_cell = torch.zeros(B, device=device)
-            if mask.any():
-                per_cell[mask] = F.cross_entropy(logits[mask], y_h[mask], reduction="none")
+
+            head_type = str(cfg_h.get("type", "categorical")).lower().strip()
+
+            if head_type == "binary":
+                # Expect y_h in {0,1} (int or float). Mask ignore_index.
+                yy = y_h.view(-1)
+                if yy.dtype.is_floating_point:
+                    yy_f = yy.float()
+                else:
+                    yy_f = yy.float()
+
+                mask = (yy != ignore_index) & (yy >= 0)
+                if mask.any():
+                    # logits: (B,1) or (B,)
+                    logit_1d = logits.view(-1)
+                    pos_w = float(cfg_h.get("pos_weight", 1.0))
+                    if pos_w != 1.0:
+                        pos_weight = torch.tensor(pos_w, device=logit_1d.device, dtype=logit_1d.dtype)
+                        bce = F.binary_cross_entropy_with_logits(logit_1d[mask], yy_f[mask], reduction="none", pos_weight=pos_weight)
+                    else:
+                        bce = F.binary_cross_entropy_with_logits(logit_1d[mask], yy_f[mask], reduction="none")
+                    per_cell[mask] = bce
+            else:
+                # categorical CE (old behavior)
+                yy = y_h.long().view(-1)
+                mask = (yy != ignore_index) & (yy >= 0)
+                if mask.any():
+                    per_cell[mask] = F.cross_entropy(logits[mask], yy[mask], reduction="none")
 
             w = float(cfg_h["loss_weight"])
             if w != 0.0:
@@ -797,7 +929,7 @@ class UniVIMultiModalVAE(nn.Module):
         epoch: int = 0,
         y: Optional[YType] = None,
         attn_bias_cfg: Optional[Mapping[str, Any]] = None,
-        **kwargs: Any,  # keep older wrappers from breaking if they pass extra args
+        **kwargs: Any,
     ) -> Dict[str, torch.Tensor]:
         mode = (self.loss_mode or "v2").lower()
         if mode in ("v1", "paper", "cross"):
@@ -856,7 +988,6 @@ class UniVIMultiModalVAE(nn.Module):
                 mod_name=name,
             )
 
-            # apply recon scaling (dim normalization + optional per-modality recon_weight)
             s = self._recon_scale(name, x_dict[name], m_cfg.likelihood)
             if s != 1.0:
                 loss_m = loss_m * float(s)
@@ -928,7 +1059,6 @@ class UniVIMultiModalVAE(nn.Module):
             "xhat": xhat_dict,
             "mu_dict": mu_dict,
             "logvar_dict": logvar_dict,
-            # these are after scaling
             "recon_per_modality": {k: v.mean() for k, v in recon_losses.items()},
             "beta": torch.tensor(beta_t, device=loss.device),
             "gamma": torch.tensor(gamma_t, device=loss.device),
@@ -949,6 +1079,7 @@ class UniVIMultiModalVAE(nn.Module):
         return out
 
     # ------------------------------ v1 ------------------------------
+    # (unchanged except it uses _apply_multihead_losses which is now richer)
 
     def _forward_v1(
         self,
@@ -1147,7 +1278,6 @@ class UniVIMultiModalVAE(nn.Module):
             "xhat": xhat_dict,
             "mu_dict": mu_dict,
             "logvar_dict": logvar_dict,
-            # these are after scaling
             "recon_per_modality": {k: v.mean() for k, v in recon_per_target_mean.items()},
             "beta": torch.tensor(beta_t, device=loss.device),
             "gamma": torch.tensor(gamma_t, device=loss.device),
@@ -1369,7 +1499,15 @@ class UniVIMultiModalVAE(nn.Module):
             z_in = mu_z if bool(cfg_h["from_mu"]) else z
             dec_out = head(z_in)
             logits = dec_out["logits"] if isinstance(dec_out, dict) and "logits" in dec_out else dec_out
-            out[name] = logits if not return_probs else F.softmax(logits, dim=-1)
+
+            head_type = str(cfg_h.get("type", "categorical")).lower().strip()
+            if not return_probs:
+                out[name] = logits
+            else:
+                if head_type == "binary":
+                    out[name] = torch.sigmoid(logits)
+                else:
+                    out[name] = F.softmax(logits, dim=-1)
 
         return out
 

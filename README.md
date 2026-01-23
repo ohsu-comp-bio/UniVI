@@ -1,15 +1,15 @@
 # UniVI
 
-[![PyPI version](https://img.shields.io/pypi/v/univi?v=0.3.8)](https://pypi.org/project/univi/)
+[![PyPI version](https://img.shields.io/pypi/v/univi?v=0.3.9)](https://pypi.org/project/univi/)
 [![Conda version](https://img.shields.io/conda/vn/conda-forge/univi?cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.3.8)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.3.9)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.8/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.9/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.8/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.3.9/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
@@ -47,7 +47,7 @@ If you use UniVI in your work, please cite:
   url     = {https://www.biorxiv.org/content/10.1101/2025.02.28.640429},
   note    = {Preprint}
 }
-```
+````
 
 ---
 
@@ -123,6 +123,7 @@ UniVI/
     │   ├── run_citeseq_hparam_search.py
     │   ├── run_multiome_hparam_search.py
     │   ├── run_rna_hparam_search.py
+    │   ├── run_atac_hparam_search.py
     │   └── run_teaseq_hparam_search.py
     └── utils/                             # General utilities
         ├── __init__.py
@@ -346,93 +347,14 @@ In multimodal training, reconstruction losses are often **summed over features**
 
 To keep modalities more balanced, `UniVIMultiModalVAE` supports **feature-dimension normalization** of reconstruction loss terms:
 
-- For most likelihoods (`nb`, `zinb`, `poisson`, `bernoulli`, `gaussian`, `categorical`): recon loss is scaled by  
+* For most likelihoods (`nb`, `zinb`, `poisson`, `bernoulli`, `gaussian`, `categorical`): recon loss is scaled by
   **`1 / D**recon_dim_power`**, where `D` is the modality feature dimension.
-- For `likelihood="mse"`: recon already uses `mean(dim=-1)`, so dimension normalization is **not applied again**.
+* For `likelihood="mse"`: recon already uses `mean(dim=-1)`, so dimension normalization is **not applied again**.
 
-Defaults v1 (turned off, 0.5 power default if turned on):
+Defaults:
 
-- `recon_normalize_by_dim=False`
-
-If using with v1, your `UniVIMultiModalVAE` instantiation might look something like:
-
-```python
-# v1 with recon balancing:
-model = UniVIMultiModalVAE(
-    univi_cfg,
-    loss_mode="v1",
-    v1_recon="avg",        # or "cross", "self", etc..
-    normalize_v1_terms=True,
-    # recon balancing
-    recon_normalize_by_dim=True,
-    recon_dim_power=0.5,
-).to(device)
-```
-
-Note: If using this feature in conjunction with `loss_mode="v1"` and `normalize_v1_terms=True`, tune `recon_dim_power` to around `0.25-0.55` instead of `1.00`. Doing so avoids a double hyperparameter normalization shrinkage in the reconstruction loss term during training since `normalize_v1_terms` normalizes by total number of modalities and `recon_normalize_by_dim` normalizes by total number of features per modality.
-
-Defaults v2/lite:
-
-- `recon_normalize_by_dim=True`
-- `recon_dim_power=1.0` (divide by `D`)
-
-```python
-# v2/lite with recon balancing (defaults shown explicitly)
-model = UniVIMultiModalVAE(
-    univi_cfg,
-    loss_mode="v2",
-    # recon balancing
-    recon_normalize_by_dim=True,
-    recon_dim_power=1.0,   # try 0.5 to divide by sqrt(D)
-).to(device)
-```
-
-### 3b) Per-modality reconstruction weights (optional)
-
-You can also apply a manual weight per modality (useful if you want ADT/ATAC to “matter more” than raw dimension normalization would imply).
-
-Set `recon_weight` on each `ModalityConfig` (defaults to `1.0` if omitted):
-
-```python
-univi_cfg = UniVIConfig(
-    latent_dim=40,
-    beta=1.5,
-    gamma=2.5,
-    modalities=[
-        ModalityConfig(
-            "rna", rna.n_vars,
-            [512, 256, 128], [128, 256, 512],
-            likelihood="nb",
-            recon_weight=1.0,
-        ),
-        ModalityConfig(
-            "adt", adt.n_vars,
-            [128, 64], [64, 128],
-            likelihood="nb",
-            recon_weight=2.0,  # emphasize ADT recon
-        ),
-    ],
-)
-
-model = UniVIMultiModalVAE(univi_cfg, loss_mode="v2").to(device)
-```
-
-Tip: You can combine both approaches: **dimension normalization (global)** + **per-modality weights (local tuning)**.
-
-
-### 4) Train
-
-```python
-trainer = UniVITrainer(
-    model=model,
-    train_loader=train_loader,
-    val_loader=val_loader,
-    train_cfg=train_cfg,
-    device=device,
-)
-
-history = trainer.fit()
-```
+* v1: `recon_normalize_by_dim=False`
+* v2/lite: `recon_normalize_by_dim=True`, `recon_dim_power=1.0`
 
 ---
 
@@ -459,22 +381,29 @@ See `univi/utils/io.py` for the exact checkpoint read/write helpers used by the 
 
 ---
 
-## Classification (built-in heads)
+## Classification (customizable heads)
 
-UniVI supports **in-model supervised classification heads** (single “legacy” label head and/or multi-head auxiliary decoders). This is useful for:
+UniVI supports **in-model supervised heads** to predict labels from the latent space. This is useful for:
 
-* harmonized cell-type annotation (e.g., bridge → projected cohorts)
+* harmonized cell-type annotation (bridge → projected cohorts)
 * batch/tech/patient prediction (sanity checks, confounding)
 * adversarial domain confusion via gradient reversal (GRL)
 * multi-task setups (e.g., celltype + patient + mutation flags)
+* lightweight supervision during training without a separate downstream classifier
 
-### How it works
+### Key ideas
 
 * Heads are configured via `UniVIConfig.class_heads` using `ClassHeadConfig`.
-* Training targets are passed as `y`, a **dict mapping head name → integer class indices** with shape `(B,)`.
-* Unlabeled entries should use `ignore_index` (default `-1`) and are masked out automatically.
-* Each head can be delayed with `warmup` and weighted with `loss_weight`.
-* Set `adversarial=True` for GRL heads (domain confusion).
+* You can define **any number of heads**.
+* Each head can be:
+
+  * **categorical** (multi-class softmax / cross-entropy), or
+  * **binary** (sigmoid / BCE) if your implementation supports `head_type="binary"` (or just use `n_classes=2` categorical).
+* Each head can use a **custom MLP** (depth/width) and its own hyperparameters.
+* Training targets are passed as `y`, a dict: **`{head_name: labels}`**.
+* Missing labels are masked using `ignore_index` (default `-1`).
+* Heads can be delayed via `warmup` and weighted via `loss_weight`.
+* Set `adversarial=True` to apply GRL to that head (domain confusion).
 
 ### 1) Add heads in the config
 
@@ -490,14 +419,23 @@ univi_cfg = UniVIConfig(
         ModalityConfig("adt", adt.n_vars, [128,64],      [64,128],      likelihood="nb"),
     ],
     class_heads=[
+        # Categorical head (multi-class cell type)
         ClassHeadConfig(
             name="celltype",
             n_classes=int(rna.obs["celltype"].astype("category").cat.categories.size),
             loss_weight=1.0,
             ignore_index=-1,
-            from_mu=True,     # classify from mu_z (more stable)
+            from_mu=True,
             warmup=0,
+            # Optional (supported in v0.3.9+):
+            # head_type="categorical",
+            # hidden_dims=(256, 128),
+            # dropout=0.1,
+            # batchnorm=False,
+            # activation="relu",
         ),
+
+        # Adversarial categorical head (domain confusion)
         ClassHeadConfig(
             name="batch",
             n_classes=int(rna.obs["batch"].astype("category").cat.categories.size),
@@ -505,14 +443,29 @@ univi_cfg = UniVIConfig(
             ignore_index=-1,
             from_mu=True,
             warmup=10,
-            adversarial=True,  # GRL head (domain confusion)
+            adversarial=True,
             adv_lambda=1.0,
+            # Optional customization (supported in v0.3.9+):
+            # hidden_dims=(128,),
+        ),
+
+        # Binary head (e.g. mutation flag) — either true binary (BCE) or categorical with n_classes=2
+        ClassHeadConfig(
+            name="TP53_mut",
+            n_classes=2,           # or use head_type="binary" in configs if supported
+            loss_weight=0.5,
+            ignore_index=-1,
+            from_mu=True,
+            warmup=0,
+            # Optional customization (supported in v0.3.9+):
+            # head_type="binary",
+            # hidden_dims=(128, 64),
         ),
     ],
 )
 ```
 
-Optional: attach readable label names (for your own decoding later):
+Optional: attach readable label names for decoding later:
 
 ```python
 model.set_head_label_names("celltype", list(rna.obs["celltype"].astype("category").cat.categories))
@@ -521,15 +474,18 @@ model.set_head_label_names("batch",    list(rna.obs["batch"].astype("category").
 
 ### 2) Pass `y` to the model during training
 
-Example pattern (construct labels from arrays aligned to dataset order):
-
 ```python
 celltype_codes = rna.obs["celltype"].astype("category").cat.codes.to_numpy()
 batch_codes    = rna.obs["batch"].astype("category").cat.codes.to_numpy()
 
+# Example: binary flag (0/1), with -1 for unknown
+tp53 = rna.obs["TP53_mut"].to_numpy().astype(int)     # assume 0/1
+tp53 = np.where(np.isnan(tp53), -1, tp53)
+
 y = {
     "celltype": torch.tensor(celltype_codes[batch_idx], device=device),
     "batch":    torch.tensor(batch_codes[batch_idx], device=device),
+    "TP53_mut": torch.tensor(tp53[batch_idx], device=device),
 }
 
 out = model(x_dict, epoch=epoch, y=y)
@@ -539,8 +495,11 @@ loss.backward()
 
 When labels are provided, the forward output can include:
 
-* `out["head_logits"]`: dict of logits `(B, n_classes)` per head
-* `out["head_losses"]`: mean CE per head (masked by `ignore_index`)
+* `out["head_logits"]`: dict of logits per head
+
+  * categorical: `(B, n_classes)`
+  * binary (BCE): `(B,)` or `(B, 1)` depending on your implementation
+* `out["head_losses"]`: mean loss per head (masked by `ignore_index`)
 
 ### 3) Predict heads after training
 
@@ -553,15 +512,78 @@ with torch.no_grad():
     probs = model.predict_heads(x_dict, return_probs=True)
 
 for head_name, P in probs.items():
-    print(head_name, P.shape)  # (B, n_classes)
+    print(head_name, P.shape)
 ```
 
-To inspect which heads exist + their settings:
+### 4) Inspect head metadata
 
 ```python
 meta = model.get_classification_meta()
 print(meta)
 ```
+
+---
+
+## Categorical variables as a modality (discrete encoder/decoder)
+
+In addition to “heads”, UniVI can treat certain **categorical variables as a full modality**, meaning:
+
+* it has its **own encoder** `q(z|y)` (from discrete inputs),
+* it has its **own decoder** `p(y|z)` (predicting the categories),
+* and it can participate in fusion/alignment like any other modality.
+
+This can be useful when:
+
+* you want labels to behave like an “anchor modality”
+* you want to **inject** label information into the fused posterior
+* you want to do **semi-supervised** training where some cells have labels and others do not
+
+### How it works (high-level)
+
+If a modality has `likelihood="categorical"` (or equivalent), UniVI interprets its input as either:
+
+* **integer class indices** of shape `(B,)` or `(B, 1)`, with unlabeled using `ignore_index` (default `-1`), or
+* **one-hot** vectors `(B, C)` (optionally sparse/soft), where all-zero rows are treated as unlabeled
+
+Internally, categorical inputs may be converted into one-hot for the encoder, and decoded using cross-entropy.
+
+### Example: add a categorical modality
+
+```python
+univi_cfg = UniVIConfig(
+    latent_dim=40,
+    beta=1.5,
+    gamma=2.5,
+    modalities=[
+        ModalityConfig("rna", rna.n_vars, [512,256,128], [128,256,512], likelihood="nb"),
+        ModalityConfig("adt", adt.n_vars, [128,64],      [64,128],      likelihood="nb"),
+
+        # categorical modality (e.g. coarse cell type)
+        ModalityConfig(
+            name="celltype_mod",
+            input_dim=int(rna.obs["celltype"].astype("category").cat.categories.size),
+            encoder_hidden=[128, 64],
+            decoder_hidden=[64, 128],
+            likelihood="categorical",
+            # Optional: ignore_index=-1
+        ),
+    ],
+)
+```
+
+### Provide categorical modality data via `x_dict`
+
+If your training loop/dataset returns `x_dict`, include:
+
+* `x_dict["celltype_mod"]` as:
+
+  * `(B,)` integer labels, or
+  * `(B, 1)` integer labels, or
+  * `(B, C)` one-hot
+
+Unlabeled should be `-1` (or the configured `ignore_index`).
+
+This is separate from `y` (classification heads). Think of categorical modalities as part of the generative model, not auxiliary prediction heads.
 
 ---
 
@@ -589,144 +611,6 @@ In both cases, the standard embedding used for plotting/neighbors is the fused m
 
 ```python
 mu_z, logvar_z, z = model.encode_fused(x_dict, use_mean=True)
-```
-
-### 1) Encode embeddings for plotting / neighbors (built-in)
-
-Use `encode_adata` to get either fused (MoE/PoE) or modality-specific latents directly from an AnnData.
-
-```python
-import scanpy as sc
-import torch
-from univi.evaluation import encode_adata
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model.eval()
-
-# Fused latent (MoE/PoE) from a single observed modality
-Z_fused = encode_adata(
-    model,
-    rna,
-    modality="rna",
-    device=device,
-    layer="counts",       # or None to use .X
-    latent="moe_mean",    # {"moe_mean","moe_sample","modality_mean","modality_sample"}
-)
-
-# Modality-specific latent (projection / diagnostics)
-Z_rna = encode_adata(
-    model,
-    rna,
-    modality="rna",
-    device=device,
-    layer="counts",
-    latent="modality_mean",
-)
-
-rna.obsm["X_univi_fused"] = Z_fused
-rna.obsm["X_univi_rna"] = Z_rna
-
-sc.pp.neighbors(rna, use_rep="X_univi_fused")
-sc.tl.umap(rna)
-sc.pl.umap(rna, color=["celltype"], frameon=False)
-```
-
-### 2) Evaluate paired alignment (FOSCTTM, Recall@k, mixing, label transfer)
-
-`evaluate_alignment` is a figure-ready wrapper. It can take precomputed `Z1/Z2`, or compute embeddings from AnnData via `encode_adata`.
-
-```python
-from univi.evaluation import evaluate_alignment
-
-# For paired data, you typically pass modality-specific latents for the two modalities
-res = evaluate_alignment(
-    model=model,
-    adata1=rna,
-    adata2=adt,
-    mod1="rna",
-    mod2="adt",
-    device=device,
-    layer1="counts",
-    layer2="counts",
-    latent="modality_mean",
-    metric="euclidean",
-    recall_ks=(1, 5, 10),
-    k_mixing=20,
-    k_transfer=15,
-    # optional label transfer inputs:
-    # labels_source=rna.obs["celltype"].to_numpy(),
-    # labels_target=adt.obs["celltype"].to_numpy(),
-)
-
-print(res)  # dict includes foscttm(+sem), recall@k(+sem), modality_mixing(+sem), label transfer (optional)
-```
-
-### 3) Denoise / reconstruct a modality (built-in)
-
-`denoise_adata` runs “encode modality → decode same modality” and can write to a layer.
-
-```python
-from univi.evaluation import denoise_adata
-
-Xhat_rna = denoise_adata(
-    model,
-    rna,
-    modality="rna",
-    device=device,
-    layer="counts",
-    out_layer="univi_denoised",  # writes rna.layers["univi_denoised"]
-)
-
-# Quick marker plots from denoised values:
-import scanpy as sc
-markers = ["TRAC", "NKG7", "LYZ", "MS4A1", "CD79A"]
-
-rna_d = rna.copy()
-rna_d.X = rna_d.layers["univi_denoised"]
-sc.pl.umap(rna_d, color=markers, frameon=False, title=[f"{g} (denoised)" for g in markers])
-```
-
-### 4) Cross-modal reconstruction / imputation (built-in)
-
-`cross_modal_predict` runs “encode src modality → decode target modality” and returns a dense numpy array.
-
-```python
-from univi.evaluation import cross_modal_predict
-
-# Example: RNA -> predicted ADT
-adt_from_rna = cross_modal_predict(
-    model,
-    adata_src=rna,
-    src_mod="rna",
-    tgt_mod="adt",
-    device=device,
-    layer="counts",
-    batch_size=512,
-    use_moe=True,   # for src-only input, MoE reduces to the src posterior
-)
-print(adt_from_rna.shape)  # (cells, adt_features)
-```
-
-### 5) Direct model calls (advanced / debugging)
-
-If you want full control (or want posterior means/variances explicitly), call the model methods directly.
-
-```python
-import torch
-
-model.eval()
-batch = next(iter(val_loader))
-x_dict = {k: v.to(device) for k, v in batch.items()}
-
-with torch.no_grad():
-    # Per-modality posteriors
-    mu_dict, logvar_dict = model.encode_modalities(x_dict)
-
-    # Fused posterior (MoE/PoE or fused transformer, depending on config)
-    mu_z, logvar_z, z = model.encode_fused(x_dict, use_mean=True)
-
-    # Decode all modalities from a chosen latent (implementation-dependent keys)
-    xhat_dict = model.decode_modalities(mu_z)
 ```
 
 ---
@@ -796,16 +680,11 @@ univi_cfg = UniVIConfig(
             decoder_hidden=[64, 128],
             likelihood="gaussian",
             encoder_type="mlp",
-            tokenizer=TokenizerConfig(mode="topk_scalar", n_tokens=min(32, adt.n_vars)),  # useful for fused encoder
+            tokenizer=TokenizerConfig(mode="topk_scalar", n_tokens=min(32, adt.n_vars)),
         ),
     ],
 )
 ```
-
-Notes:
-
-* Tokenizers focus attention on the most informative features per cell (top-k) or local structure (patching).
-* Transformer encoders expose optional interpretability hooks (token indices and, when enabled, attention maps).
 
 ---
 
@@ -830,8 +709,6 @@ TokenizerConfig(
 ```
 
 ### Attach coordinates and configure distance bias via `UniVITrainer`
-
-If your `UniVITrainer` supports `feature_coords` and `attn_bias_cfg`, you can attach genomic coordinates once and let the trainer build the bias for you:
 
 ```python
 feature_coords = {
@@ -862,8 +739,6 @@ trainer = UniVITrainer(
 trainer.fit()
 ```
 
-This path keeps the model code clean and makes the feature-coordinate plumbing consistent across runs.
-
 ---
 
 ## Optional: Fused multimodal transformer encoder (advanced)
@@ -879,9 +754,9 @@ univi_cfg = UniVIConfig(
     latent_dim=40,
     beta=1.0,
     gamma=1.25,
-    modalities=[...],  # your per-modality configs still exist
+    modalities=[...],
     fused_encoder_type="multimodal_transformer",
-    fused_modalities=("rna", "adt", "atac"),  # default: all modalities
+    fused_modalities=("rna", "adt", "atac"),
     fused_transformer=TransformerConfig(
         d_model=256, num_heads=8, num_layers=4,
         dim_feedforward=1024, dropout=0.1, attn_dropout=0.1,
@@ -889,11 +764,6 @@ univi_cfg = UniVIConfig(
     ),
 )
 ```
-
-Notes:
-
-* Every modality in `fused_modalities` must define a `tokenizer` (even if its per-modality encoder is MLP).
-* If `fused_require_all_modalities=True` and a fused modality is missing at inference, UniVI falls back to MoE/PoE fusion.
 
 ---
 
@@ -916,7 +786,7 @@ See `univi/hyperparam_optimization/` and `notebooks/` for examples.
 
 ## Contact, questions, and bug reports
 
-* **Questions / comments:** open a GitHub Issue with the `question` label (or a Discussion if enabled).
+* **Questions / comments:** open a GitHub Issue with the `question` label (or make a post in the Discussion thread).
 * **Bug reports:** open a GitHub Issue and include:
 
   * your UniVI version: `python -c "import univi; print(univi.__version__)"`
