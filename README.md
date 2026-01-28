@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/univi?v=0.3.9)](https://pypi.org/project/univi/)
 [![Conda version](https://img.shields.io/conda/vn/conda-forge/univi?cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
-[![conda-forge downloads](https://img.shields.io/conda/dn/conda-forge/univi?label=conda-forge%20downloads)](https://anaconda.org/conda-forge/univi)
+[![conda-forge downloads](https://img.shields.io/conda/dn/conda-forge/univi?label=conda-forge%20downloads&cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.3.9)](https://pypi.org/project/univi/)
 
 <picture>
