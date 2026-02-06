@@ -71,7 +71,6 @@ class ModalityConfig:
     recon_weight: float = 1.0
 
     # ---- Optional NB / ZINB decoder settings (model already checks these) ----
-    # dispersion: "gene" or "cell" or "gene-cell" depending on your decoder implementation
     dispersion: str = "gene"
     init_log_theta: float = 0.0
 
@@ -141,7 +140,6 @@ class UniVIConfig:
             if int(m.input_dim) <= 0:
                 raise ValueError(f"Modality {m.name!r}: input_dim must be > 0, got {m.input_dim}")
 
-            # ---- NEW: recon_weight sanity ----
             if float(getattr(m, "recon_weight", 1.0)) < 0.0:
                 raise ValueError(f"Modality {m.name!r}: recon_weight must be >= 0, got {m.recon_weight}")
 
@@ -276,4 +274,15 @@ class TrainingConfig:
     early_stopping: bool = False
     patience: int = 20
     min_delta: float = 0.0
+
+    # ---------------------------------------------------------------------
+    # NEW: warmup for "best epoch" tracking
+    #
+    # During epochs < best_epoch_warmup:
+    #   - val_loss is still computed & recorded
+    #   - but best_val_loss/best_epoch/best_state_dict are NOT updated
+    #
+    # Default 0 preserves previous behavior exactly.
+    # ---------------------------------------------------------------------
+    best_epoch_warmup: int = 0
 
