@@ -77,10 +77,18 @@ UniVI/
 │   └── univi_env.yml                      # Recommended env (CUDA-friendly)
 ├── data/                                  # Small example data notes (datasets are typically external)
 │   └── README.md                          # Notes on data sources / formats
-├── notebooks/                             # Jupyter notebooks (demos & benchmarks)
-│   ├── UniVI_CITE-seq_*.ipynb
-│   ├── UniVI_10x_Multiome_*.ipynb
-│   └── UniVI_TEA-seq_*.ipynb
+├── notebooks/                             # Jupyter notebook analyses to reproduce every figure from our revised manuscript (in progress for Genome Research)
+│   ├── UniVI_manuscript_GR-Figure_2_analysis-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure_3_analysis-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure_4_analysis-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure_5_analysis-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure_6_analysis-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure_7_analysis-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure_8_analysis-running_pytorch_tools-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure_8_analysis-running_R_tools-reference.ipynb
+│   ├── UniVI_GR_manuscript-Figure_9_paired_data_ablation_and_computational_scaling_performance_reference.ipynb
+│   ├── UniVI_GR_manuscript-Figure_10_cell_population_ablation_MoE_reference.ipynb
+│   └── UniVI_GR_manuscript-Supplemental_grid-sweep_reference.ipynb
 ├── parameter_files/                       # JSON configs for model + training + data selectors
 │   ├── defaults_*.json                    # Default configs (per experiment)
 │   └── params_*.json                      # Example “named” configs (RNA, ADT, ATAC, etc.)
@@ -135,56 +143,6 @@ UniVI/
         ├── stats.py                       # Small statistical helpers / transforms
         └── torch_utils.py                 # PyTorch utilities (device, tensor helpers)
 ```
-
----
-
-## Generated outputs
-
-Most entry-point scripts write results into a user-specified output directory (commonly `runs/`), which is not tracked in git.
-
-A typical `runs/` folder produced by `scripts/revision_reproduce_all.sh` looks like:
-
-```text
-runs/
-└── <run_name>/                             # user-chosen run name (often includes dataset + date)
-    ├── checkpoints/                        # model/trainer state for resuming or export
-    │   ├── univi_checkpoint.pt             # primary checkpoint (model + optimizer + config, if enabled)
-    │   └── best.pt                         # optional: best-val checkpoint (if early stopping enabled)
-    ├── eval/                               # evaluation summaries and derived plots
-    │   ├── metrics.json                    # machine-readable metrics summary
-    │   ├── metrics.csv                     # flat table for quick comparisons
-    │   └── plots/                          # optional: UMAPs, heatmaps, and benchmark figures
-    ├── embeddings/                         # optional: exported latents for downstream analysis
-    │   ├── mu_z.npy                        # fused mean embedding (cells x latent_dim)
-    │   ├── modality_mu/                    # per-modality embeddings q(z|x_m)
-    │   │   ├── rna.npy
-    │   │   ├── adt.npy
-    │   │   └── atac.npy
-    │   └── obs_names.txt                   # row order for embeddings (safe joins)
-    ├── reconstructions/                    # optional: recon and cross-recon exports
-    │   ├── rna_from_rna.npy                # denoised reconstruction
-    │   ├── adt_from_adt.npy
-    │   ├── adt_from_rna.npy                # cross-modal imputation example
-    │   └── rna_from_atac.npy
-    ├── robustness/                         # robustness experiments (frequency mismatch, DnI, etc.)
-    │   ├── frequency_perturbation_results.csv
-    │   ├── frequency_perturbation_plot.png
-    │   ├── frequency_perturbation_plot.pdf
-    │   ├── do_not_integrate_summary.csv
-    │   ├── do_not_integrate_plot.png
-    │   └── do_not_integrate_plot.pdf
-    ├── benchmarks/                         # baseline comparisons (optionally includes Harmony, etc.)
-    │   ├── results.csv
-    │   ├── results.png
-    │   └── results.pdf
-    ├── tables/
-    │   └── Supplemental_Table_S1.xlsx       # environment + hparams + dataset statistics snapshot
-    └── logs/
-        ├── train.log                        # training log (stdout/stderr capture)
-        └── history.csv                      # per-epoch train/val traces (if enabled)
-```
-
-(Exact subfolders vary by script and flags; the layout above shows the common outputs across the pipeline.)
 
 ---
 
