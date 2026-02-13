@@ -78,17 +78,17 @@ UniVI/
 ├── data/                                  # Small example data notes (datasets are typically external)
 │   └── README.md                          # Notes on data sources / formats
 ├── notebooks/                             # Jupyter notebook analyses to reproduce every figure from our revised manuscript (in progress for Genome Research)
-│   ├── UniVI_manuscript_GR-Figure_2__CITE_paired-reference.ipynb
-│   ├── UniVI_manuscript_GR-Figure_3__CITE_paired_biological_latent-reference.ipynb
-│   ├── UniVI_manuscript_GR-Figure_4__Multiome_paired-reference.ipynb
-│   ├── UniVI_manuscript_GR-Figure_5__Multiome_bridge-reference.ipynb
-│   ├── UniVI_manuscript_GR-Figure_6__TEA-seq_tri-modal-reference.ipynb
-│   ├── UniVI_manuscript_GR-Figure_7__AML_bridge_mapping_and_fine-tuning-reference.ipynb
-│   ├── UniVI_manuscript_GR-Figure_8__benchmarking_against_pytorch_tools-reference.ipynb
-│   ├── UniVI_manuscript_GR-Figure_8__benchmarking_against_R_tools-reference.ipynb
-│   ├── UniVI_GR_manuscript-Figure_9__paired_data_ablation_and_computational_scaling_performance_reference.ipynb
-│   ├── UniVI_GR_manuscript-Figure_10_cell_population_ablation_MoE_reference.ipynb
-│   └── UniVI_GR_manuscript-Supplem___grid-sweep_reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure__2__CITE_paired-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure__3__CITE_paired_biological_latent-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure__4__Multiome_paired-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure__5__Multiome_bridge-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure__6__TEA-seq_tri-modal-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure__7__AML_bridge_mapping_and_fine-tuning-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure__8__benchmarking_against_pytorch_tools-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure__8__benchmarking_against_R_tools-reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure__9__paired_data_ablation_and_computational_scaling_performance_reference.ipynb
+│   ├── UniVI_manuscript_GR-Figure_10__cell_population_ablation_MoE_reference.ipynb
+│   └── UniVI_manuscript_GR-Supplement_grid-sweep_reference.ipynb
 ├── parameter_files/                       # JSON configs for model + training + data selectors
 │   ├── defaults_*.json                    # Default configs (per experiment)
 │   └── params_*.json                      # Example “named” configs (RNA, ADT, ATAC, etc.)
