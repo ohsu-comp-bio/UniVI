@@ -87,8 +87,11 @@ UniVI/
 │   ├── UniVI_manuscript_GR-Figure__8__benchmarking_against_pytorch_tools.ipynb
 │   ├── UniVI_manuscript_GR-Figure__8__benchmarking_against_R_tools.ipynb
 │   ├── UniVI_manuscript_GR-Figure__9__paired_data_ablation_and_computational_scaling_performance.ipynb
+│   ├── UniVI_manuscript_GR-Figure__9__paired_data_ablation_and_computational_scaling_performance_compile_plots_from_results_df.ipynb
 │   ├── UniVI_manuscript_GR-Figure_10__cell_population_ablation_MoE.ipynb
-│   └── UniVI_manuscript_GR-Supple_____grid-sweep.ipynb
+│   ├── UniVI_manuscript_GR-Figure_10__cell_population_ablation_MoE_compile_plots_from_results_df.ipynb
+│   ├── UniVI_manuscript_GR-Supple_____grid-sweep.ipynb
+│   └── UniVI_manuscript_GR-Supple_____grid-sweep_compile_plots_from_results_df.ipynb
 ├── parameter_files/                       # JSON configs for model + training + data selectors
 │   ├── defaults_*.json                    # Default configs (per experiment)
 │   └── params_*.json                      # Example “named” configs (RNA, ADT, ATAC, etc.)
