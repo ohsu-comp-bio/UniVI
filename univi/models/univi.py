@@ -166,8 +166,8 @@ class UniVIMultiModalVAE(nn.Module):
         self,
         cfg: UniVIConfig,
         *,
-        loss_mode: str = "v2",
-        v1_recon: str = "cross",
+        loss_mode: str = "v1",
+        v1_recon: str = "avg",
         v1_recon_mix: float = 0.0,
         normalize_v1_terms: bool = True,
 
