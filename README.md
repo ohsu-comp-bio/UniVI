@@ -35,21 +35,21 @@ It’s designed for experiments like:
 
 If you use UniVI in your work, please cite:
 
-> Ashford AJ, Enright T, Nikolova O, Demir E.  
-> **Unifying Multimodal Single-Cell Data Using a Mixture of Experts β-Variational Autoencoder-Based Framework.**  
-> *bioRxiv* (2025). doi: [10.1101/2025.02.28.640429](https://www.biorxiv.org/content/10.1101/2025.02.28.640429v1.full)
+> Ashford AJ, Enright T, Somers J, Nikolova O, Demir E.
+> **Unifying multimodal single-cell data with a mixture-of-experts β-variational autoencoder framework.**
+> *bioRxiv* (2025; updated 2026). doi: [10.1101/2025.02.28.640429](https://doi.org/10.1101/2025.02.28.640429)
 
 ```bibtex
 @article{Ashford2025UniVI,
-  title   = {Unifying Multimodal Single-Cell Data Using a Mixture of Experts β-Variational Autoencoder-Based Framework},
-  author  = {Ashford, Andrew J. and Enright, Trevor and Nikolova, Olga and Demir, Emek},
+  title   = {Unifying multimodal single-cell data with a mixture-of-experts β-variational autoencoder framework},
+  author  = {Ashford, Andrew J. and Enright, Trevor and Somers, Julia and Nikolova, Olga and Demir, Emek},
   journal = {bioRxiv},
   year    = {2025},
   doi     = {10.1101/2025.02.28.640429},
   url     = {https://www.biorxiv.org/content/10.1101/2025.02.28.640429},
-  note    = {Preprint}
+  note    = {Preprint (updated 2026)}
 }
-````
+```
 
 ---
 
