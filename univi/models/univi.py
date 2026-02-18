@@ -862,7 +862,7 @@ class UniVIMultiModalVAE(nn.Module):
                     gl = self.shared_gate_net(feat)  # (B,1)
                 else:
                     # per-modality gate
-                    gn = self.gate_nets.get(m, None)
+                    gn = self.gate_nets[m] if m in self.gate_nets else None
                     if gn is None:
                         # safe fallback: 0 logit => uniform if missing gate for some reason
                         gl = torch.zeros((feat.shape[0], 1), device=feat.device, dtype=feat.dtype)

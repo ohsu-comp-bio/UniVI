@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Literal, Sequence, Any
+from typing import Dict, List, Optional, Literal, Sequence, Any, Union
 
 
 # =============================================================================
@@ -67,7 +67,7 @@ class ModalityConfig:
     decoder_hidden: List[int]
     likelihood: str = "gaussian"
 
-    # ---- NEW: per-modality reconstruction weight ----
+    # ---- per-modality reconstruction weight ----
     recon_weight: float = 1.0
 
     # ---- Optional NB / ZINB decoder settings (model already checks these) ----
@@ -87,6 +87,12 @@ class ModalityConfig:
 
 @dataclass
 class ClassHeadConfig:
+    """
+    Supervised / adversarial head configuration.
+
+    Backwards compatible defaults preserve the old behavior:
+    - head_type defaults to categorical (even if n_classes==2)
+    """
     name: str
     n_classes: int
     loss_weight: float = 1.0
@@ -96,6 +102,15 @@ class ClassHeadConfig:
 
     adversarial: bool = False
     adv_lambda: float = 1.0
+
+    # ---- NEW (optional): allow passing what the model reads via getattr ----
+    # categorical vs binary (binary => single logit)
+    head_type: Optional[Literal["categorical", "binary"]] = None
+    hidden_dims: Optional[List[int]] = None
+    dropout: Optional[float] = None
+    batchnorm: Optional[bool] = None
+    activation: Optional[Literal["relu", "gelu", "elu", "leakyrelu", "silu", "tanh"]] = None
+    pos_weight: float = 1.0  # binary only
 
 
 @dataclass
@@ -124,6 +139,17 @@ class UniVIConfig:
     fused_modalities: Optional[Sequence[str]] = None
     fused_add_modality_embeddings: bool = True
     fused_require_all_modalities: bool = True
+
+    # ------------------------------------------------------------------
+    # NEW: MoE gating (learned per-cell modality weights for fusion)
+    # ------------------------------------------------------------------
+    use_moe_gating: bool = False
+    moe_gating_type: Literal["per_modality", "shared"] = "per_modality"
+    moe_gating_hidden: Optional[List[int]] = None
+    moe_gating_dropout: float = 0.0
+    moe_gating_batchnorm: bool = False
+    moe_gating_activation: Literal["relu", "gelu", "elu", "leakyrelu", "silu", "tanh"] = "relu"
+    moe_gate_eps: float = 1e-6
 
     def validate(self) -> None:
         if int(self.latent_dim) <= 0:
@@ -163,6 +189,9 @@ class UniVIConfig:
                     raise ValueError(f"Modality {m.name!r}: encoder_type='transformer' requires tokenizer config.")
                 _validate_tokenizer(m.name, m.tokenizer)
 
+        # -------------------------
+        # fused encoder checks
+        # -------------------------
         fe = (self.fused_encoder_type or "moe").lower().strip()
         if fe not in ("moe", "multimodal_transformer"):
             raise ValueError(
@@ -189,20 +218,65 @@ class UniVIConfig:
                     )
                 _validate_tokenizer(n, tok)
 
+        # -------------------------
+        # NEW: MoE gating checks
+        # -------------------------
+        if bool(self.use_moe_gating):
+            gt = (self.moe_gating_type or "per_modality").lower().strip()
+            if gt not in ("per_modality", "shared"):
+                raise ValueError(
+                    f"moe_gating_type must be 'per_modality' or 'shared', got {self.moe_gating_type!r}"
+                )
+
+            # hidden dims defaulting is handled in the model, but validate if provided
+            h = self.moe_gating_hidden
+            if h is not None:
+                if not isinstance(h, (list, tuple)) or len(h) == 0:
+                    raise ValueError("moe_gating_hidden must be a non-empty list[int] if provided.")
+                bad = [x for x in h if int(x) <= 0]
+                if bad:
+                    raise ValueError(f"moe_gating_hidden must contain only positive ints; bad entries: {bad}")
+
+            if float(self.moe_gating_dropout) < 0.0:
+                raise ValueError(f"moe_gating_dropout must be >= 0, got {self.moe_gating_dropout}")
+            if float(self.moe_gate_eps) < 0.0:
+                raise ValueError(f"moe_gate_eps must be >= 0, got {self.moe_gate_eps}")
+
+            act = (self.moe_gating_activation or "relu").lower().strip()
+            if act not in ("relu", "gelu", "elu", "leakyrelu", "silu", "tanh"):
+                raise ValueError(
+                    "moe_gating_activation must be one of "
+                    "['relu','gelu','elu','leakyrelu','silu','tanh'], "
+                    f"got {self.moe_gating_activation!r}"
+                )
+
+        # -------------------------
+        # class head checks
+        # -------------------------
         if self.class_heads is not None:
             hn = [h.name for h in self.class_heads]
             if len(set(hn)) != len(hn):
                 dupes = sorted({n for n in hn if hn.count(n) > 1})
                 raise ValueError(f"Duplicate class head names in cfg.class_heads: {dupes}")
             for h in self.class_heads:
-                if int(h.n_classes) < 2:
-                    raise ValueError(f"Class head {h.name!r}: n_classes must be >= 2.")
+                if int(h.n_classes) < 2 and (h.head_type or "categorical") != "binary":
+                    raise ValueError(f"Class head {h.name!r}: n_classes must be >= 2 for categorical heads.")
                 if float(h.loss_weight) < 0:
                     raise ValueError(f"Class head {h.name!r}: loss_weight must be >= 0.")
                 if int(h.warmup) < 0:
                     raise ValueError(f"Class head {h.name!r}: warmup must be >= 0.")
                 if float(getattr(h, "adv_lambda", 1.0)) < 0.0:
                     raise ValueError(f"Class head {h.name!r}: adv_lambda must be >= 0.")
+                if float(getattr(h, "pos_weight", 1.0)) < 0.0:
+                    raise ValueError(f"Class head {h.name!r}: pos_weight must be >= 0.")
+
+                # validate new optional hidden dims if passed
+                if h.hidden_dims is not None:
+                    if not isinstance(h.hidden_dims, (list, tuple)) or len(h.hidden_dims) == 0:
+                        raise ValueError(f"Class head {h.name!r}: hidden_dims must be non-empty if provided.")
+                    bad = [x for x in h.hidden_dims if int(x) <= 0]
+                    if bad:
+                        raise ValueError(f"Class head {h.name!r}: hidden_dims must be positive ints; bad: {bad}")
 
         for k in ("kl_anneal_start", "kl_anneal_end", "align_anneal_start", "align_anneal_end"):
             v = int(getattr(self, k))
@@ -275,14 +349,5 @@ class TrainingConfig:
     patience: int = 20
     min_delta: float = 0.0
 
-    # ---------------------------------------------------------------------
-    # NEW: warmup for "best epoch" tracking
-    #
-    # During epochs < best_epoch_warmup:
-    #   - val_loss is still computed & recorded
-    #   - but best_val_loss/best_epoch/best_state_dict are NOT updated
-    #
-    # Default 0 preserves previous behavior exactly.
-    # ---------------------------------------------------------------------
     best_epoch_warmup: int = 0
 
