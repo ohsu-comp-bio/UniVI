@@ -15,7 +15,6 @@ def build_mlp(
 ) -> nn.Sequential:
     """
     Generic MLP builder: [Linear -> BN -> Act -> Dropout]* + final Linear.
-    (Python gotcha: don't use nn.ReLU() as a default arg; it becomes a shared instance.)
     """
     if activation is None:
         activation = nn.ReLU()
