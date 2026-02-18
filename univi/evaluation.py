@@ -1,8 +1,7 @@
 # univi/evaluation.py
-
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple, Union, Mapping, Sequence
+from typing import Any, Dict, Optional, Tuple, Union, Mapping, Sequence, List
 
 import numpy as np
 import scipy.sparse as sp
@@ -20,9 +19,10 @@ from sklearn.metrics import (
 from sklearn.cluster import KMeans
 
 
-# ----------------------------
-# Script-wide helpers
-# ----------------------------
+# =============================================================================
+# Helpers
+# =============================================================================
+
 def _mean_sem(x: np.ndarray) -> Tuple[float, float]:
     x = np.asarray(x, dtype=float)
     if x.size == 0:
@@ -41,9 +41,10 @@ def _json_safe(obj: Any) -> Any:
     return obj
 
 
-# ------------------------------------------------------------------
+# =============================================================================
 # Manuscript helpers (LSC17 score)
-# ------------------------------------------------------------------
+# =============================================================================
+
 LSC17_GENES = [
     "DNMT3B", "ZBTB46", "NYNRIN", "ARHGAP22", "LAPTM4B", "MMRN1", "DPYSL3", "FAM30A",
     "CDK6", "CPXM1", "SOCS2", "SMIM24", "EMP1", "BEX3", "CD34", "AKR1C3", "ADGRG1",
@@ -58,6 +59,7 @@ def add_lsc17_scores(
 ) -> Any:
     """
     Compute LSC17 mean expression (per cell) and z-score it across cells.
+
     Stores:
       - adata.obs[f"{prefix}_score"]
       - adata.obs[f"{prefix}_z"]
@@ -94,9 +96,10 @@ def add_lsc17_scores(
     return adata
 
 
-# ------------------------------------------------------------------
-# FOSCTTM (exact, blockwise) + Recall@k (top-k match rate)
-# ------------------------------------------------------------------
+# =============================================================================
+# FOSCTTM (exact, blockwise) + Recall@k (exact)
+# =============================================================================
+
 def compute_foscttm(
     Z1: np.ndarray,
     Z2: np.ndarray,
@@ -114,7 +117,6 @@ def compute_foscttm(
       FOSCTTM = mean_i frac_i
 
     Computed EXACTLY using blockwise pairwise distance computation.
-
     Supports metric in {"euclidean", "cosine"}.
     """
     Z1 = np.asarray(Z1, dtype=np.float32)
@@ -251,9 +253,10 @@ def compute_match_recall_at_k(
     return float(m)
 
 
-# ------------------------------------------------------------------
+# =============================================================================
 # Modality mixing + entropy + same-vs-diff neighbor distances
-# ------------------------------------------------------------------
+# =============================================================================
+
 def compute_modality_mixing(
     Z: np.ndarray,
     modality_labels: np.ndarray,
@@ -417,9 +420,10 @@ def compute_same_vs_diff_neighbor_distances(
     }
 
 
-# ------------------------------------------------------------------
+# =============================================================================
 # Label transfer (kNN) with extra stats (macro/weighted F1)
-# ------------------------------------------------------------------
+# =============================================================================
+
 def label_transfer_knn(
     Z_source: np.ndarray,
     labels_source: np.ndarray,
@@ -494,7 +498,7 @@ def summarize_bidirectional_transfer(
 ) -> Dict[str, Any]:
     """
     Compute A->B and B->A transfers and return worst-direction macro-F1.
-    Handy for dropout/robustness plots where you track "worse direction". 
+    Handy for dropout/robustness plots where you track "worse direction".
     """
     pred_ab, acc_ab, cm_ab, order_ab, f1_ab = label_transfer_knn(
         Z_source=Z_a, labels_source=y_a,
@@ -522,9 +526,10 @@ def summarize_bidirectional_transfer(
     }
 
 
-# ------------------------------------------------------------------
+# =============================================================================
 # Reconstruction metrics (continuous)
-# ------------------------------------------------------------------
+# =============================================================================
+
 def mse_per_feature(x_true: np.ndarray, x_pred: np.ndarray) -> np.ndarray:
     x_true = np.asarray(x_true)
     x_pred = np.asarray(x_pred)
@@ -560,9 +565,10 @@ def reconstruction_metrics(x_true: np.ndarray, x_pred: np.ndarray) -> Dict[str, 
     }
 
 
-# ------------------------------------------------------------------
-# Encoding + cross-modal prediction + MoE gate extraction
-# ------------------------------------------------------------------
+# =============================================================================
+# Encoding + cross-modal prediction + MoE gate extraction (FIXED)
+# =============================================================================
+
 def encode_adata(
     model,
     adata,
@@ -576,6 +582,10 @@ def encode_adata(
 ) -> np.ndarray:
     """
     Encode a *single* modality (one observed modality at a time) into z.
+
+    latent:
+      - "moe_mean" / "moe_sample": uses fused MoE/PoE posterior
+      - "modality_mean" / "modality_sample": uses that modality's posterior only
     """
     from .data import _get_matrix
 
@@ -682,12 +692,13 @@ def denoise_from_multimodal(
       (observed modalities) -> fused latent -> decode target_mod
 
     x_dict: modality -> array (n_cells, d_mod)
-    target_mod: which modality to reconstruct (one of model.modality_names)
     """
     model.eval()
     dev = torch.device(device)
 
     mods = list(x_dict.keys())
+    if not mods:
+        raise ValueError("x_dict is empty.")
     n = int(np.asarray(x_dict[mods[0]]).shape[0])
 
     out = []
@@ -711,13 +722,13 @@ def denoise_from_multimodal(
             # decode
             dec = model.decode_modalities(z)
             dec_out = dec[target_mod]
+
             # unwrap mean-like output
             if isinstance(dec_out, dict) and ("mean" in dec_out):
                 xhat = dec_out["mean"]
             elif isinstance(dec_out, dict) and ("mu" in dec_out):
                 xhat = dec_out["mu"]
             elif isinstance(dec_out, dict) and ("logits" in dec_out):
-                # for categorical/bernoulli you might want probs; here we return logits
                 xhat = dec_out["logits"]
             else:
                 xhat = dec_out
@@ -752,7 +763,7 @@ def denoise_adata(
       - If adata_by_mod is provided: true multimodal denoising via fused latent
     """
     if adata_by_mod is None:
-        # OLD behavior (single-modality). Note: does NOT use other modalities.
+        # OLD behavior (single-modality self-recon)
         X_hat = cross_modal_predict(
             model,
             adata_src=adata,
@@ -764,29 +775,57 @@ def denoise_adata(
             batch_size=batch_size,
             use_moe=True,
         )
-    else:
-        # NEW behavior (true multimodal fused denoise)
-        if modality not in adata_by_mod:
-            # allow passing only helpers, but ensure target exists
-            adata_by_mod = dict(adata_by_mod)
-            adata_by_mod[modality] = adata
+        if dtype is not None:
+            X_hat = np.asarray(X_hat, dtype=dtype)
 
-        X_hat = denoise_adata_multimodal(
-            model,
-            adata_by_mod=adata_by_mod,
-            target_mod=modality,
-            device=device,
-            layer_by_mod=layer_by_mod,
-            X_key_by_mod=X_key_by_mod,
-            batch_size=batch_size,
-            use_mean=use_mean,
-            attn_bias_cfg=attn_bias_cfg,
-            out_adata=adata,          # write into the provided adata
-            out_layer=out_layer,
-            overwrite_X=overwrite_X,
-            dtype=dtype,
-        )
-        return X_hat  # already wrote output
+        if overwrite_X:
+            adata.X = X_hat
+        elif out_layer is not None:
+            adata.layers[out_layer] = X_hat
+
+        return X_hat
+
+    # NEW: multimodal denoise
+    from .data import _get_matrix  # to avoid hard dependency if not used
+
+    # ensure target present
+    if modality not in adata_by_mod:
+        adata_by_mod = dict(adata_by_mod)
+        adata_by_mod[modality] = adata
+
+    layer_by_mod = layer_by_mod or {}
+    X_key_by_mod = X_key_by_mod or {}
+
+    mods = list(adata_by_mod.keys())
+    if not mods:
+        raise ValueError("adata_by_mod is empty.")
+
+    # Load all observed modalities into numpy matrices
+    x_dict_np: Dict[str, np.ndarray] = {}
+    n = None
+    for m, a in adata_by_mod.items():
+        lay = layer_by_mod.get(m, None)
+        xk = X_key_by_mod.get(m, "X")
+        X = _get_matrix(a, layer=lay, X_key=xk)
+        if sp.issparse(X):
+            X = X.toarray()
+        X = np.asarray(X, dtype=np.float32)
+
+        if n is None:
+            n = int(X.shape[0])
+        elif int(X.shape[0]) != int(n):
+            raise ValueError("All adata objects in adata_by_mod must have same n_obs.")
+        x_dict_np[m] = X
+
+    X_hat = denoise_from_multimodal(
+        model,
+        x_dict=x_dict_np,
+        target_mod=modality,
+        device=device,
+        batch_size=batch_size,
+        use_mean=use_mean,
+        attn_bias_cfg=attn_bias_cfg,
+    )
 
     if dtype is not None:
         X_hat = np.asarray(X_hat, dtype=dtype)
@@ -799,59 +838,175 @@ def denoise_adata(
     return X_hat
 
 
+# =============================================================================
+# MoE gate extraction (FIXED + EXPANDED)
+# =============================================================================
+
+def _precision_gates_from_logvar_dict(
+    logvar_dict: Mapping[str, torch.Tensor],
+    modality_order: Sequence[str],
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    Notebook-style gates derived from per-modality posterior uncertainty.
+
+    Returns:
+      W: (B, M) where
+        W[b,m] = mean_d  prec_m[b,d] / sum_k prec_k[b,d]
+      with prec = exp(-logvar)
+    """
+    precisions = [torch.exp(-logvar_dict[m]) for m in modality_order]  # (B,D) each
+    P = torch.stack(precisions, dim=1)                                # (B,M,D)
+    denom = P.sum(dim=1, keepdim=True).clamp_min(eps)                 # (B,1,D)
+    frac = P / denom                                                  # (B,M,D)
+    return frac.mean(dim=2)                                           # (B,M)
+
+
+def _effective_precision_gates(
+    logvar_dict: Mapping[str, torch.Tensor],
+    router_weights: torch.Tensor,
+    modality_order: Sequence[str],
+    gate_eps: float = 1e-6,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    Gates reflecting actual contribution to fused posterior when you gate precisions:
+      precision'_m = (w_m + gate_eps) * exp(-logvar_m)
+
+    We renormalize across modalities per latent-dim, then mean over dims.
+    """
+    precisions = [torch.exp(-logvar_dict[m]) for m in modality_order]  # list (B,D)
+    P = torch.stack(precisions, dim=1)                                # (B,M,D)
+
+    w = router_weights
+    if w.dim() != 2 or w.shape[1] != len(modality_order):
+        raise ValueError(f"router_weights must be (B,M) with M={len(modality_order)}. Got {tuple(w.shape)}")
+
+    P_eff = P * (w + float(gate_eps)).unsqueeze(-1)                   # (B,M,D)
+    denom = P_eff.sum(dim=1, keepdim=True).clamp_min(eps)             # (B,1,D)
+    frac = P_eff / denom                                              # (B,M,D)
+    return frac.mean(dim=2)                                           # (B,M)
+
+
 def encode_moe_gates_from_tensors(
     model,
     x_dict: Mapping[str, np.ndarray],
     device: str = "cpu",
     batch_size: int = 1024,
     modality_order: Optional[Sequence[str]] = None,
+    *,
+    kind: str = "precision",   # "precision" | "router" | "effective_precision"
+    return_logits: bool = False,
 ) -> Dict[str, Any]:
     """
-    Extract MoE gating weights for *multi-observed* cells.
+    Extract modality contribution weights for multi-observed cells.
 
-    x_dict: modality -> np.ndarray of shape (n_cells, n_features_mod)
-    Requires model.mixture_of_experts(..., return_weights=True) to exist.
+    Parameters
+    ----------
+    kind:
+      - "precision": notebook-style from logvar_dict (works regardless of router)
+      - "router": learned router softmax weights from model.mixture_of_experts(..., return_weights=True)
+      - "effective_precision": (router weights * precisions) renormalized like precision
+                              (best for 'who drove the fused posterior')
 
-    Returns:
-      - weights: (n_cells, n_modalities) softmax weights
-      - modality_order: list[str]
-      - per_modality_mean/median
+    return_logits:
+      - only meaningful for "router" / "effective_precision" and only if model supports return_logits
+
+    Returns
+    -------
+      dict with:
+        - weights: (n_cells, n_modalities)
+        - modality_order: list[str]
+        - per_modality_mean/median
+        - (optional) logits: (n_cells, n_modalities) for router kinds (if available)
+        - kind: str
     """
     model.eval()
     dev = torch.device(device)
 
     mods = list(modality_order) if modality_order is not None else list(x_dict.keys())
-    n = None
-    for m in mods:
-        if n is None:
-            n = int(np.asarray(x_dict[m]).shape[0])
-        else:
-            if int(np.asarray(x_dict[m]).shape[0]) != n:
-                raise ValueError("All modalities in x_dict must have the same n_cells.")
-    if n is None:
-        raise ValueError("Empty x_dict.")
+    if not mods:
+        raise ValueError("Empty x_dict / modality_order.")
 
-    W_chunks = []
+    n = int(np.asarray(x_dict[mods[0]]).shape[0])
+    for m in mods[1:]:
+        if int(np.asarray(x_dict[m]).shape[0]) != n:
+            raise ValueError("All modalities in x_dict must have the same n_cells.")
+
+    kind = str(kind).lower().strip()
+    if kind not in {"precision", "router", "effective_precision"}:
+        raise ValueError("kind must be one of {'precision','router','effective_precision'}.")
+
+    gate_eps = float(getattr(model, "moe_gate_eps", 1e-6))
+
+    W_chunks: List[np.ndarray] = []
+    logits_chunks: List[np.ndarray] = []
+
     with torch.no_grad():
         for start in range(0, n, int(batch_size)):
             end = min(start + int(batch_size), n)
+
             xb_dict = {
                 m: torch.as_tensor(np.asarray(x_dict[m][start:end]), dtype=torch.float32, device=dev)
                 for m in mods
             }
+
             mu_dict, logvar_dict = model.encode_modalities(xb_dict)
 
+            if kind == "precision":
+                w = _precision_gates_from_logvar_dict(logvar_dict, mods)
+                W_chunks.append(w.detach().cpu().numpy())
+                continue
+
+            # router / effective_precision require mixture_of_experts
             if not hasattr(model, "mixture_of_experts"):
-                raise AttributeError("Model has no mixture_of_experts method; cannot extract gating weights.")
-            # model-side patch adds return_weights
-            mu_z, logvar_z, w = model.mixture_of_experts(mu_dict, logvar_dict, return_weights=True)
-            W_chunks.append(w.detach().cpu().numpy())
+                raise AttributeError("Model has no mixture_of_experts method; cannot extract router gating weights.")
+
+            # ask for weights (and optionally logits) from the model
+            try:
+                if return_logits:
+                    _mu_z, _lv_z, w_router, logits = model.mixture_of_experts(
+                        mu_dict, logvar_dict, return_weights=True, return_logits=True, modality_order=list(mods)
+                    )
+                else:
+                    _mu_z, _lv_z, w_router = model.mixture_of_experts(
+                        mu_dict, logvar_dict, return_weights=True, return_logits=False, modality_order=list(mods)
+                    )
+                    logits = None
+            except TypeError:
+                # fallback if the model doesn't accept modality_order / return_logits
+                _mu_z, _lv_z, w_router = model.mixture_of_experts(mu_dict, logvar_dict, return_weights=True)
+                logits = None
+
+            if kind == "router":
+                W_chunks.append(w_router.detach().cpu().numpy())
+                if logits is not None:
+                    logits_chunks.append(logits.detach().cpu().numpy())
+            else:
+                w_eff = _effective_precision_gates(logvar_dict, w_router, mods, gate_eps=gate_eps)
+                W_chunks.append(w_eff.detach().cpu().numpy())
+                if logits is not None:
+                    logits_chunks.append(logits.detach().cpu().numpy())
 
     W = np.vstack(W_chunks) if W_chunks else np.zeros((0, len(mods)), dtype=np.float32)
+
     per_mean = {m: float(np.mean(W[:, i])) for i, m in enumerate(mods)} if W.size else {m: np.nan for m in mods}
     per_med = {m: float(np.median(W[:, i])) for i, m in enumerate(mods)} if W.size else {m: np.nan for m in mods}
 
-    return {"weights": W, "modality_order": mods, "per_modality_mean": per_mean, "per_modality_median": per_med}
+    out: Dict[str, Any] = {
+        "weights": W,
+        "modality_order": list(mods),
+        "per_modality_mean": per_mean,
+        "per_modality_median": per_med,
+        "kind": kind,
+    }
+
+    if logits_chunks:
+        out["logits"] = np.vstack(logits_chunks)
+    else:
+        out["logits"] = None
+
+    return out
 
 
 def summarize_gate_contrasts(W: np.ndarray, modality_order: Sequence[str]) -> Dict[str, Any]:
@@ -871,9 +1026,10 @@ def summarize_gate_contrasts(W: np.ndarray, modality_order: Sequence[str]) -> Di
     return out
 
 
-# ------------------------------------------------------------------
+# =============================================================================
 # Fused-space metrics (kmeans ARI/NMI + silhouette)
-# ------------------------------------------------------------------
+# =============================================================================
+
 def compute_kmeans_ari_nmi(
     Z: np.ndarray,
     labels: np.ndarray,
@@ -910,9 +1066,10 @@ def compute_silhouette(
     return float(silhouette_score(Z, labels, metric=str(metric)))
 
 
-# ------------------------------------------------------------------
+# =============================================================================
 # Tri-modal pairwise correspondence helper
-# ------------------------------------------------------------------
+# =============================================================================
+
 def compute_pairwise_foscttm_grid(
     Z_by_mod: Dict[str, np.ndarray],
     metric: str = "euclidean",
@@ -942,9 +1099,10 @@ def compute_pairwise_foscttm_grid(
     return out
 
 
-# ------------------------------------------------------------------
+# =============================================================================
 # High-level alignment eval (Figure-ready)
-# ------------------------------------------------------------------
+# =============================================================================
+
 def evaluate_alignment(
     Z1: Optional[np.ndarray] = None,
     Z2: Optional[np.ndarray] = None,
@@ -982,6 +1140,7 @@ def evaluate_alignment(
     # gating
     gate_weights: Optional[np.ndarray] = None,
     gate_modality_order: Optional[Sequence[str]] = None,
+    gate_kind: Optional[str] = None,
     json_safe: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -1140,6 +1299,7 @@ def evaluate_alignment(
     # Gating summaries (optional)
     if gate_weights is not None:
         W = np.asarray(gate_weights, dtype=np.float32)
+        out["gate_kind"] = gate_kind
         out["gate_weights_mean"] = float(np.mean(W)) if W.size else np.nan
         out["gate_weights_per_mod_mean"] = (
             {m: float(np.mean(W[:, i])) for i, m in enumerate(gate_modality_order or range(W.shape[1]))}
@@ -1147,6 +1307,7 @@ def evaluate_alignment(
         )
         out["gate_contrasts"] = summarize_gate_contrasts(W, gate_modality_order or [str(i) for i in range(W.shape[1])])
     else:
+        out["gate_kind"] = None
         out["gate_weights_mean"] = None
         out["gate_weights_per_mod_mean"] = None
         out["gate_contrasts"] = None
