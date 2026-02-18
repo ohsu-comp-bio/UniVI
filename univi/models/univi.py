@@ -1,7 +1,7 @@
 # univi/models/univi.py
 from __future__ import annotations
 
-from typing import Dict, Tuple, Optional, Any, List, Union, Mapping, Callable
+from typing import Dict, Tuple, Optional, Any, List, Union, Mapping, Callable, overload, Literal
 import math
 
 import torch
@@ -215,9 +215,6 @@ class UniVIMultiModalVAE(nn.Module):
         self.latent_dim = int(cfg.latent_dim)
         self.beta_max = float(cfg.beta)
         self.gamma_max = float(cfg.gamma)
-
-        self.modality_names: List[str] = [m.name for m in cfg.modalities]
-        self.mod_cfg_by_name: Dict[str, ModalityConfig] = {m.name: m for m in cfg.modalities}
 
         self.modality_names: List[str] = [m.name for m in cfg.modalities]
         self.mod_cfg_by_name: Dict[str, ModalityConfig] = {m.name: m for m in cfg.modalities}
@@ -797,6 +794,42 @@ class UniVIMultiModalVAE(nn.Module):
 
         return mu_dict, logvar_dict
 
+    @overload
+    def mixture_of_experts(
+        self,
+        mu_dict: Dict[str, torch.Tensor],
+        logvar_dict: Dict[str, torch.Tensor],
+        *,
+        return_weights: Literal[False] = False,
+        return_logits: Literal[False] = False,
+        modality_order: Optional[List[str]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ...
+
+    @overload
+    def mixture_of_experts(
+        self,
+        mu_dict: Dict[str, torch.Tensor],
+        logvar_dict: Dict[str, torch.Tensor],
+        *,
+        return_weights: Literal[True],
+        return_logits: Literal[False] = False,
+        modality_order: Optional[List[str]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        ...
+
+    @overload
+    def mixture_of_experts(
+        self,
+        mu_dict: Dict[str, torch.Tensor],
+        logvar_dict: Dict[str, torch.Tensor],
+        *,
+        return_weights: Literal[True],
+        return_logits: Literal[True],
+        modality_order: Optional[List[str]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        ...
+
     def mixture_of_experts(
         self,
         mu_dict: Dict[str, torch.Tensor],
@@ -805,16 +838,9 @@ class UniVIMultiModalVAE(nn.Module):
         return_weights: bool = False,
         return_logits: bool = False,
         modality_order: Optional[List[str]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ):
         """
         Precision fusion (PoE-style) with optional MoE gating.
-
-        Without gating (default): identical to your original code.
-        With gating:
-          logits_m = gate_net([mu_m, logvar_m])  -> (B,)
-          w = softmax(logits across modalities)   -> (B, M)
-          precision'_m = w_m * exp(-logvar_m)
-          fused posterior computed using precision'_m
 
         Returns:
           - (mu, logvar) by default
@@ -823,6 +849,9 @@ class UniVIMultiModalVAE(nn.Module):
         """
         if len(mu_dict) == 0:
             raise ValueError("mixture_of_experts requires at least one modality posterior.")
+        
+        if return_logits and not return_weights:
+            raise ValueError("return_logits=True requires return_weights=True.")
 
         # stable modality ordering
         if modality_order is None:
@@ -833,15 +862,17 @@ class UniVIMultiModalVAE(nn.Module):
         mus = [mu_dict[m] for m in modality_order]
         logvars = [logvar_dict[m] for m in modality_order]
 
-        # If only one modality, fusion is identity (and weights are trivially 1.0)
+        # If only one modality, fusion is identity
         if len(mus) == 1:
             mu_comb = mus[0]
             logvar_comb = logvars[0]
             if not return_weights and not return_logits:
                 return mu_comb, logvar_comb
+
             B = int(mu_comb.shape[0])
             w = torch.ones((B, 1), device=mu_comb.device, dtype=mu_comb.dtype)
             logits = torch.zeros((B, 1), device=mu_comb.device, dtype=mu_comb.dtype)
+
             if return_weights and return_logits:
                 return mu_comb, logvar_comb, w, logits
             return mu_comb, logvar_comb, w
@@ -849,22 +880,19 @@ class UniVIMultiModalVAE(nn.Module):
         # base precisions
         precisions = [torch.exp(-lv) for lv in logvars]  # each: (B, D)
 
-        # Optional gating
         logits_mat = None
         weights = None
 
+        # Optional gating
         if self.use_moe_gating:
-            # compute scalar logits per modality: (B, M)
             logit_list = []
             for m, mu_m, lv_m in zip(modality_order, mus, logvars):
                 feat = torch.cat([mu_m, lv_m], dim=-1)  # (B, 2D)
                 if self.shared_gate_net is not None:
                     gl = self.shared_gate_net(feat)  # (B,1)
                 else:
-                    # per-modality gate
-                    gn = self.gate_nets[m] if m in self.gate_nets else None
+                    gn = self.gate_nets[m] if (m in self.gate_nets) else None
                     if gn is None:
-                        # safe fallback: 0 logit => uniform if missing gate for some reason
                         gl = torch.zeros((feat.shape[0], 1), device=feat.device, dtype=feat.dtype)
                     else:
                         gl = gn(feat)  # (B,1)
@@ -887,7 +915,7 @@ class UniVIMultiModalVAE(nn.Module):
         if not return_weights and not return_logits:
             return mu_comb, logvar_comb
 
-        # Ensure weights/logits always exist if asked for
+        # If asked for weights/logits but gating is off, return uniform/zeros
         if weights is None:
             B = int(mu_comb.shape[0])
             M = len(mus)
@@ -1017,7 +1045,8 @@ class UniVIMultiModalVAE(nn.Module):
                 z_in = self._grad_reverse(z_in, cfg_h.get("adv_lambda", 1.0))
 
             dec_out = head(z_in)
-            logits = dec_out["logits"] if isinstance(dec_out, dict) and "logits" in dec_out else dec_out
+            logits = dec_out.get("logits", dec_out.get("logit", dec_out.get("scores", dec_out))) if isinstance(dec_out, dict) else dec_out
+
             head_logits[name] = logits
 
             ignore_index = int(cfg_h["ignore_index"])
@@ -1567,7 +1596,6 @@ class UniVIMultiModalVAE(nn.Module):
     @property
     def device(self) -> torch.device:
         return next(self.parameters()).device
-
     @torch.no_grad()
     def encode_fused(
         self,
@@ -1580,28 +1608,38 @@ class UniVIMultiModalVAE(nn.Module):
         attn_bias_cfg: Optional[Mapping[str, Any]] = None,
         return_gates: bool = False,
         return_gate_logits: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Union[
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]],
+    ]:
         mu_dict, logvar_dict = self.encode_modalities(x_dict, attn_bias_cfg=attn_bias_cfg)
         if len(mu_dict) == 0:
             raise ValueError("At least one modality must be present in x_dict.")
 
         use_fused = (self.fused_encoder_type == "multimodal_transformer") and self._can_use_fused_encoder(x_dict)
 
-        gates = None
-        gate_logits = None
+        gates: Optional[torch.Tensor] = None
+        gate_logits: Optional[torch.Tensor] = None
 
         if use_fused:
             mu_z, logvar_z = self._compute_fused_posterior(x_dict, attn_bias_cfg=attn_bias_cfg)
         else:
             if return_gates or return_gate_logits:
-                mu_z, logvar_z, gates, gate_logits = self.mixture_of_experts(
-                    mu_dict, logvar_dict,
-                    return_weights=True,
-                    return_logits=bool(return_gate_logits),
-                )
+                if return_gate_logits:
+                    mu_z, logvar_z, gates, gate_logits = self.mixture_of_experts(
+                        mu_dict, logvar_dict,
+                        return_weights=True,
+                        return_logits=True,
+                    )
+                else:
+                    mu_z, logvar_z, gates = self.mixture_of_experts(
+                        mu_dict, logvar_dict,
+                        return_weights=True,
+                        return_logits=False,
+                    )
+                    gate_logits = None
             else:
                 mu_z, logvar_z = self.mixture_of_experts(mu_dict, logvar_dict)
-
 
         y_legacy = self._extract_legacy_y(y)
         if (
@@ -1620,7 +1658,7 @@ class UniVIMultiModalVAE(nn.Module):
         z = mu_z if use_mean else self._reparameterize(mu_z, logvar_z)
 
         if return_gates or return_gate_logits:
-            # gates/logits may be None if using fused encoder
+            # gates/logits will be None if fused encoder is used
             return mu_z, logvar_z, z, gates, gate_logits
 
         return mu_z, logvar_z, z
@@ -1650,14 +1688,15 @@ class UniVIMultiModalVAE(nn.Module):
         if self.label_decoder is not None:
             z_for_cls = mu_z if self.classify_from_mu else z
             dec_out = self.label_decoder(z_for_cls)
-            logits = dec_out["logits"] if isinstance(dec_out, dict) and "logits" in dec_out else dec_out
+            logits = dec_out.get("logits", dec_out.get("logit", dec_out.get("scores", dec_out))) if isinstance(dec_out, dict) else dec_out
             out[self.label_head_name] = logits if not return_probs else F.softmax(logits, dim=-1)
 
         for name, head in self.class_heads.items():
             cfg_h = self.class_heads_cfg[name]
             z_in = mu_z if bool(cfg_h["from_mu"]) else z
             dec_out = head(z_in)
-            logits = dec_out["logits"] if isinstance(dec_out, dict) and "logits" in dec_out else dec_out
+            logits = dec_out.get("logits", dec_out.get("logit", dec_out.get("scores", dec_out))) if isinstance(dec_out, dict) else dec_out
+
 
             head_type = str(cfg_h.get("type", "categorical")).lower().strip()
             if not return_probs:
