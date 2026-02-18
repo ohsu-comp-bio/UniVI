@@ -219,6 +219,9 @@ class UniVIMultiModalVAE(nn.Module):
         self.modality_names: List[str] = [m.name for m in cfg.modalities]
         self.mod_cfg_by_name: Dict[str, ModalityConfig] = {m.name: m for m in cfg.modalities}
 
+        self.modality_names: List[str] = [m.name for m in cfg.modalities]
+        self.mod_cfg_by_name: Dict[str, ModalityConfig] = {m.name: m for m in cfg.modalities}
+
         # ------------------------------------------------------------
         # Per-modality modules
         # ------------------------------------------------------------
@@ -408,6 +411,59 @@ class UniVIMultiModalVAE(nn.Module):
                     # binary-only optional
                     "pos_weight": float(getattr(h, "pos_weight", 1.0)),
                 }
+
+        # ------------------------------------------------------------
+        # Optional MoE gating for fusion (NEW; defaults to off)
+        # ------------------------------------------------------------
+        self.use_moe_gating = bool(getattr(cfg, "use_moe_gating", False))
+
+        # How to build gate logits:
+        # - "per_modality": separate tiny MLP per modality -> scalar logit
+        # - "shared": one MLP on concatenated (mu, logvar) per modality -> scalar logit
+        self.moe_gating_type = str(getattr(cfg, "moe_gating_type", "per_modality")).lower().strip()
+
+        # Gate MLP hidden dims (tiny by default)
+        gate_hidden = getattr(cfg, "moe_gating_hidden", None)
+        if gate_hidden is None:
+            gate_hidden = [max(32, self.latent_dim // 2)]
+        if isinstance(gate_hidden, (int, float)):
+            gate_hidden = [int(gate_hidden)]
+        self.moe_gating_hidden = [int(x) for x in gate_hidden]
+
+        self.moe_gating_dropout = float(getattr(cfg, "moe_gating_dropout", 0.0))
+        self.moe_gating_batchnorm = bool(getattr(cfg, "moe_gating_batchnorm", False))
+        self.moe_gating_activation = _parse_activation(getattr(cfg, "moe_gating_activation", "relu")) or nn.ReLU()
+
+        # Small epsilon to avoid exact zeros in gated precisions
+        self.moe_gate_eps = float(getattr(cfg, "moe_gate_eps", 1e-6))
+
+        # Modules
+        self.gate_nets = nn.ModuleDict()
+        self.shared_gate_net = None
+
+        if self.use_moe_gating:
+            if self.moe_gating_type == "shared":
+                # shared gate net maps (mu||logvar) -> scalar logit for each modality independently
+                # we will apply it per-modality; input dim is 2*latent_dim
+                self.shared_gate_net = build_mlp(
+                    in_dim=2 * self.latent_dim,
+                    hidden_dims=list(self.moe_gating_hidden),
+                    out_dim=1,
+                    activation=self.moe_gating_activation,
+                    dropout=self.moe_gating_dropout,
+                    batchnorm=self.moe_gating_batchnorm,
+                )
+            else:
+                # default: per-modality gate nets, each maps (mu||logvar) -> scalar logit
+                for m in self.modality_names:
+                    self.gate_nets[m] = build_mlp(
+                        in_dim=2 * self.latent_dim,
+                        hidden_dims=list(self.moe_gating_hidden),
+                        out_dim=1,
+                        activation=self.moe_gating_activation,
+                        dropout=self.moe_gating_dropout,
+                        batchnorm=self.moe_gating_batchnorm,
+                    )
 
     # ----------------------------- label name utilities -----------------------------
 
@@ -745,19 +801,103 @@ class UniVIMultiModalVAE(nn.Module):
         self,
         mu_dict: Dict[str, torch.Tensor],
         logvar_dict: Dict[str, torch.Tensor],
+        *,
+        return_weights: bool = False,
+        return_logits: bool = False,
+        modality_order: Optional[List[str]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        mus = list(mu_dict.values())
-        logvars = list(logvar_dict.values())
+        """
+        Precision fusion (PoE-style) with optional MoE gating.
 
-        precisions = [torch.exp(-lv) for lv in logvars]
-        precision_sum = torch.stack(precisions, dim=0).sum(dim=0).clamp_min(self.EPS)
+        Without gating (default): identical to your original code.
+        With gating:
+          logits_m = gate_net([mu_m, logvar_m])  -> (B,)
+          w = softmax(logits across modalities)   -> (B, M)
+          precision'_m = w_m * exp(-logvar_m)
+          fused posterior computed using precision'_m
 
-        mu_weighted = torch.stack([m * p for m, p in zip(mus, precisions)], dim=0).sum(dim=0)
+        Returns:
+          - (mu, logvar) by default
+          - (mu, logvar, weights) if return_weights
+          - (mu, logvar, weights, logits) if return_weights and return_logits
+        """
+        if len(mu_dict) == 0:
+            raise ValueError("mixture_of_experts requires at least one modality posterior.")
+
+        # stable modality ordering
+        if modality_order is None:
+            modality_order = [m for m in self.modality_names if (m in mu_dict and m in logvar_dict)]
+            if not modality_order:
+                modality_order = sorted(list(mu_dict.keys()))
+
+        mus = [mu_dict[m] for m in modality_order]
+        logvars = [logvar_dict[m] for m in modality_order]
+
+        # If only one modality, fusion is identity (and weights are trivially 1.0)
+        if len(mus) == 1:
+            mu_comb = mus[0]
+            logvar_comb = logvars[0]
+            if not return_weights and not return_logits:
+                return mu_comb, logvar_comb
+            B = int(mu_comb.shape[0])
+            w = torch.ones((B, 1), device=mu_comb.device, dtype=mu_comb.dtype)
+            logits = torch.zeros((B, 1), device=mu_comb.device, dtype=mu_comb.dtype)
+            if return_weights and return_logits:
+                return mu_comb, logvar_comb, w, logits
+            return mu_comb, logvar_comb, w
+
+        # base precisions
+        precisions = [torch.exp(-lv) for lv in logvars]  # each: (B, D)
+
+        # Optional gating
+        logits_mat = None
+        weights = None
+
+        if self.use_moe_gating:
+            # compute scalar logits per modality: (B, M)
+            logit_list = []
+            for m, mu_m, lv_m in zip(modality_order, mus, logvars):
+                feat = torch.cat([mu_m, lv_m], dim=-1)  # (B, 2D)
+                if self.shared_gate_net is not None:
+                    gl = self.shared_gate_net(feat)  # (B,1)
+                else:
+                    # per-modality gate
+                    gn = self.gate_nets.get(m, None)
+                    if gn is None:
+                        # safe fallback: 0 logit => uniform if missing gate for some reason
+                        gl = torch.zeros((feat.shape[0], 1), device=feat.device, dtype=feat.dtype)
+                    else:
+                        gl = gn(feat)  # (B,1)
+                logit_list.append(gl.view(-1))  # (B,)
+
+            logits_mat = torch.stack(logit_list, dim=1)  # (B, M)
+            weights = F.softmax(logits_mat, dim=1)       # (B, M)
+
+            # gate precisions: p'_m = (w_m + eps) * p_m
+            w_list = [weights[:, i].unsqueeze(-1) for i in range(weights.shape[1])]  # each: (B,1)
+            precisions = [(w_i + self.moe_gate_eps) * p for w_i, p in zip(w_list, precisions)]
+
+        # fuse
+        precision_sum = torch.stack(precisions, dim=0).sum(dim=0).clamp_min(self.EPS)  # (B, D)
+        mu_weighted = torch.stack([m * p for m, p in zip(mus, precisions)], dim=0).sum(dim=0)  # (B, D)
         mu_comb = mu_weighted / precision_sum
-
         var_comb = 1.0 / precision_sum
         logvar_comb = torch.log(var_comb.clamp_min(self.EPS))
-        return mu_comb, logvar_comb
+
+        if not return_weights and not return_logits:
+            return mu_comb, logvar_comb
+
+        # Ensure weights/logits always exist if asked for
+        if weights is None:
+            B = int(mu_comb.shape[0])
+            M = len(mus)
+            weights = torch.full((B, M), 1.0 / float(M), device=mu_comb.device, dtype=mu_comb.dtype)
+        if logits_mat is None:
+            logits_mat = torch.zeros_like(weights)
+
+        if return_weights and return_logits:
+            return mu_comb, logvar_comb, weights, logits_mat
+        return mu_comb, logvar_comb, weights
 
     def decode_modalities(self, z: torch.Tensor) -> Dict[str, Any]:
         return {m: self.decoders[m](z) for m in self.modality_names}
@@ -1438,16 +1578,30 @@ class UniVIMultiModalVAE(nn.Module):
         use_mean: bool = True,
         inject_label_expert: bool = True,
         attn_bias_cfg: Optional[Mapping[str, Any]] = None,
+        return_gates: bool = False,
+        return_gate_logits: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu_dict, logvar_dict = self.encode_modalities(x_dict, attn_bias_cfg=attn_bias_cfg)
         if len(mu_dict) == 0:
             raise ValueError("At least one modality must be present in x_dict.")
 
         use_fused = (self.fused_encoder_type == "multimodal_transformer") and self._can_use_fused_encoder(x_dict)
+
+        gates = None
+        gate_logits = None
+
         if use_fused:
             mu_z, logvar_z = self._compute_fused_posterior(x_dict, attn_bias_cfg=attn_bias_cfg)
         else:
-            mu_z, logvar_z = self.mixture_of_experts(mu_dict, logvar_dict)
+            if return_gates or return_gate_logits:
+                mu_z, logvar_z, gates, gate_logits = self.mixture_of_experts(
+                    mu_dict, logvar_dict,
+                    return_weights=True,
+                    return_logits=bool(return_gate_logits),
+                )
+            else:
+                mu_z, logvar_z = self.mixture_of_experts(mu_dict, logvar_dict)
+
 
         y_legacy = self._extract_legacy_y(y)
         if (
@@ -1464,6 +1618,11 @@ class UniVIMultiModalVAE(nn.Module):
             mu_z, logvar_z = self.mixture_of_experts(base_mu_dict, base_lv_dict)
 
         z = mu_z if use_mean else self._reparameterize(mu_z, logvar_z)
+
+        if return_gates or return_gate_logits:
+            # gates/logits may be None if using fused encoder
+            return mu_z, logvar_z, z, gates, gate_logits
+
         return mu_z, logvar_z, z
 
     @torch.no_grad()

@@ -668,6 +668,65 @@ def cross_modal_predict(
     return np.vstack(preds) if preds else np.zeros((0, 0), dtype=float)
 
 
+def denoise_from_multimodal(
+    model,
+    x_dict: Dict[str, np.ndarray],
+    target_mod: str,
+    device: str = "cpu",
+    batch_size: int = 512,
+    use_mean: bool = True,
+    attn_bias_cfg: Optional[Mapping[str, Any]] = None,
+) -> np.ndarray:
+    """
+    True multimodal denoising:
+      (observed modalities) -> fused latent -> decode target_mod
+
+    x_dict: modality -> array (n_cells, d_mod)
+    target_mod: which modality to reconstruct (one of model.modality_names)
+    """
+    model.eval()
+    dev = torch.device(device)
+
+    mods = list(x_dict.keys())
+    n = int(np.asarray(x_dict[mods[0]]).shape[0])
+
+    out = []
+    with torch.no_grad():
+        for start in range(0, n, int(batch_size)):
+            end = min(start + int(batch_size), n)
+
+            xb = {
+                m: torch.as_tensor(np.asarray(x_dict[m][start:end]), dtype=torch.float32, device=dev)
+                for m in mods
+            }
+
+            # encode fused
+            mu_z, logvar_z, z = model.encode_fused(
+                xb,
+                use_mean=bool(use_mean),
+                inject_label_expert=False,
+                attn_bias_cfg=attn_bias_cfg,
+            )
+
+            # decode
+            dec = model.decode_modalities(z)
+            dec_out = dec[target_mod]
+            # unwrap mean-like output
+            if isinstance(dec_out, dict) and ("mean" in dec_out):
+                xhat = dec_out["mean"]
+            elif isinstance(dec_out, dict) and ("mu" in dec_out):
+                xhat = dec_out["mu"]
+            elif isinstance(dec_out, dict) and ("logits" in dec_out):
+                # for categorical/bernoulli you might want probs; here we return logits
+                xhat = dec_out["logits"]
+            else:
+                xhat = dec_out
+
+            out.append(xhat.detach().cpu().numpy())
+
+    return np.vstack(out)
+
+
 def denoise_adata(
     model,
     adata,
@@ -679,18 +738,56 @@ def denoise_adata(
     out_layer: Optional[str] = None,
     overwrite_X: bool = False,
     dtype: Optional[np.dtype] = np.float32,
+    *,
+    # NEW: if provided, do fused multimodal denoising
+    adata_by_mod: Optional[Dict[str, Any]] = None,
+    layer_by_mod: Optional[Dict[str, Optional[str]]] = None,
+    X_key_by_mod: Optional[Dict[str, str]] = None,
+    use_mean: bool = True,
+    attn_bias_cfg: Optional[Mapping[str, Any]] = None,
 ) -> np.ndarray:
-    X_hat = cross_modal_predict(
-        model,
-        adata_src=adata,
-        src_mod=modality,
-        tgt_mod=modality,
-        device=device,
-        layer=layer,
-        X_key=X_key,
-        batch_size=batch_size,
-        use_moe=True,
-    )
+    """
+    Backwards-compatible:
+      - If adata_by_mod is None: old behavior (single-modality self-recon)
+      - If adata_by_mod is provided: true multimodal denoising via fused latent
+    """
+    if adata_by_mod is None:
+        # OLD behavior (single-modality). Note: does NOT use other modalities.
+        X_hat = cross_modal_predict(
+            model,
+            adata_src=adata,
+            src_mod=modality,
+            tgt_mod=modality,
+            device=device,
+            layer=layer,
+            X_key=X_key,
+            batch_size=batch_size,
+            use_moe=True,
+        )
+    else:
+        # NEW behavior (true multimodal fused denoise)
+        if modality not in adata_by_mod:
+            # allow passing only helpers, but ensure target exists
+            adata_by_mod = dict(adata_by_mod)
+            adata_by_mod[modality] = adata
+
+        X_hat = denoise_adata_multimodal(
+            model,
+            adata_by_mod=adata_by_mod,
+            target_mod=modality,
+            device=device,
+            layer_by_mod=layer_by_mod,
+            X_key_by_mod=X_key_by_mod,
+            batch_size=batch_size,
+            use_mean=use_mean,
+            attn_bias_cfg=attn_bias_cfg,
+            out_adata=adata,          # write into the provided adata
+            out_layer=out_layer,
+            overwrite_X=overwrite_X,
+            dtype=dtype,
+        )
+        return X_hat  # already wrote output
+
     if dtype is not None:
         X_hat = np.asarray(X_hat, dtype=dtype)
 
