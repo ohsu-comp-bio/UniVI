@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union, Mapping, Sequence
 
 import numpy as np
 import scipy.sparse as sp
 import torch
 
 from sklearn.neighbors import NearestNeighbors
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    adjusted_rand_score,
+    normalized_mutual_info_score,
+    silhouette_score,
+)
+from sklearn.cluster import KMeans
 
 
 # ----------------------------
-# Small helpers
+# Script-wide helpers
 # ----------------------------
 def _mean_sem(x: np.ndarray) -> Tuple[float, float]:
     x = np.asarray(x, dtype=float)
@@ -34,7 +42,60 @@ def _json_safe(obj: Any) -> Any:
 
 
 # ------------------------------------------------------------------
-# 1. FOSCTTM (exact, blockwise) + Recall@k (top-k match rate)
+# Manuscript helpers (LSC17 score)
+# ------------------------------------------------------------------
+LSC17_GENES = [
+    "DNMT3B", "ZBTB46", "NYNRIN", "ARHGAP22", "LAPTM4B", "MMRN1", "DPYSL3", "FAM30A",
+    "CDK6", "CPXM1", "SOCS2", "SMIM24", "EMP1", "BEX3", "CD34", "AKR1C3", "ADGRG1",
+]
+
+
+def add_lsc17_scores(
+    adata,
+    layer: Optional[str] = None,
+    gene_key: Optional[str] = None,
+    prefix: str = "LSC17",
+) -> Any:
+    """
+    Compute LSC17 mean expression (per cell) and z-score it across cells.
+    Stores:
+      - adata.obs[f"{prefix}_score"]
+      - adata.obs[f"{prefix}_z"]
+      - adata.obs[f"{prefix}_n_genes"]
+
+    Notes:
+    - Expects expression to already be in the layer you want (often log1p normalized RNA).
+    - If gene symbols aren't in adata.var_names, pass gene_key (column in adata.var).
+    """
+    var_names = np.asarray(adata.var_names if gene_key is None else adata.var[gene_key])
+    gene_to_idx = {g: i for i, g in enumerate(var_names)}
+
+    present = [g for g in LSC17_GENES if g in gene_to_idx]
+    idx = [gene_to_idx[g] for g in present]
+
+    if layer is None:
+        X = adata.X
+    else:
+        X = adata.layers[layer] if layer in adata.layers else adata.X
+
+    X = X[:, idx]
+    if sp.issparse(X):
+        X = X.toarray()
+    X = np.asarray(X, dtype=np.float32)
+
+    score = X.mean(axis=1)
+    mu = float(np.mean(score))
+    sd = float(np.std(score, ddof=0))
+    z = (score - mu) / (sd + 1e-8)
+
+    adata.obs[f"{prefix}_score"] = np.asarray(score).ravel()
+    adata.obs[f"{prefix}_z"] = np.asarray(z).ravel()
+    adata.obs[f"{prefix}_n_genes"] = int(len(present))
+    return adata
+
+
+# ------------------------------------------------------------------
+# FOSCTTM (exact, blockwise) + Recall@k (top-k match rate)
 # ------------------------------------------------------------------
 def compute_foscttm(
     Z1: np.ndarray,
@@ -52,7 +113,7 @@ def compute_foscttm(
         frac_i = #{j: d(Z1[i], Z2[j]) < d(Z1[i], Z2[i])} / (N-1)
       FOSCTTM = mean_i frac_i
 
-    This is computed EXACTLY using blockwise pairwise distance computation to avoid NxN kneighbors storage.
+    Computed EXACTLY using blockwise pairwise distance computation.
 
     Supports metric in {"euclidean", "cosine"}.
     """
@@ -164,7 +225,6 @@ def compute_match_recall_at_k(
             A = Z1[i0:i1]
             n1 = np.sum(A * A, axis=1)[:, None]  # (b,1)
             d2 = n1 + n2[None, :] - 2.0 * (A @ Z2_T)  # (b,n)
-            # indices of k smallest (unordered), then check membership
             topk = np.argpartition(d2, kth=k - 1, axis=1)[:, :k]
             for r in range(i1 - i0):
                 hits[i0 + r] = 1.0 if (i0 + r) in topk[r] else 0.0
@@ -192,7 +252,7 @@ def compute_match_recall_at_k(
 
 
 # ------------------------------------------------------------------
-# 2. Modality mixing
+# Modality mixing + entropy + same-vs-diff neighbor distances
 # ------------------------------------------------------------------
 def compute_modality_mixing(
     Z: np.ndarray,
@@ -240,8 +300,125 @@ def compute_modality_mixing(
     return float(m)
 
 
+def compute_modality_entropy(
+    Z: np.ndarray,
+    modality_labels: np.ndarray,
+    k: int = 30,
+    metric: str = "euclidean",
+    return_sem: bool = False,
+    return_per_cell: bool = False,
+) -> Union[float, Tuple[float, float], Tuple[float, np.ndarray], Tuple[float, float, np.ndarray]]:
+    """
+    Local modality entropy in kNN neighborhoods, normalized to [0,1] by log(#modalities).
+    """
+    Z = np.asarray(Z, dtype=np.float32)
+    modality_labels = np.asarray(modality_labels)
+
+    n = int(Z.shape[0])
+    if n <= 1:
+        ent = np.zeros(n, dtype=np.float32)
+        m, s = _mean_sem(ent.astype(float))
+        if return_sem and return_per_cell:
+            return float(m), float(s), ent
+        if return_sem:
+            return float(m), float(s)
+        if return_per_cell:
+            return float(m), ent
+        return float(m)
+
+    uniq_mods = np.unique(modality_labels)
+    mcount = int(uniq_mods.size)
+    if mcount <= 1:
+        ent = np.zeros(n, dtype=np.float32)
+        m, s = _mean_sem(ent.astype(float))
+        if return_sem and return_per_cell:
+            return float(m), float(s), ent
+        if return_sem:
+            return float(m), float(s)
+        if return_per_cell:
+            return float(m), ent
+        return float(m)
+
+    k_eff = int(min(max(int(k), 1), n - 1))
+    nn = NearestNeighbors(n_neighbors=k_eff + 1, metric=str(metric))
+    nn.fit(Z)
+    neigh_idx = nn.kneighbors(Z, return_distance=False)[:, 1:]
+
+    # map modality labels to contiguous codes
+    mod_to_code = {m: i for i, m in enumerate(uniq_mods)}
+    codes = np.vectorize(mod_to_code.get)(modality_labels)
+
+    ent = np.empty(n, dtype=np.float32)
+    denom = np.log(float(mcount) + 1e-12)
+
+    for i in range(n):
+        neigh_codes = codes[neigh_idx[i]]
+        p = np.bincount(neigh_codes, minlength=mcount).astype(np.float32)
+        p = p / (p.sum() + 1e-8)
+        h = -(p * np.log(p + 1e-12)).sum()
+        ent[i] = float(h / (denom + 1e-12))
+
+    m, s = _mean_sem(ent.astype(float))
+    if return_sem and return_per_cell:
+        return float(m), float(s), ent
+    if return_sem:
+        return float(m), float(s)
+    if return_per_cell:
+        return float(m), ent
+    return float(m)
+
+
+def compute_same_vs_diff_neighbor_distances(
+    Z: np.ndarray,
+    modality_labels: np.ndarray,
+    k: int = 30,
+    metric: str = "euclidean",
+) -> Dict[str, Any]:
+    """
+    Summarize distances to same-modality vs different-modality neighbors.
+    """
+    Z = np.asarray(Z, dtype=np.float32)
+    modality_labels = np.asarray(modality_labels)
+
+    n = int(Z.shape[0])
+    if n <= 1:
+        return {
+            "same_mean": np.nan,
+            "same_median": np.nan,
+            "diff_mean": np.nan,
+            "diff_median": np.nan,
+            "k": int(k),
+        }
+
+    k_eff = int(min(max(int(k), 1), n - 1))
+    nn = NearestNeighbors(n_neighbors=k_eff + 1, metric=str(metric))
+    nn.fit(Z)
+    dists, idx = nn.kneighbors(Z, return_distance=True)
+    dists, idx = dists[:, 1:], idx[:, 1:]
+
+    same = []
+    diff = []
+    for i in range(n):
+        neigh = idx[i]
+        dm = dists[i]
+        mask_same = modality_labels[neigh] == modality_labels[i]
+        same.append(dm[mask_same])
+        diff.append(dm[~mask_same])
+
+    same = np.concatenate(same) if len(same) else np.array([], dtype=np.float32)
+    diff = np.concatenate(diff) if len(diff) else np.array([], dtype=np.float32)
+
+    return {
+        "same_mean": float(np.mean(same)) if same.size else np.nan,
+        "same_median": float(np.median(same)) if same.size else np.nan,
+        "diff_mean": float(np.mean(diff)) if diff.size else np.nan,
+        "diff_median": float(np.median(diff)) if diff.size else np.nan,
+        "k": int(k_eff),
+    }
+
+
 # ------------------------------------------------------------------
-# 3. Label transfer (kNN) with extra stats (macro/weighted F1)
+# Label transfer (kNN) with extra stats (macro/weighted F1)
 # ------------------------------------------------------------------
 def label_transfer_knn(
     Z_source: np.ndarray,
@@ -307,8 +484,46 @@ def label_transfer_knn(
     return (pred_labels, acc, cm, *extras)
 
 
+def summarize_bidirectional_transfer(
+    Z_a: np.ndarray,
+    y_a: np.ndarray,
+    Z_b: np.ndarray,
+    y_b: np.ndarray,
+    k: int = 15,
+    metric: str = "euclidean",
+) -> Dict[str, Any]:
+    """
+    Compute A->B and B->A transfers and return worst-direction macro-F1.
+    Handy for dropout/robustness plots where you track "worse direction". 
+    """
+    pred_ab, acc_ab, cm_ab, order_ab, f1_ab = label_transfer_knn(
+        Z_source=Z_a, labels_source=y_a,
+        Z_target=Z_b, labels_target=y_b,
+        k=k, metric=metric,
+        return_label_order=True, return_f1=True,
+    )
+    pred_ba, acc_ba, cm_ba, order_ba, f1_ba = label_transfer_knn(
+        Z_source=Z_b, labels_source=y_b,
+        Z_target=Z_a, labels_target=y_a,
+        k=k, metric=metric,
+        return_label_order=True, return_f1=True,
+    )
+
+    worst_macro = float(min(f1_ab["macro_f1"], f1_ba["macro_f1"]))
+    worst_weighted = float(min(f1_ab["weighted_f1"], f1_ba["weighted_f1"]))
+
+    return {
+        "ab": {"acc": acc_ab, "f1": f1_ab, "cm": cm_ab, "order": order_ab, "pred": pred_ab},
+        "ba": {"acc": acc_ba, "f1": f1_ba, "cm": cm_ba, "order": order_ba, "pred": pred_ba},
+        "worst_direction_macro_f1": worst_macro,
+        "worst_direction_weighted_f1": worst_weighted,
+        "k": int(k),
+        "metric": str(metric),
+    }
+
+
 # ------------------------------------------------------------------
-# 4. Reconstruction metrics (continuous; useful for CITE-seq CLR/gaussian)
+# Reconstruction metrics (continuous)
 # ------------------------------------------------------------------
 def mse_per_feature(x_true: np.ndarray, x_pred: np.ndarray) -> np.ndarray:
     x_true = np.asarray(x_true)
@@ -346,7 +561,7 @@ def reconstruction_metrics(x_true: np.ndarray, x_pred: np.ndarray) -> Dict[str, 
 
 
 # ------------------------------------------------------------------
-# 5. Encoding + cross-modal prediction
+# Encoding + cross-modal prediction + MoE gate extraction
 # ------------------------------------------------------------------
 def encode_adata(
     model,
@@ -359,6 +574,9 @@ def encode_adata(
     latent: str = "moe_mean",
     random_state: int = 0,
 ) -> np.ndarray:
+    """
+    Encode a *single* modality (one observed modality at a time) into z.
+    """
     from .data import _get_matrix
 
     latent = str(latent).lower().strip()
@@ -392,13 +610,11 @@ def encode_adata(
                 lv = logvar_dict[modality]
                 z = mu if latent.endswith("_mean") else _sample_gaussian(mu, lv, gen)
             else:
-                # robust fallback in case a future refactor renames MoE fuser
                 if hasattr(model, "mixture_of_experts"):
                     mu_z, logvar_z = model.mixture_of_experts(mu_dict, logvar_dict)
                 elif hasattr(model, "fuse_posteriors"):
                     mu_z, logvar_z = model.fuse_posteriors(mu_dict, logvar_dict)
                 else:
-                    # single-modality fallback
                     mu_z, logvar_z = mu_dict[modality], logvar_dict[modality]
 
                 z = mu_z if latent.endswith("_mean") else _sample_gaussian(mu_z, logvar_z, gen)
@@ -421,9 +637,6 @@ def cross_modal_predict(
 ) -> np.ndarray:
     """
     Encode src_mod then decode tgt_mod.
-
-    For paired data with ONLY src_mod observed, MoE fusion == src posterior.
-    Still, use_moe=False can be handy if you want to force src-only even if model changes.
     """
     from .data import _get_matrix
 
@@ -489,8 +702,151 @@ def denoise_adata(
     return X_hat
 
 
+def encode_moe_gates_from_tensors(
+    model,
+    x_dict: Mapping[str, np.ndarray],
+    device: str = "cpu",
+    batch_size: int = 1024,
+    modality_order: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Extract MoE gating weights for *multi-observed* cells.
+
+    x_dict: modality -> np.ndarray of shape (n_cells, n_features_mod)
+    Requires model.mixture_of_experts(..., return_weights=True) to exist.
+
+    Returns:
+      - weights: (n_cells, n_modalities) softmax weights
+      - modality_order: list[str]
+      - per_modality_mean/median
+    """
+    model.eval()
+    dev = torch.device(device)
+
+    mods = list(modality_order) if modality_order is not None else list(x_dict.keys())
+    n = None
+    for m in mods:
+        if n is None:
+            n = int(np.asarray(x_dict[m]).shape[0])
+        else:
+            if int(np.asarray(x_dict[m]).shape[0]) != n:
+                raise ValueError("All modalities in x_dict must have the same n_cells.")
+    if n is None:
+        raise ValueError("Empty x_dict.")
+
+    W_chunks = []
+    with torch.no_grad():
+        for start in range(0, n, int(batch_size)):
+            end = min(start + int(batch_size), n)
+            xb_dict = {
+                m: torch.as_tensor(np.asarray(x_dict[m][start:end]), dtype=torch.float32, device=dev)
+                for m in mods
+            }
+            mu_dict, logvar_dict = model.encode_modalities(xb_dict)
+
+            if not hasattr(model, "mixture_of_experts"):
+                raise AttributeError("Model has no mixture_of_experts method; cannot extract gating weights.")
+            # model-side patch adds return_weights
+            mu_z, logvar_z, w = model.mixture_of_experts(mu_dict, logvar_dict, return_weights=True)
+            W_chunks.append(w.detach().cpu().numpy())
+
+    W = np.vstack(W_chunks) if W_chunks else np.zeros((0, len(mods)), dtype=np.float32)
+    per_mean = {m: float(np.mean(W[:, i])) for i, m in enumerate(mods)} if W.size else {m: np.nan for m in mods}
+    per_med = {m: float(np.median(W[:, i])) for i, m in enumerate(mods)} if W.size else {m: np.nan for m in mods}
+
+    return {"weights": W, "modality_order": mods, "per_modality_mean": per_mean, "per_modality_median": per_med}
+
+
+def summarize_gate_contrasts(W: np.ndarray, modality_order: Sequence[str]) -> Dict[str, Any]:
+    """
+    Pairwise contrasts like wRNA - wATAC to assess modality contribution.
+    """
+    W = np.asarray(W, dtype=np.float32)
+    mods = list(modality_order)
+    out: Dict[str, Any] = {}
+    for i, mi in enumerate(mods):
+        for j, mj in enumerate(mods):
+            if i >= j:
+                continue
+            diff = W[:, i] - W[:, j]
+            out[f"gate_diff_{mi}_minus_{mj}_mean"] = float(np.mean(diff)) if diff.size else np.nan
+            out[f"gate_diff_{mi}_minus_{mj}_median"] = float(np.median(diff)) if diff.size else np.nan
+    return out
+
+
 # ------------------------------------------------------------------
-# 6. High-level alignment eval (Figure-ready)
+# Fused-space metrics (kmeans ARI/NMI + silhouette)
+# ------------------------------------------------------------------
+def compute_kmeans_ari_nmi(
+    Z: np.ndarray,
+    labels: np.ndarray,
+    n_clusters: Optional[int] = None,
+    random_state: int = 0,
+) -> Dict[str, float]:
+    Z = np.asarray(Z, dtype=np.float32)
+    labels = np.asarray(labels)
+
+    uniq = np.unique(labels)
+    k = int(n_clusters) if n_clusters is not None else int(len(uniq))
+    if k <= 1 or Z.shape[0] == 0:
+        return {"kmeans_ari": float("nan"), "kmeans_nmi": float("nan"), "kmeans_k": float(k)}
+
+    km = KMeans(n_clusters=k, random_state=int(random_state), n_init="auto")
+    pred = km.fit_predict(Z)
+    return {
+        "kmeans_ari": float(adjusted_rand_score(labels, pred)),
+        "kmeans_nmi": float(normalized_mutual_info_score(labels, pred)),
+        "kmeans_k": float(k),
+    }
+
+
+def compute_silhouette(
+    Z: np.ndarray,
+    labels: np.ndarray,
+    metric: str = "euclidean",
+) -> float:
+    Z = np.asarray(Z, dtype=np.float32)
+    labels = np.asarray(labels)
+    uniq, counts = np.unique(labels, return_counts=True)
+    if uniq.size < 2 or np.any(counts < 2) or Z.shape[0] < 3:
+        return float("nan")
+    return float(silhouette_score(Z, labels, metric=str(metric)))
+
+
+# ------------------------------------------------------------------
+# Tri-modal pairwise correspondence helper
+# ------------------------------------------------------------------
+def compute_pairwise_foscttm_grid(
+    Z_by_mod: Dict[str, np.ndarray],
+    metric: str = "euclidean",
+    block_size: int = 512,
+    return_sem: bool = True,
+) -> Dict[str, Any]:
+    mods = list(Z_by_mod.keys())
+    out: Dict[str, Any] = {"metric": str(metric), "mods": mods}
+
+    for i in range(len(mods)):
+        for j in range(i + 1, len(mods)):
+            mi, mj = mods[i], mods[j]
+            Zi, Zj = Z_by_mod[mi], Z_by_mod[mj]
+            key = f"foscttm_{mi}_vs_{mj}"
+            if Zi.shape == Zj.shape and Zi.shape[0] > 1:
+                if return_sem:
+                    m, s = compute_foscttm(Zi, Zj, metric=metric, block_size=block_size, return_sem=True)
+                    out[key] = float(m)
+                    out[key + "_sem"] = float(s)
+                else:
+                    out[key] = float(compute_foscttm(Zi, Zj, metric=metric, block_size=block_size))
+            else:
+                out[key] = None
+                if return_sem:
+                    out[key + "_sem"] = None
+
+    return out
+
+
+# ------------------------------------------------------------------
+# High-level alignment eval (Figure-ready)
 # ------------------------------------------------------------------
 def evaluate_alignment(
     Z1: Optional[np.ndarray] = None,
@@ -512,20 +868,32 @@ def evaluate_alignment(
     random_state: int = 0,
     metric: str = "euclidean",
     k_mixing: int = 20,
+    k_entropy: int = 30,
     k_transfer: int = 15,
     modality_labels: Optional[np.ndarray] = None,
     labels_source: Optional[np.ndarray] = None,
     labels_target: Optional[np.ndarray] = None,
+    compute_bidirectional_transfer: bool = False,
     recall_ks: Tuple[int, ...] = (1, 5, 10),
     foscttm_block_size: int = 512,
+    # fused-space metrics
+    Z_fused: Optional[np.ndarray] = None,
+    fused_labels: Optional[np.ndarray] = None,
+    fused_kmeans: bool = True,
+    fused_silhouette: bool = True,
+    fused_random_state: int = 0,
+    # gating
+    gate_weights: Optional[np.ndarray] = None,
+    gate_modality_order: Optional[Sequence[str]] = None,
     json_safe: bool = True,
 ) -> Dict[str, Any]:
     """
     Returns a dict with:
-      - foscttm (mean), foscttm_sem
-      - recall@k + sem for each k in recall_ks
-      - modality_mixing (mean), modality_mixing_sem
-      - label transfer: acc, macro/weighted f1 (optional), confusion matrix + label order
+      - cross-latent: foscttm + sem, recall@k + sem, modality mixing + sem
+      - label transfer: acc + cm + label_order + f1s
+      - optional bidirectional transfer summary
+      - optional fused-space: kmeans ARI/NMI, silhouette
+      - optional gating summaries if gate_weights provided
     """
     out: Dict[str, Any] = {}
 
@@ -579,7 +947,7 @@ def evaluate_alignment(
             out[f"recall_at_{int(k)}"] = None
             out[f"recall_at_{int(k)}_sem"] = None
 
-    # Modality mixing computed on concatenated embeddings
+    # Modality mixing + entropy computed on concatenated embeddings
     Z_concat = None
     if (Z1.ndim == 2 and Z2.ndim == 2 and Z1.shape[1] == Z2.shape[1]):
         Z_concat = np.vstack([Z1, Z2])
@@ -587,6 +955,7 @@ def evaluate_alignment(
     if Z_concat is not None and Z_concat.shape[0] > 1:
         if modality_labels is None:
             modality_labels = np.concatenate([np.repeat("mod1", Z1.shape[0]), np.repeat("mod2", Z2.shape[0])])
+
         mix_mean, mix_sem = compute_modality_mixing(
             Z_concat, modality_labels=np.asarray(modality_labels),
             k=k_mixing, metric=metric, return_sem=True, return_per_cell=False
@@ -594,12 +963,28 @@ def evaluate_alignment(
         out["modality_mixing"] = mix_mean
         out["modality_mixing_sem"] = mix_sem
         out["k_mixing"] = int(k_mixing)
+
+        ent_mean, ent_sem = compute_modality_entropy(
+            Z_concat, modality_labels=np.asarray(modality_labels),
+            k=k_entropy, metric=metric, return_sem=True, return_per_cell=False
+        )
+        out["modality_entropy"] = ent_mean
+        out["modality_entropy_sem"] = ent_sem
+        out["k_entropy"] = int(k_entropy)
+
+        out["same_vs_diff_neighbor_distances"] = compute_same_vs_diff_neighbor_distances(
+            Z_concat, modality_labels=np.asarray(modality_labels), k=k_entropy, metric=metric
+        )
     else:
         out["modality_mixing"] = None
         out["modality_mixing_sem"] = None
         out["k_mixing"] = int(k_mixing)
+        out["modality_entropy"] = None
+        out["modality_entropy_sem"] = None
+        out["k_entropy"] = int(k_entropy)
+        out["same_vs_diff_neighbor_distances"] = None
 
-    # Label transfer
+    # Label transfer (Z1->Z2)
     if labels_source is not None:
         pred, acc, cm, order, f1d = label_transfer_knn(
             Z_source=Z1,
@@ -617,6 +1002,15 @@ def evaluate_alignment(
         out["label_transfer_label_order"] = order
         out["label_transfer_f1"] = f1d
         out["k_transfer"] = int(k_transfer)
+
+        if compute_bidirectional_transfer and (labels_target is not None):
+            out["bidirectional_transfer"] = summarize_bidirectional_transfer(
+                Z_a=Z1, y_a=np.asarray(labels_source),
+                Z_b=Z2, y_b=np.asarray(labels_target),
+                k=k_transfer, metric=metric,
+            )
+        else:
+            out["bidirectional_transfer"] = None
     else:
         out["label_transfer_pred"] = None
         out["label_transfer_acc"] = None
@@ -624,6 +1018,41 @@ def evaluate_alignment(
         out["label_transfer_label_order"] = None
         out["label_transfer_f1"] = None
         out["k_transfer"] = int(k_transfer)
+        out["bidirectional_transfer"] = None
+
+    # Fused-space metrics (optional)
+    if Z_fused is not None and fused_labels is not None:
+        Zf = np.asarray(Z_fused, dtype=np.float32)
+        yl = np.asarray(fused_labels)
+        out["fused_n"] = int(Zf.shape[0])
+        out["fused_dim"] = int(Zf.shape[1]) if Zf.ndim == 2 else None
+
+        if fused_kmeans:
+            out["fused_kmeans"] = compute_kmeans_ari_nmi(Zf, yl, random_state=fused_random_state)
+        else:
+            out["fused_kmeans"] = None
+
+        if fused_silhouette:
+            out["fused_silhouette"] = compute_silhouette(Zf, yl, metric=metric)
+        else:
+            out["fused_silhouette"] = None
+    else:
+        out["fused_kmeans"] = None
+        out["fused_silhouette"] = None
+
+    # Gating summaries (optional)
+    if gate_weights is not None:
+        W = np.asarray(gate_weights, dtype=np.float32)
+        out["gate_weights_mean"] = float(np.mean(W)) if W.size else np.nan
+        out["gate_weights_per_mod_mean"] = (
+            {m: float(np.mean(W[:, i])) for i, m in enumerate(gate_modality_order or range(W.shape[1]))}
+            if W.size else None
+        )
+        out["gate_contrasts"] = summarize_gate_contrasts(W, gate_modality_order or [str(i) for i in range(W.shape[1])])
+    else:
+        out["gate_weights_mean"] = None
+        out["gate_weights_per_mod_mean"] = None
+        out["gate_contrasts"] = None
 
     if json_safe:
         out = {k: _json_safe(v) for k, v in out.items()}
