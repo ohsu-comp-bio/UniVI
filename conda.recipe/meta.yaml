@@ -9,7 +9,7 @@ source:
   # Use the PyPI sdist for released versions
   url: https://pypi.io/packages/source/u/{{ name }}/{{ name }}-{{ version }}.tar.gz
   # optional but recommended once you look it up:
-  # sha256: 310ba41df051c1c1c7592114344279e284dce659fdfd8108d74bc320d1b9968
+  # sha256: f49634d0e4a76b73464031048950e80a281434e8a41610003d1d1da2186f0c34
 
 build:
   noarch: python
