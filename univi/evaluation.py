@@ -732,6 +732,187 @@ def cross_modal_predict(
 # =============================================================================
 # README: fused encoding + gate retrieval (paired / multi-observed)
 # =============================================================================
+def encode_moe_gates_from_tensors(
+    model,
+    x_dict: Mapping[str, Union[np.ndarray, "sp.spmatrix", torch.Tensor]],
+    *,
+    device: str = "cpu",
+    batch_size: int = 1024,
+    modality_order: Optional[Sequence[str]] = None,
+    kind: str = "effective_precision",   # "effective_precision" | "router_x_precision" | "uniform"
+    return_logits: bool = True,
+    eps: float = 1e-8,
+) -> Dict[str, Any]:
+    """
+    Compute per-cell modality *contribution weights* (aka "gates") for analytic fusion diagnostics.
+
+    This helper is designed for the **analytic fusion** path (MoE/PoE-style), where each modality
+    has a Gaussian posterior (mu_m, logvar_m) in latent space. We summarize how much each modality
+    contributes to the fused posterior on a per-cell basis.
+
+    Importantly, this function is intentionally **independent of cfg.use_moe_gating**:
+      - If your model exposes router logits (best-effort via model.encode_fused(..., return_gate_logits=True)),
+        we can optionally incorporate them.
+      - If logits are unavailable, we still provide meaningful diagnostics using precision-only weights.
+
+    Parameters
+    ----------
+    x_dict:
+      dict {modality: X} with shape (n_cells, n_features) for each modality.
+      Arrays may be numpy, scipy sparse, or torch tensors.
+      All modalities must have the same n_cells.
+
+    modality_order:
+      Order to report/stack modalities in outputs. If None, uses model cfg order if possible,
+      otherwise uses sorted(x_dict.keys()).
+
+    kind:
+      - "effective_precision":
+          Precision-only weights derived from per-modality posterior uncertainty:
+            s_m = sum_d exp(-logvar_m[d])
+            w_m = s_m / sum_j s_j
+          Always available (no router needed).
+      - "router_x_precision":
+          If router logits are available, combine router probabilities with effective precision:
+            r = softmax(logits)
+            w_m ∝ s_m * r_m
+          If logits are unavailable, this silently falls back to "effective_precision".
+      - "uniform":
+          Equal weights across modalities (sanity check).
+
+    return_logits:
+      If True, attempt to retrieve router logits. If not available, "logits" will be None.
+
+    Returns
+    -------
+    dict with:
+      - weights: (n_cells, n_modalities) float32, rows sum to 1
+      - logits: (n_cells, n_modalities) float32 or None
+      - modality_order: list[str]
+      - kind: str (the *effective* kind actually used; may downgrade router_x_precision -> effective_precision)
+      - requested_kind: str
+      - per_modality_mean: dict {modality: mean weight}
+    """
+    model.eval()
+    dev = torch.device(device)
+
+    def _normalize_rows(x: torch.Tensor) -> torch.Tensor:
+        return x / (x.sum(dim=1, keepdim=True) + float(eps))
+
+    # Decide output modality order
+    mods_in = list(x_dict.keys())
+    if len(mods_in) == 0:
+        raise ValueError("x_dict is empty.")
+
+    if modality_order is None:
+        modality_order = _infer_model_modality_order(model, fallback=sorted(mods_in))
+    else:
+        modality_order = list(map(str, list(modality_order)))
+
+    # Normalize inputs to numpy + validate n_cells match
+    X_np: Dict[str, np.ndarray] = {}
+    n: Optional[int] = None
+    for m in modality_order:
+        if m not in x_dict:
+            raise KeyError(f"modality {m!r} not found in x_dict. Available: {list(x_dict.keys())}")
+
+        Xm = x_dict[m]
+        if torch.is_tensor(Xm):
+            Xm = Xm.detach().cpu().numpy()
+        Xm = Xm.toarray() if sp.issparse(Xm) else np.asarray(Xm)
+        Xm = np.asarray(Xm)
+
+        if n is None:
+            n = int(Xm.shape[0])
+        if int(Xm.shape[0]) != int(n):
+            raise ValueError(f"All modalities must have same n_cells. {m} has {Xm.shape[0]} vs {n}.")
+
+        X_np[m] = Xm
+
+    n = int(n)
+
+    requested_kind = str(kind).lower().strip()
+    if requested_kind not in {"effective_precision", "router_x_precision", "uniform"}:
+        raise ValueError("kind must be 'effective_precision', 'router_x_precision', or 'uniform'.")
+
+    weights_chunks: List[np.ndarray] = []
+    logits_chunks: List[np.ndarray] = []
+
+    with torch.no_grad():
+        for start in range(0, n, int(batch_size)):
+            end = min(start + int(batch_size), n)
+
+            xb_dict = {
+                m: torch.as_tensor(np.asarray(X_np[m][start:end]), dtype=torch.float32, device=dev)
+                for m in modality_order
+            }
+
+            # modality posteriors
+            mu_dict, logvar_dict = model.encode_modalities(xb_dict)
+
+            # ---- router logits (best-effort) ----
+            logits = None
+            if return_logits and hasattr(model, "encode_fused"):
+                try:
+                    out = model.encode_fused(
+                        xb_dict,
+                        use_mean=True,
+                        return_gates=True,
+                        return_gate_logits=True,
+                    )
+                    # expected: mu, logvar, z, gates, gate_logits
+                    if isinstance(out, (tuple, list)) and len(out) >= 5 and out[4] is not None:
+                        logits = out[4]
+                except Exception:
+                    logits = None
+
+            if logits is not None:
+                logits_chunks.append(_to_numpy(logits))
+
+            # ---- base scalars: effective precision per modality per cell ----
+            if requested_kind == "uniform":
+                w = torch.ones((end - start, len(modality_order)), device=dev, dtype=torch.float32)
+                w = _normalize_rows(w)
+
+            else:
+                s_list = []
+                for m in modality_order:
+                    lv = logvar_dict[m]          # (batch, latent_dim)
+                    prec = torch.exp(-lv)        # (batch, latent_dim)
+                    s = prec.sum(dim=1)          # (batch,)
+                    s_list.append(s)
+                S = torch.stack(s_list, dim=1)   # (batch, n_mods)
+
+                if requested_kind == "router_x_precision" and (logits is not None):
+                    R = _softmax(logits, dim=1)  # (batch, n_mods)
+                    w = _normalize_rows(S * R)
+                else:
+                    w = _normalize_rows(S)
+
+            weights_chunks.append(_to_numpy(w))
+
+    W = np.vstack(weights_chunks).astype(np.float32) if weights_chunks else np.zeros((0, 0), dtype=np.float32)
+    L = np.vstack(logits_chunks).astype(np.float32) if logits_chunks else None
+
+    # What kind did we *actually* deliver?
+    effective_kind = requested_kind
+    if requested_kind == "router_x_precision" and L is None:
+        effective_kind = "effective_precision"
+
+    per_mod_mean = (
+        {m: float(W[:, j].mean()) for j, m in enumerate(modality_order)} if W.size else {m: 0.0 for m in modality_order}
+    )
+
+    return {
+        "weights": W,
+        "logits": L,
+        "modality_order": list(modality_order),
+        "kind": effective_kind,
+        "requested_kind": requested_kind,
+        "per_modality_mean": per_mod_mean,
+    }
+
+
 def encode_fused_adata_pair(
     model,
     adata_by_mod: Mapping[str, Any],

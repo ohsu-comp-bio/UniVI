@@ -1,17 +1,17 @@
 # UniVI
 
-[![PyPI version](https://img.shields.io/pypi/v/univi?v=0.4.4)](https://pypi.org/project/univi/)
+[![PyPI version](https://img.shields.io/pypi/v/univi?v=0.4.5)](https://pypi.org/project/univi/)
 [![pypi downloads](https://img.shields.io/pepy/dt/univi?label=pypi%20downloads)](https://pepy.tech/project/univi)
 [![Conda version](https://img.shields.io/conda/vn/conda-forge/univi?cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
 [![conda-forge downloads](https://img.shields.io/conda/dn/conda-forge/univi?label=conda-forge%20downloads\&cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.4.4)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.4.5)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.4/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.5/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.4/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.5/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
@@ -581,17 +581,22 @@ If you trained a classification head, you can optionally *bias* latent selection
 
 ## 8) MoE gating diagnostics (precision contributions + optional learnable router)
 
-UniVI can report per-cell modality **contribution weights** in the analytic fusion path:
+UniVI can report per-cell modality **contribution weights** for the **analytic fusion** path (MoE/PoE-style).
 
-* **Precision-only (always available):** derived from per-modality posterior uncertainty (no learnable gate required).
-* **Router×precision (only if enabled):** if `cfg.use_moe_gating=True`, a learnable router further reweights precisions.
+There are two related notions of “who contributed how much” to the fused latent:
 
-> Note: This section applies to **analytic fusion** (MoE/PoE-style). If you use the **fused transformer posterior**, there may be no analytic gate/precision attribution and weights can be `None`.
+- **Precision-only (always available):** derived from each modality’s posterior uncertainty in latent space.
+- **Router × precision (optional):** if your trained model exposes **router logits**, UniVI can combine
+  router probabilities with precision to produce contribution weights.
 
-### A) Compute per-cell modality contribution weights (recommended: `effective_precision`)
+> Note: This section applies to **analytic fusion** (Gaussian experts in latent space).  
+> If you use a **fused transformer posterior**, there may be no analytic precision/router attribution
+> and gates can be unavailable or not meaningful.
+
+### A) Compute per-cell contribution weights (recommended)
 
 ```python
-from univi.evaluation import encode_moe_gates_from_tensors
+from univi.evaluation import to_dense, encode_moe_gates_from_tensors
 from univi.plotting import write_gates_to_obs, plot_moe_gate_summary
 
 gate = encode_moe_gates_from_tensors(
@@ -600,57 +605,71 @@ gate = encode_moe_gates_from_tensors(
     device=device,
     batch_size=1024,
     modality_order=["rna", "adt"],
-    kind="effective_precision",   # contribution to fused posterior:
-                                 #   - precision-only if use_moe_gating=False
-                                 #   - router×precision if use_moe_gating=True
-    return_logits=True,           # logits may be None if no learnable router
+    kind="router_x_precision",  # will fall back to "effective_precision" if router logits are unavailable
+    return_logits=True,
 )
 
-W    = gate["weights"]           # (n_cells, n_modalities) or None
-mods = gate["modality_order"]    # e.g. ["rna","adt"]
+W    = gate["weights"]         # (n_cells, n_modalities), rows sum to 1
+mods = gate["modality_order"]  # e.g. ["rna", "adt"]
 
-print("Gate kind:", gate.get("kind", None))
-print("Per-modality mean:", gate.get("per_modality_mean", None))
-```
+print("Requested kind:", gate.get("requested_kind"))
+print("Effective kind:", gate.get("kind"))
+print("Per-modality mean:", gate.get("per_modality_mean"))
+print("Has logits:", gate.get("logits") is not None)
+````
+
+If you want **precision-only** weights (no router influence), set `kind="effective_precision"`.
 
 ### B) Write weights to `.obs` (for plotting / grouping)
 
 ```python
-if W is not None:
-    write_gates_to_obs(
-        rna,
-        gates=W,
-        modality_names=mods,
-        gate_prefix="moe_gate",          # creates obs cols: moe_gate_{mod}
-        gate_logits=gate.get("logits", None),
-    )
+write_gates_to_obs(
+    rna,
+    gates=W,
+    modality_names=mods,
+    gate_prefix="moe_gate",          # creates obs cols: moe_gate_{mod}
+    gate_logits=gate.get("logits"),  # optional; may be None
+)
 ```
 
 ### C) Plot contribution usage (overall + grouped)
 
 ```python
-if W is not None:
-    plot_moe_gate_summary(
-        rna,
-        gate_prefix="moe_gate",
-        groupby="celltype.l3",           # or "celltype.l2", "batch", etc.
-        agg="mean",
-        savepath="moe_gates_by_celltype.png",
-        show=False,
-    )
+plot_moe_gate_summary(
+    rna,
+    gate_prefix="moe_gate",
+    groupby="celltype.l3",           # or "celltype.l2", "batch", etc.
+    agg="mean",
+    savepath="moe_gates_by_celltype.png",
+    show=False,
+)
 ```
 
-### D) Include weights in alignment evaluation output (optional logging)
+### D) Optional: log gates alongside alignment metrics
+
+`evaluate_alignment(...)` evaluates geometric alignment (FOSCTTM, Recall@k, mixing/entropy, label transfer).
+If you want to save gate summaries alongside those metrics, just merge dictionaries:
 
 ```python
-metrics_with_gates = evaluate_alignment(
+from univi.evaluation import evaluate_alignment
+
+metrics = evaluate_alignment(
     Z1=rna.obsm["X_univi"],
     Z2=adt.obsm["X_univi"],
-    gate_weights=W,                     # can be None
-    gate_modality_order=mods,
-    gate_kind=gate.get("kind", None),
+    labels_source=rna.obs["celltype.l3"].to_numpy(),
+    labels_target=adt.obs["celltype.l3"].to_numpy(),
     json_safe=True,
 )
+
+metrics["moe_gates"] = {
+    "kind": gate.get("kind"),
+    "requested_kind": gate.get("requested_kind"),
+    "modality_order": mods,
+    "per_modality_mean": gate.get("per_modality_mean"),
+    # (optional) store full matrices; omit if you want small JSON
+    # "weights": W,
+    # "logits": gate.get("logits"),
+}
 ```
 
 ---
