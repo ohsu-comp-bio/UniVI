@@ -432,7 +432,7 @@ print("Entropy:", metrics["modality_entropy"], "+/-", metrics["modality_entropy_
 print("Worst-direction macro-F1:", metrics["bidirectional_transfer"]["worst_direction_macro_f1"])
 ```
 
-Plot the label-transfer confusion matrix (no seaborn):
+Plot the label-transfer confusion matrix:
 
 ```python
 plot_confusion_matrix(
@@ -449,7 +449,7 @@ plot_confusion_matrix(
 
 ### 7) (Optional) MoE gating weights: extract + plot
 
-If your model supports `model.mixture_of_experts(..., return_weights=True)`, you can inspect per-cell modality reliance.
+If your model supports `model.mixture_of_experts(..., return_weights=True)` (v0.4.1+), you can inspect per-cell modality reliance.
 
 ```python
 gate = encode_moe_gates_from_tensors(
