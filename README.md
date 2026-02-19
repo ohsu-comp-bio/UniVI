@@ -579,6 +579,82 @@ If you trained a classification head, you can optionally *bias* latent selection
 
 ---
 
+## 8) MoE gating diagnostics (precision contributions + optional learnable router)
+
+UniVI can report per-cell modality **contribution weights** in the analytic fusion path:
+
+* **Precision-only (always available):** derived from per-modality posterior uncertainty (no learnable gate required).
+* **Router×precision (only if enabled):** if `cfg.use_moe_gating=True`, a learnable router further reweights precisions.
+
+> Note: This section applies to **analytic fusion** (MoE/PoE-style). If you use the **fused transformer posterior**, there may be no analytic gate/precision attribution and weights can be `None`.
+
+### A) Compute per-cell modality contribution weights (recommended: `effective_precision`)
+
+```python
+from univi.evaluation import encode_moe_gates_from_tensors
+from univi.plotting import write_gates_to_obs, plot_moe_gate_summary
+
+gate = encode_moe_gates_from_tensors(
+    model,
+    x_dict={"rna": to_dense(rna.X), "adt": to_dense(adt.X)},
+    device=device,
+    batch_size=1024,
+    modality_order=["rna", "adt"],
+    kind="effective_precision",   # contribution to fused posterior:
+                                 #   - precision-only if use_moe_gating=False
+                                 #   - router×precision if use_moe_gating=True
+    return_logits=True,           # logits may be None if no learnable router
+)
+
+W    = gate["weights"]           # (n_cells, n_modalities) or None
+mods = gate["modality_order"]    # e.g. ["rna","adt"]
+
+print("Gate kind:", gate.get("kind", None))
+print("Per-modality mean:", gate.get("per_modality_mean", None))
+```
+
+### B) Write weights to `.obs` (for plotting / grouping)
+
+```python
+if W is not None:
+    write_gates_to_obs(
+        rna,
+        gates=W,
+        modality_names=mods,
+        gate_prefix="moe_gate",          # creates obs cols: moe_gate_{mod}
+        gate_logits=gate.get("logits", None),
+    )
+```
+
+### C) Plot contribution usage (overall + grouped)
+
+```python
+if W is not None:
+    plot_moe_gate_summary(
+        rna,
+        gate_prefix="moe_gate",
+        groupby="celltype.l3",           # or "celltype.l2", "batch", etc.
+        agg="mean",
+        savepath="moe_gates_by_celltype.png",
+        show=False,
+    )
+```
+
+### D) Include weights in alignment evaluation output (optional logging)
+
+```python
+metrics_with_gates = evaluate_alignment(
+    Z1=rna.obsm["X_univi"],
+    Z2=adt.obsm["X_univi"],
+    gate_weights=W,                     # can be None
+    gate_modality_order=mods,
+    gate_kind=gate.get("kind", None),
+    json_safe=True,
+)
+```
+
+---
+
 ### Decoder output types (what UniVI handles for you)
 
 Decoders can return either:
