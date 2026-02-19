@@ -129,7 +129,7 @@ adata_dict = align_paired_obs_names({"rna": rna, "adt": adt})
 ### 2) Dataset + dataloaders
 
 ```python
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cuda" if torch.cuda.is_available() else ("mps" if torch.mps.is_available() else "cpu")
 
 dataset = MultiModalDataset(
     adata_dict=adata_dict,
@@ -242,7 +242,7 @@ from univi.plotting import (
 )
 
 set_style(font_scale=1.2, dpi=150)
-device = "cuda"  # or "cpu"
+device = "cuda"  # for NVIDIA GPUs/"mps" for MacBook M-series chips/"cpu" if not using GPU acceleration
 ```
 
 ---
