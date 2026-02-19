@@ -196,8 +196,8 @@ train_cfg = TrainingConfig(
     num_workers=0,
     seed=42,
     early_stopping=True,
-    best_epoch_warmup=75,
-    patience=50,                  # in UniVI v0.4.1+
+    best_epoch_warmup=75,         # in UniVI v0.4.1+
+    patience=50,
     min_delta=0.0,
 )
 
