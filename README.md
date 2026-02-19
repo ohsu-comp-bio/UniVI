@@ -1,17 +1,17 @@
 # UniVI
 
-[![PyPI version](https://img.shields.io/pypi/v/univi?v=0.4.1)](https://pypi.org/project/univi/)
+[![PyPI version](https://img.shields.io/pypi/v/univi?v=0.4.2)](https://pypi.org/project/univi/)
 [![pypi downloads](https://img.shields.io/pepy/dt/univi?label=pypi%20downloads)](https://pepy.tech/project/univi)
 [![Conda version](https://img.shields.io/conda/vn/conda-forge/univi?cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
 [![conda-forge downloads](https://img.shields.io/conda/dn/conda-forge/univi?label=conda-forge%20downloads\&cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.4.1)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.4.2)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.1/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.2/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.1/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.2/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
@@ -210,12 +210,12 @@ trainer.fit()
 
 ---
 
-## After training: evaluation + plotting workflows
+## After training: what you can do with a UniVI model
 
-UniVI ships two post-training workhorse modules:
+UniVI models are **generative** (decoders + likelihoods) and **alignment-oriented** (shared latent space). After training, you typically use two modules:
 
-* `univi.evaluation`: encoding, denoising, cross-modal prediction, alignment metrics, optional MoE gate extraction
-* `univi.plotting`: Scanpy/Matplotlib utilities (UMAP panels with compact legends, modality-stacked UMAPs, raw-vs-denoised overlays, confusion matrices, MoE gate plots)
+* `univi.evaluation`: encoding, denoising, cross-modal prediction (imputation), generation, and metrics
+* `univi.plotting`: Scanpy/Matplotlib helpers for UMAPs, legends, confusion matrices, MoE gate plots, and reconstruction-error plots
 
 ### 0) Imports + plotting defaults
 
@@ -225,11 +225,17 @@ import scipy.sparse as sp
 
 from univi.evaluation import (
     encode_adata,
+    encode_fused_adata_pair,
     cross_modal_predict,
-    denoise_from_multimodal,
     denoise_adata,
+    denoise_from_multimodal,
     evaluate_alignment,
-    encode_moe_gates_from_tensors,
+    reconstruction_metrics,
+    # NEW (generation + recon error workflows)
+    generate_from_latent,
+    fit_label_latent_gaussians,
+    sample_latent_by_label,
+    evaluate_cross_reconstruction,
 )
 from univi.plotting import (
     set_style,
@@ -239,17 +245,27 @@ from univi.plotting import (
     plot_confusion_matrix,
     write_gates_to_obs,
     plot_moe_gate_summary,
+    # NEW (reconstruction error plots)
+    plot_reconstruction_error_summary,
+    plot_featurewise_reconstruction_scatter,
 )
 
 set_style(font_scale=1.2, dpi=150)
-device = "cuda"  # for NVIDIA GPUs/"mps" for MacBook M-series chips/"cpu" if not using GPU acceleration
+device = "cuda"  # or "mps" (Mac), or "cpu"
+```
+
+Helper for sparse matrices:
+
+```python
+def to_dense(X):
+    return X.toarray() if sp.issparse(X) else np.asarray(X)
 ```
 
 ---
 
-### 1) Encode latents and store them in `.obsm["X_univi"]`
+## 1) Encode a modality into latent space (`.obsm["X_univi"]`)
 
-`encode_adata(...)` is designed for “one observed modality at a time” (RNA-only, ADT-only, etc.):
+Use this when you have **one observed modality at a time** (RNA-only, ADT-only, ATAC-only, etc.):
 
 ```python
 Z_rna = encode_adata(
@@ -257,74 +273,71 @@ Z_rna = encode_adata(
     adata=rna,
     modality="rna",
     device=device,
-    layer=None,         # reads adata.X by default; set layer="counts" if your encoder expects counts
+    layer=None,          # uses adata.X by default
     X_key="X",
     batch_size=1024,
-    latent="moe_mean",  # {"moe_mean","moe_sample","modality_mean","modality_sample"}
+    latent="moe_mean",   # {"moe_mean","moe_sample","modality_mean","modality_sample"}
     random_state=0,
 )
 rna.obsm["X_univi"] = Z_rna
-
-Z_adt = encode_adata(
-    model,
-    adata=adt,
-    modality="adt",
-    device=device,
-    layer=None,
-    X_key="X",
-    batch_size=1024,
-    latent="moe_mean",
-    random_state=0,
-)
-adt.obsm["X_univi"] = Z_adt
 ```
 
-Plot UMAPs from the stored embedding (new API; compact legends by default):
+Then plot:
 
 ```python
 umap(
     rna,
     obsm_key="X_univi",
     color=["celltype.l2", "batch"],
-    legend="outside",           # "outside" (recommended), "right_margin", "on_data", "none"
-    legend_subset_topk=25,      # optional: show top-k categories by frequency in legend
+    legend="outside",
+    legend_subset_topk=25,
     savepath="umap_rna_univi.png",
     show=False,
 )
-
-umap(
-    adt,
-    obsm_key="X_univi",
-    color=["celltype.l2", "batch"],
-    legend="outside",
-    legend_subset_topk=25,
-    savepath="umap_adt_univi.png",
-    show=False,
-)
 ```
 
 ---
 
-### 2) Plot modality mixing / co-embedding across modalities
+## 2) Encode a *fused* multimodal latent (true paired/multi-observed cells)
 
-If each modality AnnData has `.obsm["X_univi"]`, you can concatenate and color by modality via `univi_modality`:
+When you have multiple observed modalities for the **same cells**, you can encode the *fused* posterior (and optionally MoE router gates/logits):
 
 ```python
-umap_by_modality(
-    {"rna": rna, "adt": adt},
-    obsm_key="X_univi",
-    color=["celltype.l2", "univi_modality"],
+fused = encode_fused_adata_pair(
+    model,
+    adata_by_mod={"rna": rna, "adt": adt},   # same obs_names, same order
+    device=device,
+    batch_size=1024,
+    use_mean=True,
+    return_gates=True,
+    return_gate_logits=True,
+    write_to_adatas=True,                   # writes obsm + gate columns
+    fused_obsm_key="X_univi_fused",
+    gate_prefix="gate",
+)
+
+# fused["Z_fused"] -> (n_cells, latent_dim)
+# fused["gates"]  -> (n_cells, n_modalities) or None (if fused transformer posterior is used)
+```
+
+Plot fused:
+
+```python
+umap(
+    rna,
+    obsm_key="X_univi_fused",
+    color=["celltype.l2", "batch"],
     legend="outside",
-    savepath="umap_rna_adt_by_modality.png",
+    savepath="umap_fused.png",
     show=False,
 )
 ```
 
 ---
 
-### 3) Cross-modal prediction (imputation): encode source → decode target
+## 3) Cross-modal prediction (imputation): encode source → decode target
 
-Example: **RNA → ADT** imputation, stored in an ADT layer:
+Example: **RNA → ADT**. UniVI will automatically handle decoder output types internally (e.g. Gaussian returns tensor; NB returns `{"mu","log_theta"}`; ZINB returns `{"mu","log_theta","logit_pi"}`; Poisson returns `{"rate","log_rate"}`, etc.) and return the appropriate **mean-like** prediction.
 
 ```python
 adt_hat_from_rna = cross_modal_predict(
@@ -333,82 +346,135 @@ adt_hat_from_rna = cross_modal_predict(
     src_mod="rna",
     tgt_mod="adt",
     device=device,
-    layer=None,      # uses rna.X by default
+    layer=None,
     X_key="X",
     batch_size=512,
     use_moe=True,
 )
-
 adt.layers["imputed_from_rna"] = adt_hat_from_rna
 ```
 
 ---
 
-### 4) True multimodal denoising (fused latent) and write back to AnnData
+## 4) Denoising (self-reconstruction or true fused denoising)
 
-If you have multiple observed modalities for the same cells, you can denoise through the fused latent.
-
-```python
-def to_dense(X):
-    return X.toarray() if sp.issparse(X) else np.asarray(X)
-```
-
-**Option A — provide tensors directly (`denoise_from_multimodal`)**:
-
-```python
-rna_denoised = denoise_from_multimodal(
-    model,
-    x_dict={"rna": to_dense(rna.X), "adt": to_dense(adt.X)},
-    target_mod="rna",
-    device=device,
-    batch_size=512,
-    use_mean=True,
-)
-
-rna.layers["denoised_fused"] = rna_denoised
-```
-
-**Option B — let UniVI pull matrices and write outputs (`denoise_adata` with `adata_by_mod=...`)**:
+### Option A — self-denoise a single modality (same as “reconstruct”)
 
 ```python
 denoise_adata(
     model,
-    adata=rna,                  # output written here
+    adata=rna,
+    modality="rna",
+    device=device,
+    out_layer="denoised_self",
+    overwrite_X=False,
+    batch_size=512,
+)
+```
+
+### Option B — true multimodal denoising via fused latent
+
+```python
+denoise_adata(
+    model,
+    adata=rna,                         # output written here
     modality="rna",
     device=device,
     out_layer="denoised_fused",
     overwrite_X=False,
     batch_size=512,
     adata_by_mod={"rna": rna, "adt": adt},
-    layer_by_mod={"rna": None, "adt": None},   # None -> use .X
+    layer_by_mod={"rna": None, "adt": None},  # None -> use .X
     X_key_by_mod={"rna": "X", "adt": "X"},
     use_mean=True,
 )
 ```
 
----
-
-### 5) Raw vs denoised feature overlays on the same UMAP
-
-Once you have a denoised layer, you can compare UMAP marker overlays in a 2-row grid:
+Compare raw vs denoised marker overlays:
 
 ```python
 compare_raw_vs_denoised_umap_features(
     rna,
     obsm_key="X_univi",
-    features=["MS4A1", "CD3D", "NKG7"],   # must be in rna.var_names
-    raw_layer=None,                      # None -> adata.X
-    denoised_layer="denoised_fused",     # must exist in adata.layers
-    savepath="umap_raw_vs_denoised_markers.png",
+    features=["MS4A1", "CD3D", "NKG7"],
+    raw_layer=None,
+    denoised_layer="denoised_fused",
+    savepath="umap_raw_vs_denoised.png",
     show=False,
 )
 ```
 
 ---
 
-### 6) Alignment evaluation (FOSCTTM, Recall@k, mixing/entropy, label transfer)
+## 5) Quantify reconstruction / imputation error vs ground truth
 
-`evaluate_alignment(...)` returns a figure-ready metrics dict:
+You can compute **featurewise + summary** errors between:
+
+* **cross-reconstructed** (RNA→ADT, ATAC→RNA, …)
+* **denoised** outputs (self or fused)
+* and the **true observed** data
+
+### A) Basic metrics on two matrices
+
+```python
+true = to_dense(adt.X)
+pred = adt.layers["imputed_from_rna"]
+
+m = reconstruction_metrics(true, pred)
+print("MSE mean:", m["mse_mean"])
+print("Pearson mean:", m["pearson_mean"])
+```
+
+### B) One-call evaluation for cross-reconstruction / denoising
+
+This will:
+
+1. generate predictions via UniVI (handling decoder output types correctly),
+2. align to the requested truth matrix (layer/X_key), and
+3. return metrics + optional per-feature vectors.
+
+```python
+rep = evaluate_cross_reconstruction(
+    model,
+    adata_src=rna,
+    adata_tgt=adt,
+    src_mod="rna",
+    tgt_mod="adt",
+    device=device,
+    src_layer=None,
+    tgt_layer=None,
+    batch_size=512,
+    # optionally restrict to a feature subset (e.g., top markers)
+    feature_names=None,
+)
+print(rep["summary"])   # mse_mean/median, pearson_mean/median, etc.
+```
+
+Plot reconstruction-error summaries:
+
+```python
+plot_reconstruction_error_summary(
+    rep,
+    title="RNA → ADT imputation error",
+    savepath="recon_error_summary.png",
+    show=False,
+)
+```
+
+And featurewise scatter (true vs predicted) for selected features:
+
+```python
+plot_featurewise_reconstruction_scatter(
+    rep,
+    features=["CD3", "CD4", "MS4A1"],
+    savepath="recon_scatter_selected_features.png",
+    show=False,
+)
+```
+
+---
+
+## 6) Alignment evaluation (FOSCTTM, Recall@k, mixing/entropy, label transfer, gates)
 
 ```python
 metrics = evaluate_alignment(
@@ -424,22 +490,16 @@ metrics = evaluate_alignment(
     k_transfer=15,
     json_safe=True,
 )
-
-print("FOSCTTM:", metrics["foscttm"], "+/-", metrics["foscttm_sem"])
-print("Recall@10:", metrics["recall_at_10"], "+/-", metrics["recall_at_10_sem"])
-print("Mixing:", metrics["modality_mixing"], "+/-", metrics["modality_mixing_sem"])
-print("Entropy:", metrics["modality_entropy"], "+/-", metrics["modality_entropy_sem"])
-print("Worst-direction macro-F1:", metrics["bidirectional_transfer"]["worst_direction_macro_f1"])
 ```
 
-Plot the label-transfer confusion matrix:
+Confusion matrix:
 
 ```python
 plot_confusion_matrix(
     np.asarray(metrics["label_transfer_cm"]),
     labels=np.asarray(metrics["label_transfer_label_order"]),
     title="Label transfer (RNA → ADT)",
-    normalize="true",                     # None / "true" / "pred"
+    normalize="true",
     savepath="label_transfer_confusion.png",
     show=False,
 )
@@ -447,62 +507,75 @@ plot_confusion_matrix(
 
 ---
 
-### 7) (Optional) MoE gating weights: extract + plot
+## 7) Generate new data from latent space (sampling / “in silico cells”)
 
-If your model supports `model.mixture_of_experts(..., return_weights=True)` (v0.4.1+), you can inspect per-cell modality reliance.
+UniVI decoders define a likelihood per modality (Gaussian, NB, ZINB, Poisson, Bernoulli, etc.). Generation is done as:
+
+1. pick latent samples `z ~ p(z)` (or a conditional latent distribution)
+2. decode with the modality decoder(s)
+3. return **mean-like reconstructions** or (optionally) sample from the likelihood
+
+### A) Unconditional generation (standard normal prior)
 
 ```python
-gate = encode_moe_gates_from_tensors(
+Xgen = generate_from_latent(
     model,
-    x_dict={"rna": to_dense(rna.X), "adt": to_dense(adt.X)},
+    n=5000,
+    target_mod="rna",
     device=device,
-    batch_size=1024,
-    modality_order=["rna", "adt"],
-    kind="effective_precision",  # recommended: contribution to fused posterior
-    return_logits=True,
+    z_source="prior",         # "prior" or provide z directly
+    return_mean=True,         # mean-like output
+    sample_likelihood=False,  # if True: sample from likelihood when supported
 )
-
-W = gate["weights"]             # (n_cells, n_modalities)
-mods = gate["modality_order"]   # ["rna","adt"]
-print("Gate means:", gate["per_modality_mean"])
+# Xgen shape: (5000, n_genes)
 ```
 
-Write gates to `.obs` and plot summaries:
+### B) Cell-type–conditioned generation via empirical latent neighborhoods
+
+This is the “no classifier head needed” option:
+
+1. encode a reference cohort
+2. pick cells with a given label
+3. sample around their latent distribution (Gaussian fit, or jitter)
 
 ```python
-write_gates_to_obs(rna, gates=W, modality_names=mods, prefix="moe_gate_")
+Z = rna.obsm["X_univi"]
+labels = rna.obs["celltype.l2"].to_numpy()
 
-plot_moe_gate_summary(
-    rna,
-    gate_prefix="moe_gate_",
-    groupby=None,
-    savepath="moe_gates_all_cells.png",
-    show=False,
-)
+# Fit a per-label Gaussian in latent space
+label_gauss = fit_label_latent_gaussians(Z, labels)
 
-plot_moe_gate_summary(
-    rna,
-    gate_prefix="moe_gate_",
-    groupby="celltype.l2",
-    kind="meanbar",
-    max_groups=25,
-    savepath="moe_gates_by_celltype.png",
-    show=False,
+# Sample latent points for a chosen label
+z_B = sample_latent_by_label(label_gauss, label="B cell", n=2000, random_state=0)
+
+# Decode to RNA space
+X_B = generate_from_latent(
+    model,
+    z=z_B,
+    target_mod="rna",
+    device=device,
+    return_mean=True,
 )
 ```
 
-You can also include gating summaries inside `evaluate_alignment(...)`:
+### C) Cluster-aware generation (no annotations required)
 
-```python
-metrics_with_gates = evaluate_alignment(
-    Z1=rna.obsm["X_univi"],
-    Z2=adt.obsm["X_univi"],
-    gate_weights=W,
-    gate_modality_order=mods,
-    gate_kind=gate.get("kind", None),
-    json_safe=True,
-)
-```
+If you don’t have labels, you can cluster `Z` (e.g., k-means), fit cluster Gaussians, then sample by cluster id.
+
+### D) Head-guided generation (optional, when a classifier head exists)
+
+If you trained a classification head, you can optionally *bias* latent selection toward a desired label by filtering or optimizing candidate z’s (implementation depends on your head setup). UniVI supports this workflow when the head is present, but the **label-agnostic Gaussian/cluster methods work everywhere**.
+
+---
+
+### Decoder output types (what UniVI handles for you)
+
+Decoders can return either:
+
+* a tensor (e.g. GaussianDecoder → `X_hat`)
+* or a dict (e.g. NB → `{"mu","log_theta"}`, ZINB → `{"mu","log_theta","logit_pi"}`, Poisson → `{"rate","log_rate"}`, Bernoulli/Categorical → `{"logits", "probs"}`)
+
+All post-training utilities above (`cross_modal_predict`, `denoise_*`, `generate_from_latent`, and reconstruction-eval helpers) are designed to **unwrap decoder outputs safely** and consistently return a sensible **mean-like** matrix for evaluation/plotting.
 
 ---
 

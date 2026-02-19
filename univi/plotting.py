@@ -1,5 +1,4 @@
 # univi/plotting.py
-
 from __future__ import annotations
 
 from typing import Dict, Optional, Sequence, List, Union, Tuple, Any, Mapping
@@ -7,7 +6,10 @@ from typing import Dict, Optional, Sequence, List, Union, Tuple, Any, Mapping
 import numpy as np
 import matplotlib.pyplot as plt
 import scanpy as sc
+import scipy.sparse as sp
 from anndata import AnnData
+
+from .evaluation import to_dense
 
 
 # =============================================================================
@@ -19,9 +21,6 @@ def set_style(
     *,
     rc: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """
-    Reasonable plotting defaults. You can override any rcParams via `rc`.
-    """
     import matplotlib as mpl
 
     base = 10.0 * float(font_scale)
@@ -48,15 +47,10 @@ def _is_categorical_obs(adata: AnnData, key: str) -> bool:
     if key not in adata.obs:
         return False
     s = adata.obs[key]
-    # pandas category OR object OR string dtype
     return (str(s.dtype) == "category") or (s.dtype == object) or (str(s.dtype).startswith("string"))
 
 
 def _ensure_scanpy_colors(adata: AnnData, key: str) -> None:
-    """
-    Ensure adata.uns[f"{key}_colors"] exists for categorical obs keys.
-    Scanpy usually creates this lazily the first time you plot.
-    """
     if key not in adata.obs:
         return
     if not _is_categorical_obs(adata, key):
@@ -64,11 +58,9 @@ def _ensure_scanpy_colors(adata: AnnData, key: str) -> None:
     color_key = f"{key}_colors"
     if color_key in adata.uns and adata.uns[color_key] is not None:
         return
-    # Trigger scanpy to assign colors without showing
     try:
         sc.pl.umap(adata, color=key, show=False)
     except Exception:
-        # If UMAP isn't computed yet, scanpy might choke; ignore and fall back later.
         pass
 
 
@@ -78,46 +70,33 @@ def _get_categories_and_colors(
     *,
     subset_topk: Optional[int] = None,
 ) -> Tuple[List[str], List[Any]]:
-    """
-    Recover categories and scanpy palette (if present) for a categorical obs key.
-
-    subset_topk:
-      If provided, restrict legend items to top-k categories by frequency
-      (helps reduce crowding).
-    """
     s = adata.obs[key].astype("category")
     cats_all = [str(c) for c in s.cat.categories]
 
-    # Optionally pick top-k by frequency
     if subset_topk is not None and subset_topk > 0 and len(cats_all) > subset_topk:
         vc = s.value_counts()
-        keep = [str(x) for x in vc.index[: int(subset_topk)]]
-        cats = keep
+        cats = [str(x) for x in vc.index[: int(subset_topk)]]
     else:
         cats = cats_all
 
     _ensure_scanpy_colors(adata, key)
-    color_key = f"{key}_colors"
-    colors_all = adata.uns.get(color_key, None)
+    colors_all = adata.uns.get(f"{key}_colors", None)
 
     if colors_all is None:
-        # fallback to matplotlib default cycle
-        colors = [None] * len(cats_all)
+        colors_all = [None] * len(cats_all)
     else:
-        colors = list(colors_all)
+        colors_all = list(colors_all)
 
-    # align color list length
-    if len(colors) < len(cats_all):
-        colors = (colors * (len(cats_all) // max(1, len(colors)) + 1))[: len(cats_all)]
+    if len(colors_all) < len(cats_all):
+        colors_all = (colors_all * (len(cats_all) // max(1, len(colors_all)) + 1))[: len(cats_all)]
     else:
-        colors = colors[: len(cats_all)]
+        colors_all = colors_all[: len(cats_all)]
 
-    # subset colors to chosen categories
     if cats != cats_all:
         idx = {lab: i for i, lab in enumerate(cats_all)}
-        colors = [colors[idx[lab]] for lab in cats]
+        colors = [colors_all[idx[lab]] for lab in cats]
     else:
-        colors = colors[: len(cats)]
+        colors = colors_all[: len(cats)]
 
     return cats, colors
 
@@ -136,39 +115,23 @@ def _add_outside_legend(
     loc: str = "center left",
     bbox_to_anchor: Tuple[float, float] = (1.02, 0.5),
 ) -> None:
-    """
-    Add a compact categorical legend outside the axis.
-
-    Skips legend if too many categories (max_items) unless subset_topk is set.
-    """
     if key not in adata.obs or not _is_categorical_obs(adata, key):
         return
 
     s = adata.obs[key].astype("category")
     n_cats = len(s.cat.categories)
 
-    # If too many items, either subset (if asked) or skip
     if n_cats > int(max_items) and (subset_topk is None or subset_topk <= 0):
         return
 
     cats_str, colors = _get_categories_and_colors(adata, key, subset_topk=subset_topk)
-
-    # If still too many after subsetting, bail
     if len(cats_str) > int(max_items):
         return
 
     handles = []
     for lab, col in zip(cats_str, colors):
-        h = plt.Line2D(
-            [0],
-            [0],
-            marker="o",
-            linestyle="",
-            markersize=6,
-            markerfacecolor=col,
-            markeredgecolor=col,
-            label=lab,
-        )
+        h = plt.Line2D([0], [0], marker="o", linestyle="", markersize=6,
+                       markerfacecolor=col, markeredgecolor=col, label=lab)
         handles.append(h)
 
     ax.legend(
@@ -221,15 +184,9 @@ def ensure_neighbors_umap(
     neighbors_key: Optional[str] = None,
     force: bool = False,
 ) -> None:
-    """
-    Ensure neighbors + UMAP exist using adata.obsm[rep_key].
-
-    - If `force=True`, recompute neighbors+umap even if they already exist.
-    """
     if rep_key not in adata.obsm:
         raise KeyError(f"Missing obsm[{rep_key!r}]. Available: {list(adata.obsm.keys())}")
 
-    # neighbors
     if neighbors_key is None:
         needs_neighbors = force or ("neighbors" not in adata.uns)
         if needs_neighbors:
@@ -239,7 +196,6 @@ def ensure_neighbors_umap(
         if needs_neighbors:
             sc.pp.neighbors(adata, use_rep=rep_key, n_neighbors=int(n_neighbors), key_added=str(neighbors_key))
 
-    # umap
     needs_umap = force or ("X_umap" not in adata.obsm)
     if needs_umap:
         if neighbors_key is None:
@@ -249,7 +205,7 @@ def ensure_neighbors_umap(
 
 
 # =============================================================================
-# New API (preferred)
+# UMAP plotting
 # =============================================================================
 def umap(
     adata: AnnData,
@@ -262,37 +218,24 @@ def umap(
     n_neighbors: int = 30,
     random_state: int = 0,
     force_recompute: bool = False,
-    # layout
     ncols: int = 2,
     panel_size: Tuple[float, float] = (4.2, 3.8),
     wspace: float = 0.25,
     hspace: float = 0.25,
-    # legend control
     legend: str = "outside",  # "outside", "right_margin", "on_data", "none"
     legend_ncols: int = 2,
     legend_fontsize: Optional[float] = None,
     legend_max_items: int = 40,
     legend_subset_topk: Optional[int] = None,
     legend_bbox_to_anchor: Tuple[float, float] = (1.02, 0.5),
-    # output
     savepath: Optional[str] = None,
     show: bool = True,
     close: Optional[bool] = None,
     return_fig: bool = False,
     bbox_inches: str = "tight",
     pad_inches: float = 0.02,
-    # passthrough for scanpy
     **scanpy_kwargs,
 ) -> Union[None, Tuple[plt.Figure, np.ndarray]]:
-    """
-    UMAP plotting that avoids huge crowded Scanpy legends by default.
-
-    legend:
-      - "outside": compact legend outside categorical panels (recommended)
-      - "right_margin": scanpy legend in right margin
-      - "on_data": scanpy legend on top of points
-      - "none": no legend
-    """
     ensure_neighbors_umap(
         adata,
         rep_key=obsm_key,
@@ -305,7 +248,6 @@ def umap(
     n_panels = max(1, len(colors)) if len(colors) > 0 else 1
 
     if close is None:
-        # Notebook-friendly: keep open if showing; otherwise close after save
         close = (not show) and (savepath is not None)
 
     ncols_eff = int(min(max(1, ncols), n_panels))
@@ -319,7 +261,6 @@ def umap(
         for c in range(ncols_eff):
             axes[r, c] = fig.add_subplot(gs[r, c])
 
-    # normalize titles
     if title is None:
         titles = [None] * n_panels
     elif isinstance(title, str):
@@ -329,37 +270,24 @@ def umap(
 
     layer_eff = None if (layer is None or layer == "X") else layer
 
-    # If no color requested, plot just the embedding (no coloring)
     if len(colors) == 0:
         ax = axes[0, 0]
-        sc.pl.umap(
-            adata,
-            color=None,
-            ax=ax,
-            show=False,
-            title=titles[0] if titles[0] is not None else "",
-            size=size,
-            **scanpy_kwargs,
-        )
-        # hide unused
+        sc.pl.umap(adata, color=None, ax=ax, show=False,
+                   title=titles[0] if titles[0] is not None else "",
+                   size=size, **scanpy_kwargs)
         for j in range(1, nrows_eff * ncols_eff):
             r, c = divmod(j, ncols_eff)
             axes[r, c].axis("off")
 
-        _finalize_figure(
-            fig, savepath=savepath, show=show, close=bool(close),
-            tight=False, bbox_inches=bbox_inches, pad_inches=pad_inches
-        )
-        if return_fig:
-            return fig, axes
-        return None
+        _finalize_figure(fig, savepath=savepath, show=show, close=bool(close),
+                         tight=False, bbox_inches=bbox_inches, pad_inches=pad_inches)
+        return (fig, axes) if return_fig else None
 
     for i, key in enumerate(colors):
         r, c = divmod(i, ncols_eff)
         ax = axes[r, c]
         is_cat = _is_categorical_obs(adata, str(key))
 
-        # Decide scanpy legend behavior
         if legend == "none":
             legend_loc = None
         elif legend == "on_data":
@@ -385,9 +313,7 @@ def umap(
 
         if legend == "outside" and is_cat:
             _add_outside_legend(
-                ax,
-                adata,
-                str(key),
+                ax, adata, str(key),
                 ncols=int(legend_ncols),
                 fontsize=legend_fontsize,
                 max_items=int(legend_max_items),
@@ -395,19 +321,13 @@ def umap(
                 bbox_to_anchor=legend_bbox_to_anchor,
             )
 
-    # turn off unused axes
     for j in range(len(colors), nrows_eff * ncols_eff):
         r, c = divmod(j, ncols_eff)
         axes[r, c].axis("off")
 
-    _finalize_figure(
-        fig, savepath=savepath, show=show, close=bool(close),
-        tight=False, bbox_inches=bbox_inches, pad_inches=pad_inches
-    )
-
-    if return_fig:
-        return fig, axes
-    return None
+    _finalize_figure(fig, savepath=savepath, show=show, close=bool(close),
+                     tight=False, bbox_inches=bbox_inches, pad_inches=pad_inches)
+    return (fig, axes) if return_fig else None
 
 
 def umap_by_modality(
@@ -416,23 +336,19 @@ def umap_by_modality(
     obsm_key: str = "X_univi",
     color: Union[str, Sequence[str]] = ("cell_type", "dataset"),
     layer: Optional[str] = None,
-    # layout
     ncols: int = 2,
     panel_size: Tuple[float, float] = (4.2, 3.8),
     wspace: float = 0.25,
     hspace: float = 0.25,
-    # legend
     legend: str = "outside",
     legend_ncols: int = 2,
     legend_fontsize: Optional[float] = None,
     legend_max_items: int = 40,
     legend_subset_topk: Optional[int] = None,
     legend_bbox_to_anchor: Tuple[float, float] = (1.02, 0.5),
-    # neighbors/umap
     n_neighbors: int = 30,
     random_state: int = 0,
     force_recompute: bool = False,
-    # output
     savepath: Optional[str] = None,
     show: bool = True,
     close: Optional[bool] = None,
@@ -441,10 +357,6 @@ def umap_by_modality(
     pad_inches: float = 0.02,
     **scanpy_kwargs,
 ) -> Union[None, Tuple[plt.Figure, np.ndarray]]:
-    """
-    Combine multiple AnnData objects for visualization while preserving obsm stacking.
-    Adds combined.obs["univi_modality"].
-    """
     mods = list(adata_dict.keys())
     if len(mods) == 0:
         raise ValueError("adata_dict is empty.")
@@ -465,7 +377,6 @@ def umap_by_modality(
     if len(obs_frames) == 1:
         obs_all = obs_frames[0]
     else:
-        # robust concat (pandas)
         import pandas as pd
         obs_all = pd.concat(obs_frames, axis=0)
 
@@ -501,23 +412,36 @@ def umap_by_modality(
 
 
 # =============================================================================
-# Raw vs Denoised comparisons
+# NEW: Convenience helpers for logits/probs + error plots
 # =============================================================================
-def compare_raw_vs_denoised_umap_features(
+def layer_sigmoid_inplace(adata: AnnData, src_layer: str, dst_layer: str) -> None:
+    """
+    Convert logits layer -> probs layer using sigmoid.
+    Works for dense or sparse; for sparse, applies sigmoid to stored data only.
+    """
+    X = adata.layers[src_layer]
+    if sp.issparse(X):
+        X2 = X.copy()
+        X2.data = 1.0 / (1.0 + np.exp(-X2.data))
+        adata.layers[dst_layer] = X2
+    else:
+        adata.layers[dst_layer] = 1.0 / (1.0 + np.exp(-np.asarray(X)))
+
+
+def compare_raw_vs_pred_umap_features(
     adata: AnnData,
     *,
     obsm_key: str = "X_univi",
     features: Sequence[str],
-    denoised_layer: Optional[str],
+    pred_layer: str,
     raw_layer: Optional[str] = None,
+    pred_is_logits: bool = False,
     n_neighbors: int = 30,
     random_state: int = 0,
     force_recompute: bool = False,
-    # layout
     panel_size: Tuple[float, float] = (4.0, 3.6),
     wspace: float = 0.15,
     hspace: float = 0.15,
-    # output
     savepath: Optional[str] = None,
     show: bool = True,
     close: Optional[bool] = None,
@@ -528,8 +452,10 @@ def compare_raw_vs_denoised_umap_features(
 ) -> Union[None, Tuple[plt.Figure, np.ndarray]]:
     """
     2-row grid:
-      row 1: raw overlay
-      row 2: denoised overlay
+      row 1: raw
+      row 2: predicted
+
+    pred_is_logits=True will plot sigmoid(pred_layer) by creating a temporary layer.
     """
     feats = list(features)
     if len(feats) == 0:
@@ -544,9 +470,15 @@ def compare_raw_vs_denoised_umap_features(
     )
 
     raw_layer_eff = None if (raw_layer is None or raw_layer == "X") else raw_layer
-    den_layer_eff = None if (denoised_layer is None or denoised_layer == "X") else denoised_layer
-    if den_layer_eff is not None and den_layer_eff not in adata.layers:
-        raise KeyError(f"denoised_layer={den_layer_eff!r} not found in adata.layers.")
+    if pred_layer not in adata.layers:
+        raise KeyError(f"pred_layer {pred_layer!r} not found in adata.layers.")
+
+    plot_pred_layer = pred_layer
+    tmp_layer = None
+    if pred_is_logits:
+        tmp_layer = f"__tmp_sigmoid__{pred_layer}"
+        layer_sigmoid_inplace(adata, pred_layer, tmp_layer)
+        plot_pred_layer = tmp_layer
 
     if close is None:
         close = (not show) and (savepath is not None)
@@ -562,208 +494,74 @@ def compare_raw_vs_denoised_umap_features(
 
     for j, f in enumerate(feats):
         sc.pl.umap(
-            adata,
-            color=f,
-            layer=raw_layer_eff,
-            ax=axes[0, j],
-            show=False,
-            title=f"{f} (raw)",
-            **scanpy_kwargs,
+            adata, color=f, layer=raw_layer_eff, ax=axes[0, j], show=False,
+            title=f"{f} (raw)", **scanpy_kwargs
         )
         sc.pl.umap(
-            adata,
-            color=f,
-            layer=den_layer_eff,
-            ax=axes[1, j],
-            show=False,
-            title=f"{f} (denoised)",
-            **scanpy_kwargs,
+            adata, color=f, layer=plot_pred_layer, ax=axes[1, j], show=False,
+            title=f"{f} (pred)", **scanpy_kwargs
         )
 
-    _finalize_figure(
-        fig, savepath=savepath, show=show, close=bool(close),
-        tight=False, bbox_inches=bbox_inches, pad_inches=pad_inches
-    )
+    _finalize_figure(fig, savepath=savepath, show=show, close=bool(close),
+                     tight=False, bbox_inches=bbox_inches, pad_inches=pad_inches)
 
-    if return_fig:
-        return fig, axes
-    return None
+    # cleanup temp layer
+    if tmp_layer is not None and tmp_layer in adata.layers:
+        try:
+            del adata.layers[tmp_layer]
+        except Exception:
+            pass
 
-
-# =============================================================================
-# Confusion matrix (no seaborn)
-# =============================================================================
-def plot_confusion_matrix(
-    cm: np.ndarray,
-    labels: Sequence[str],
-    *,
-    title: str = "Label transfer (source → target)",
-    normalize: Optional[str] = None,  # None, "true", "pred"
-    cmap: str = "viridis",
-    figsize: Tuple[float, float] = (7.0, 6.0),
-    savepath: Optional[str] = None,
-    rotate_xticks: int = 60,
-    vmin: Optional[float] = None,
-    vmax: Optional[float] = None,
-    show: bool = True,
-    close: Optional[bool] = None,
-    return_fig: bool = False,
-    bbox_inches: str = "tight",
-    pad_inches: float = 0.02,
-) -> Union[None, plt.Figure]:
-    cm = np.asarray(cm, dtype=float)
-    lab = np.asarray(list(labels))
-
-    if normalize is not None:
-        norm = str(normalize).lower().strip()
-        if norm == "true":
-            denom = cm.sum(axis=1, keepdims=True)
-            denom[denom == 0] = 1.0
-            cm = cm / denom
-        elif norm == "pred":
-            denom = cm.sum(axis=0, keepdims=True)
-            denom[denom == 0] = 1.0
-            cm = cm / denom
-        else:
-            raise ValueError("normalize must be one of None, 'true', 'pred'")
-
-    if close is None:
-        close = (not show) and (savepath is not None)
-
-    fig = plt.figure(figsize=figsize)
-    im = plt.imshow(cm, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
-    plt.colorbar(im, fraction=0.046, pad=0.04)
-
-    plt.xticks(np.arange(len(lab)), lab, rotation=rotate_xticks, ha="right")
-    plt.yticks(np.arange(len(lab)), lab)
-    plt.xlabel("Predicted")
-    plt.ylabel("True")
-    plt.title(title)
-    plt.tight_layout()
-
-    _finalize_figure(
-        fig, savepath=savepath, show=show, close=bool(close),
-        tight=False, bbox_inches=bbox_inches, pad_inches=pad_inches
-    )
-
-    if return_fig:
-        return fig
-    return None
+    return (fig, axes) if return_fig else None
 
 
-# =============================================================================
-# MoE gating helpers
-# =============================================================================
-def write_gates_to_obs(
+def plot_feature_scatter_observed_vs_pred(
     adata: AnnData,
-    gates: np.ndarray,
-    modality_names: Sequence[str],
+    feature: str,
     *,
-    prefix: str = "moe_gate_",
-    overwrite: bool = True,
-) -> None:
-    gates = np.asarray(gates)
-    if gates.ndim != 2:
-        raise ValueError(f"gates must be 2D (n_cells, n_mods). Got {gates.shape}")
-    if gates.shape[0] != adata.n_obs:
-        raise ValueError(f"gates n_cells={gates.shape[0]} != adata.n_obs={adata.n_obs}")
-    if gates.shape[1] != len(modality_names):
-        raise ValueError(f"gates n_mods={gates.shape[1]} != len(modality_names)={len(modality_names)}")
-
-    for j, m in enumerate(modality_names):
-        col = f"{prefix}{m}"
-        if (col in adata.obs) and (not overwrite):
-            continue
-        adata.obs[col] = gates[:, j].astype(np.float32)
-
-
-def plot_moe_gate_summary(
-    adata: AnnData,
-    *,
-    gate_prefix: str = "moe_gate_",
-    modality_names: Optional[Sequence[str]] = None,
-    groupby: Optional[str] = None,  # e.g. "celltype.l2"
-    kind: str = "box",              # "box" or "meanbar"
-    max_groups: int = 30,
-    figsize: Tuple[float, float] = (10.0, 4.5),
-    savepath: Optional[str] = None,
+    layer_obs: Optional[str] = None,
+    layer_pred: str,
+    pred_is_logits: bool = False,
+    max_points: int = 20000,
+    random_state: int = 0,
+    s: float = 4.0,
+    alpha: float = 0.3,
     title: Optional[str] = None,
     show: bool = True,
-    close: Optional[bool] = None,
-    return_fig: bool = False,
-    bbox_inches: str = "tight",
-    pad_inches: float = 0.02,
-) -> Union[None, plt.Figure]:
-    if modality_names is None:
-        modality_names = [c[len(gate_prefix):] for c in adata.obs.columns if str(c).startswith(gate_prefix)]
-        modality_names = list(modality_names)
+) -> plt.Figure:
+    """
+    Scatter: predicted vs observed for one feature.
+    """
+    j = adata.var_names.get_loc(feature)
 
-    cols = [f"{gate_prefix}{m}" for m in modality_names]
-    for c in cols:
-        if c not in adata.obs:
-            raise KeyError(f"Missing gate column {c!r} in adata.obs.")
+    Xo = adata.X if layer_obs is None else adata.layers[layer_obs]
+    Xp = adata.layers[layer_pred]
 
-    vals = adata.obs[cols].to_numpy(dtype=float)
+    yo = np.asarray(Xo[:, j].toarray()).ravel() if sp.issparse(Xo) else np.asarray(Xo[:, j]).ravel()
+    yp = np.asarray(Xp[:, j].toarray()).ravel() if sp.issparse(Xp) else np.asarray(Xp[:, j]).ravel()
 
-    if close is None:
-        close = (not show) and (savepath is not None)
+    if pred_is_logits:
+        yp = 1.0 / (1.0 + np.exp(-yp))
 
-    fig = plt.figure(figsize=figsize)
+    n = yo.shape[0]
+    if n > int(max_points):
+        rng = np.random.default_rng(int(random_state))
+        idx = rng.choice(n, size=int(max_points), replace=False)
+        yo, yp = yo[idx], yp[idx]
 
-    if groupby is None:
-        plt.boxplot([vals[:, i] for i in range(vals.shape[1])], labels=list(modality_names), showfliers=False)
-        plt.ylabel("Gate weight")
-        plt.title(title or "MoE gate weights (all cells)")
-        plt.tight_layout()
-        _finalize_figure(
-            fig, savepath=savepath, show=show, close=bool(close),
-            tight=False, bbox_inches=bbox_inches, pad_inches=pad_inches
-        )
-        return fig if return_fig else None
-
-    groups = np.asarray(adata.obs[groupby]).astype(str)
-    uniq = np.unique(groups)
-    if uniq.size > int(max_groups):
-        counts = {g: int((groups == g).sum()) for g in uniq}
-        uniq = np.array(sorted(uniq, key=lambda g: counts[g], reverse=True)[: int(max_groups)])
-
-    group_means = []
-    group_labels = []
-    for g in uniq:
-        mask = (groups == g)
-        if mask.sum() == 0:
-            continue
-        group_means.append(vals[mask].mean(axis=0))
-        group_labels.append(g)
-
-    G = np.vstack(group_means) if group_means else np.zeros((0, vals.shape[1]))
-
-    kind_eff = str(kind).lower().strip()
-    if kind_eff == "meanbar":
-        x = np.arange(len(group_labels))
-        width = 0.8 / max(1, len(modality_names))
-        for i, m in enumerate(modality_names):
-            plt.bar(x + i * width, G[:, i], width=width, label=str(m))
-        plt.xticks(x + 0.5 * (len(modality_names) - 1) * width, group_labels, rotation=60, ha="right")
-        plt.ylabel("Mean gate weight")
-        plt.title(title or f"MoE gate weights by {groupby}")
-        plt.legend(frameon=False, ncol=min(4, len(modality_names)))
-        plt.tight_layout()
-    else:
-        plt.boxplot([G[:, i] for i in range(G.shape[1])], labels=list(modality_names), showfliers=False)
-        plt.ylabel("Mean gate weight (per group)")
-        plt.title(title or f"MoE gate weights by {groupby}")
-        plt.tight_layout()
-
-    _finalize_figure(
-        fig, savepath=savepath, show=show, close=bool(close),
-        tight=False, bbox_inches=bbox_inches, pad_inches=pad_inches
-    )
-    return fig if return_fig else None
+    fig = plt.figure(figsize=(4.8, 4.2))
+    plt.scatter(yp, yo, s=float(s), alpha=float(alpha))
+    plt.xlabel("pred")
+    plt.ylabel("obs")
+    plt.title(title or feature)
+    plt.tight_layout()
+    if show:
+        plt.show()
+    return fig
 
 
 # =============================================================================
-# Backwards-compatible aliases (old API)
+# Backwards-compatible aliases
 # =============================================================================
 def umap_single_adata(
     adata_obj: AnnData,
@@ -776,7 +574,6 @@ def umap_single_adata(
     random_state: int = 0,
     title: Optional[str] = None,
     size: Optional[float] = None,
-    # new optional controls (won't break old calls)
     show: Optional[bool] = None,
     close: Optional[bool] = None,
     legend: str = "right_margin",
@@ -793,18 +590,9 @@ def umap_single_adata(
     return_fig: bool = False,
     **scanpy_kwargs,
 ) -> Union[None, Tuple[plt.Figure, np.ndarray]]:
-    """
-    OLD entrypoint kept alive.
-
-    Old default behavior:
-      - show=False
-      - if saving, close figure
-      - otherwise close figure too (historically)
-    """
     if show is None:
         show = False
     if close is None:
-        # historical behavior: always close (esp. because old version called plt.close())
         close = True
 
     color_list = list(color) if color is not None else []
@@ -851,13 +639,6 @@ def umap_by_modality_old(
     close: Optional[bool] = None,
     **kwargs,
 ) -> None:
-    """
-    Compatibility shim for *very old* umap_by_modality signature.
-
-    Old behavior:
-      - always added 'univi_modality' to colors
-      - show=False and close=True
-    """
     if show is None:
         show = False
     if close is None:
@@ -868,7 +649,6 @@ def umap_by_modality_old(
     else:
         color_list = list(color) + ["univi_modality"]
 
-    # ignore title/size in old implementation unless user passes them
     umap_by_modality(
         adata_dict,
         obsm_key=obsm_key,
@@ -880,7 +660,6 @@ def umap_by_modality_old(
         savepath=savepath,
         show=bool(show),
         close=bool(close),
-        # allow additional kwargs to influence layout/legend if provided
         **{k: v for k, v in kwargs.items() if k in {
             "ncols", "panel_size", "wspace", "hspace",
             "legend", "legend_ncols", "legend_fontsize", "legend_max_items",
