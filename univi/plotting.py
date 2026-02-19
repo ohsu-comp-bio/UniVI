@@ -1,7 +1,7 @@
 # univi/plotting.py
 from __future__ import annotations
 
-from typing import Dict, Optional, Sequence, List, Union, Tuple, Any
+from typing import Dict, Optional, Sequence, List, Union, Tuple, Any, Mapping
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -130,8 +130,13 @@ def _add_outside_legend(
 
     handles = []
     for lab, col in zip(cats_str, colors):
-        h = plt.Line2D([0], [0], marker="o", linestyle="", markersize=6,
-                       markerfacecolor=col, markeredgecolor=col, label=lab)
+        h = plt.Line2D(
+            [0], [0],
+            marker="o", linestyle="",
+            markersize=6,
+            markerfacecolor=col, markeredgecolor=col,
+            label=lab,
+        )
         handles.append(h)
 
     ax.legend(
@@ -272,9 +277,11 @@ def umap(
 
     if len(colors) == 0:
         ax = axes[0, 0]
-        sc.pl.umap(adata, color=None, ax=ax, show=False,
-                   title=titles[0] if titles[0] is not None else "",
-                   size=size, **scanpy_kwargs)
+        sc.pl.umap(
+            adata, color=None, ax=ax, show=False,
+            title=titles[0] if titles[0] is not None else "",
+            size=size, **scanpy_kwargs,
+        )
         for j in range(1, nrows_eff * ncols_eff):
             r, c = divmod(j, ncols_eff)
             axes[r, c].axis("off")
@@ -412,6 +419,201 @@ def umap_by_modality(
 
 
 # =============================================================================
+# README: Confusion matrix plot
+# =============================================================================
+def plot_confusion_matrix(
+    cm: np.ndarray,
+    *,
+    labels: Optional[Sequence[str]] = None,
+    title: Optional[str] = None,
+    normalize: Optional[str] = None,  # None | "true" | "pred" | "all"
+    figsize: Tuple[float, float] = (6.0, 5.4),
+    rotate_xticks: int = 90,
+    show: bool = True,
+    savepath: Optional[str] = None,
+    close: bool = True,
+) -> plt.Figure:
+    """
+    Simple matplotlib confusion matrix plot.
+
+    normalize:
+      - None: raw counts
+      - "true": rows sum to 1
+      - "pred": cols sum to 1
+      - "all": total sum to 1
+    """
+    M = np.asarray(cm, dtype=float)
+    if M.ndim != 2 or M.shape[0] != M.shape[1]:
+        raise ValueError(f"cm must be square, got shape={M.shape}")
+
+    if normalize is not None:
+        norm = str(normalize).lower().strip()
+        if norm == "true":
+            denom = M.sum(axis=1, keepdims=True) + 1e-12
+            M = M / denom
+        elif norm == "pred":
+            denom = M.sum(axis=0, keepdims=True) + 1e-12
+            M = M / denom
+        elif norm == "all":
+            M = M / (M.sum() + 1e-12)
+        else:
+            raise ValueError("normalize must be one of: None, 'true', 'pred', 'all'.")
+
+    n = M.shape[0]
+    if labels is None:
+        labels = [str(i) for i in range(n)]
+    else:
+        labels = [str(x) for x in labels]
+        if len(labels) != n:
+            raise ValueError(f"labels length must match cm size ({n}).")
+
+    fig = plt.figure(figsize=figsize)
+    ax = plt.gca()
+    im = ax.imshow(M, aspect="auto")
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    ax.set_xticks(np.arange(n))
+    ax.set_yticks(np.arange(n))
+    ax.set_xticklabels(labels, rotation=rotate_xticks, ha="right")
+    ax.set_yticklabels(labels)
+
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("True")
+    if title is not None:
+        ax.set_title(title)
+
+    plt.tight_layout()
+    if savepath is not None:
+        fig.savefig(savepath, dpi=300, bbox_inches="tight", pad_inches=0.02)
+    if show:
+        plt.show()
+    if close:
+        plt.close(fig)
+    return fig
+
+
+# =============================================================================
+# README: MoE gate helpers
+# =============================================================================
+def write_gates_to_obs(
+    adata: AnnData,
+    gates: np.ndarray,
+    *,
+    modality_names: Sequence[str],
+    gate_prefix: str = "gate",
+    gate_logits: Optional[np.ndarray] = None,
+    logits_prefix: Optional[str] = None,
+) -> None:
+    """
+    Write gate weights (and optionally gate logits) into adata.obs columns.
+
+    Columns:
+      gate_prefix_{mod}
+      (optional) {logits_prefix or gate_prefix+"_logit"}_{mod}
+    """
+    G = np.asarray(gates, dtype=np.float32)
+    mods = [str(m) for m in modality_names]
+    if G.ndim != 2:
+        raise ValueError(f"gates must be 2D, got shape={G.shape}")
+    if G.shape[0] != adata.n_obs:
+        raise ValueError(f"gates n_cells ({G.shape[0]}) != adata.n_obs ({adata.n_obs})")
+    if G.shape[1] != len(mods):
+        raise ValueError(f"gates n_mods ({G.shape[1]}) != len(modality_names) ({len(mods)})")
+
+    for j, m in enumerate(mods):
+        adata.obs[f"{gate_prefix}_{m}"] = G[:, j]
+
+    if gate_logits is not None:
+        L = np.asarray(gate_logits, dtype=np.float32)
+        if L.shape != G.shape:
+            raise ValueError(f"gate_logits shape {L.shape} must match gates shape {G.shape}")
+        lp = logits_prefix if logits_prefix is not None else f"{gate_prefix}_logit"
+        for j, m in enumerate(mods):
+            adata.obs[f"{lp}_{m}"] = L[:, j]
+
+
+def plot_moe_gate_summary(
+    adata: AnnData,
+    *,
+    gate_prefix: str = "gate",
+    modality_names: Optional[Sequence[str]] = None,
+    groupby: str = "celltype.l2",
+    agg: str = "mean",  # "mean" | "median"
+    figsize: Tuple[float, float] = (7.2, 4.2),
+    title: Optional[str] = None,
+    show: bool = True,
+    savepath: Optional[str] = None,
+    close: bool = True,
+) -> plt.Figure:
+    """
+    Heatmap summary of MoE gate usage by group.
+
+    Expects columns in adata.obs:
+      {gate_prefix}_{modality}
+    """
+    if groupby not in adata.obs:
+        raise KeyError(f"groupby={groupby!r} not in adata.obs")
+
+    if modality_names is None:
+        # infer from obs columns
+        modality_names = []
+        for c in adata.obs.columns:
+            if c.startswith(f"{gate_prefix}_") and not c.startswith(f"{gate_prefix}_logit"):
+                modality_names.append(c[len(gate_prefix) + 1 :])
+        modality_names = sorted(set(modality_names))
+    mods = [str(m) for m in modality_names]
+    if len(mods) == 0:
+        raise ValueError("Could not infer modality_names; pass modality_names explicitly.")
+
+    cols = [f"{gate_prefix}_{m}" for m in mods]
+    for c in cols:
+        if c not in adata.obs:
+            raise KeyError(f"Missing gate column {c!r} in adata.obs")
+
+    import pandas as pd
+    df = adata.obs[[groupby] + cols].copy()
+    df[groupby] = df[groupby].astype("category")
+
+    if str(agg).lower().strip() == "median":
+        mat = df.groupby(groupby)[cols].median()
+    else:
+        mat = df.groupby(groupby)[cols].mean()
+
+    # order by size
+    sizes = df[groupby].value_counts()
+    mat = mat.loc[sizes.index]
+
+    M = mat.to_numpy(dtype=float)
+    ylabels = [str(x) for x in mat.index]
+    xlabels = [str(x) for x in mods]
+
+    fig = plt.figure(figsize=figsize)
+    ax = plt.gca()
+    im = ax.imshow(M, aspect="auto")
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    ax.set_yticks(np.arange(len(ylabels)))
+    ax.set_yticklabels(ylabels)
+    ax.set_xticks(np.arange(len(xlabels)))
+    ax.set_xticklabels(xlabels, rotation=45, ha="right")
+
+    ax.set_xlabel("Modality")
+    ax.set_ylabel(groupby)
+    if title is None:
+        title = f"MoE gates by {groupby} ({agg})"
+    ax.set_title(title)
+
+    plt.tight_layout()
+    if savepath is not None:
+        fig.savefig(savepath, dpi=300, bbox_inches="tight", pad_inches=0.02)
+    if show:
+        plt.show()
+    if close:
+        plt.close(fig)
+    return fig
+
+
+# =============================================================================
 # Convenience helpers for logits/probs + error plots
 # =============================================================================
 def layer_sigmoid_inplace(adata: AnnData, src_layer: str, dst_layer: str) -> None:
@@ -505,7 +707,6 @@ def compare_raw_vs_pred_umap_features(
     _finalize_figure(fig, savepath=savepath, show=show, close=bool(close),
                      tight=False, bbox_inches=bbox_inches, pad_inches=pad_inches)
 
-    # cleanup temp layer
     if tmp_layer is not None and tmp_layer in adata.layers:
         try:
             del adata.layers[tmp_layer]
@@ -694,6 +895,106 @@ def plot_featurewise_reconstruction_scatter(
     return figs[feats[0]] if len(feats) == 1 else figs
 
 
+def plot_reconstruction_error_summary(
+    rep: Dict[str, Any],
+    *,
+    top_k: int = 25,
+    metric: str = "mse",  # "mse" | "pearson" | "auc"
+    sort: str = "worst",  # "worst" | "best"
+    title: Optional[str] = None,
+    show: bool = True,
+    savepath: Optional[str] = None,
+    close: bool = True,
+) -> plt.Figure:
+    """
+    README-friendly summary plot for reconstruction reports.
+
+    Expects `rep` from univi.evaluation.evaluate_cross_reconstruction(...), which includes:
+      - rep["summary"] (dict)
+      - rep["per_feature"] (dict of arrays)
+      - rep["feature_names"] (list[str])
+
+    Behavior
+    --------
+    - metric="mse": larger is worse (default)
+    - metric="pearson": smaller is worse if sort="worst", larger is better if sort="best"
+    - metric="auc": smaller is worse if sort="worst", larger is better if sort="best"
+    """
+    if "per_feature" not in rep or "feature_names" not in rep:
+        raise KeyError("rep must contain keys 'per_feature' and 'feature_names'.")
+
+    metric = str(metric).lower().strip()
+    sort = str(sort).lower().strip()
+    if sort not in {"worst", "best"}:
+        raise ValueError("sort must be 'worst' or 'best'.")
+
+    feat_names = [str(x) for x in rep["feature_names"]]
+
+    pf = rep["per_feature"]
+    if metric == "mse":
+        if "mse" not in pf:
+            raise KeyError("rep['per_feature'] must contain 'mse' for metric='mse'.")
+        vals = np.asarray(pf["mse"], dtype=float)
+        order = np.argsort(vals)[::-1] if sort == "worst" else np.argsort(vals)
+        xlabel = "MSE (higher = worse)"
+    elif metric == "pearson":
+        if "pearson" not in pf:
+            raise KeyError("rep['per_feature'] must contain 'pearson' for metric='pearson'.")
+        vals = np.asarray(pf["pearson"], dtype=float)
+        order = np.argsort(vals) if sort == "worst" else np.argsort(vals)[::-1]
+        xlabel = "Pearson r (higher = better)"
+    elif metric == "auc":
+        if "auc" not in pf:
+            raise KeyError("rep['per_feature'] must contain 'auc' for metric='auc'.")
+        vals = np.asarray(pf["auc"], dtype=float)
+        order = np.argsort(vals) if sort == "worst" else np.argsort(vals)[::-1]
+        xlabel = "AUC (higher = better)"
+    else:
+        raise ValueError("metric must be one of: 'mse', 'pearson', 'auc'.")
+
+    nan_mask = np.isnan(vals)
+    if nan_mask.any():
+        bad = np.where(nan_mask)[0]
+        order = np.concatenate([order[~nan_mask[order]], bad])
+
+    top_k = int(max(1, min(int(top_k), len(feat_names))))
+    idx = order[:top_k]
+
+    names_top = [feat_names[i] for i in idx]
+    vals_top = vals[idx]
+
+    fig = plt.figure(figsize=(7.6, max(3.2, 0.22 * top_k + 1.8)))
+    y = np.arange(top_k)[::-1]
+    plt.barh(y, vals_top[::-1])
+    plt.yticks(y, names_top[::-1], fontsize=9)
+
+    if title is None:
+        base = "Reconstruction summary"
+        if "summary" in rep and isinstance(rep["summary"], dict):
+            s = rep["summary"]
+            if metric == "mse" and "mse_mean" in s:
+                base += f" (mse_mean={s['mse_mean']:.4g}, r_mean={s.get('pearson_mean', float('nan')):.3g})"
+            elif metric == "pearson" and "pearson_mean" in s:
+                base += f" (r_mean={s['pearson_mean']:.3g})"
+            elif metric == "auc" and "auc_mean" in s:
+                base += f" (auc_mean={s['auc_mean']:.3g})"
+        title = base
+
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.tight_layout()
+
+    if savepath is not None:
+        fig.savefig(savepath, dpi=300, bbox_inches="tight", pad_inches=0.02)
+
+    if show:
+        plt.show()
+    if close:
+        plt.close(fig)
+
+    return fig
+
+
 # =============================================================================
 # Backwards-compatible aliases (older names)
 # =============================================================================
@@ -801,111 +1102,4 @@ def umap_by_modality_old(
             "return_fig", "bbox_inches", "pad_inches",
         }},
     )
-
-
-def plot_reconstruction_error_summary(
-    rep: Dict[str, Any],
-    *,
-    top_k: int = 25,
-    metric: str = "mse",  # "mse" | "pearson" | "auc"
-    sort: str = "worst",  # "worst" | "best"
-    title: Optional[str] = None,
-    show: bool = True,
-    savepath: Optional[str] = None,
-    close: bool = True,
-) -> plt.Figure:
-    """
-    README-friendly summary plot for reconstruction reports.
-
-    Expects `rep` from univi.evaluation.evaluate_cross_reconstruction(...), which includes:
-      - rep["summary"] (dict)
-      - rep["per_feature"] (dict of arrays)
-      - rep["feature_names"] (list[str])
-
-    Behavior
-    --------
-    - metric="mse": larger is worse (default)
-    - metric="pearson": smaller is worse if sort="worst", larger is better if sort="best"
-    - metric="auc": smaller is worse if sort="worst", larger is better if sort="best"
-    """
-    if "per_feature" not in rep or "feature_names" not in rep:
-        raise KeyError("rep must contain keys 'per_feature' and 'feature_names'.")
-
-    metric = str(metric).lower().strip()
-    sort = str(sort).lower().strip()
-    if sort not in {"worst", "best"}:
-        raise ValueError("sort must be 'worst' or 'best'.")
-
-    feat_names = [str(x) for x in rep["feature_names"]]
-
-    pf = rep["per_feature"]
-    if metric == "mse":
-        if "mse" not in pf:
-            raise KeyError("rep['per_feature'] must contain 'mse' for metric='mse'.")
-        vals = np.asarray(pf["mse"], dtype=float)
-        # worst = largest
-        order = np.argsort(vals)[::-1] if sort == "worst" else np.argsort(vals)
-        xlabel = "MSE (higher = worse)"
-    elif metric == "pearson":
-        if "pearson" not in pf:
-            raise KeyError("rep['per_feature'] must contain 'pearson' for metric='pearson'.")
-        vals = np.asarray(pf["pearson"], dtype=float)
-        # worst = smallest
-        order = np.argsort(vals) if sort == "worst" else np.argsort(vals)[::-1]
-        xlabel = "Pearson r (higher = better)"
-    elif metric == "auc":
-        if "auc" not in pf:
-            raise KeyError("rep['per_feature'] must contain 'auc' for metric='auc'.")
-        vals = np.asarray(pf["auc"], dtype=float)
-        # worst = smallest
-        order = np.argsort(vals) if sort == "worst" else np.argsort(vals)[::-1]
-        xlabel = "AUC (higher = better)"
-    else:
-        raise ValueError("metric must be one of: 'mse', 'pearson', 'auc'.")
-
-    # Handle NaNs gracefully (push NaNs to end)
-    nan_mask = np.isnan(vals)
-    if nan_mask.any():
-        good = np.where(~nan_mask)[0]
-        bad = np.where(nan_mask)[0]
-        order = np.concatenate([order[~nan_mask[order]], bad])
-
-    top_k = int(max(1, min(int(top_k), len(feat_names))))
-    idx = order[:top_k]
-
-    names_top = [feat_names[i] for i in idx]
-    vals_top = vals[idx]
-
-    # Plot: horizontal bar chart
-    fig = plt.figure(figsize=(7.6, max(3.2, 0.22 * top_k + 1.8)))
-    y = np.arange(top_k)[::-1]  # top item at top
-    plt.barh(y, vals_top[::-1])
-    plt.yticks(y, names_top[::-1], fontsize=9)
-
-    # Title: include summary numbers if present
-    if title is None:
-        base = "Reconstruction summary"
-        if "summary" in rep and isinstance(rep["summary"], dict):
-            s = rep["summary"]
-            if metric == "mse" and "mse_mean" in s:
-                base += f" (mse_mean={s['mse_mean']:.4g}, r_mean={s.get('pearson_mean', float('nan')):.3g})"
-            elif metric == "pearson" and "pearson_mean" in s:
-                base += f" (r_mean={s['pearson_mean']:.3g})"
-            elif metric == "auc" and "auc_mean" in s:
-                base += f" (auc_mean={s['auc_mean']:.3g})"
-        title = base
-
-    plt.title(title)
-    plt.xlabel(xlabel)
-    plt.tight_layout()
-
-    if savepath is not None:
-        fig.savefig(savepath, dpi=300, bbox_inches="tight", pad_inches=0.02)
-
-    if show:
-        plt.show()
-    if close:
-        plt.close(fig)
-
-    return fig
 

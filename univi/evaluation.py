@@ -1,7 +1,7 @@
 # univi/evaluation.py
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple, Union, Mapping, Sequence, List
+from typing import Any, Dict, Optional, Tuple, Union, Sequence, List, Mapping
 
 import numpy as np
 import scipy.sparse as sp
@@ -12,12 +12,8 @@ from sklearn.metrics import (
     accuracy_score,
     confusion_matrix,
     f1_score,
-    adjusted_rand_score,
-    normalized_mutual_info_score,
-    silhouette_score,
     roc_auc_score,
 )
-from sklearn.cluster import KMeans
 
 
 # =============================================================================
@@ -37,11 +33,18 @@ def _mean_sem(x: np.ndarray) -> Tuple[float, float]:
 
 
 def _json_safe(obj: Any) -> Any:
-    """Convert numpy scalars/arrays into JSON-safe python types."""
+    """Convert numpy/torch-ish objects into JSON-safe python types recursively."""
+    if torch.is_tensor(obj):
+        obj = obj.detach().cpu().numpy()
+
     if isinstance(obj, (np.floating, np.integer)):
         return obj.item()
     if isinstance(obj, np.ndarray):
         return obj.tolist()
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
     return obj
 
 
@@ -71,11 +74,11 @@ def _extract_tensor_from_decoder_output(
 
     prefer:
       - "auto" : pick sensible default by keys
-      - "mean" : pick mean-like for Gaussian/GaussianDiag
-      - "mu"   : pick mu-like for NB/ZINB
-      - "rate" : pick rate for Poisson
-      - "logits": pick logits for Bernoulli/Categorical etc.
-      - "probs": pick probs if available, otherwise compute if possible
+      - "mean" : mean-like for Gaussian
+      - "mu"   : mu-like for NB/ZINB
+      - "rate" : rate for Poisson
+      - "logits": logits for Bernoulli/Categorical etc.
+      - "probs": probs if available, otherwise compute if possible
 
     apply_link:
       - None
@@ -91,13 +94,10 @@ def _extract_tensor_from_decoder_output(
         if p in out and _is_tensor(out[p]):
             x = out[p]
         else:
-            key_order_auto = [
-                "mean", "mu", "rate", "probs", "logits", "log_rate", "logvar",
-            ]
             if p == "probs":
                 key_order = ["probs", "logits", "mean", "mu", "rate", "log_rate"]
             elif p == "logits":
-                key_order = ["logits", "mean", "mu", "rate", "log_rate", "probs"]
+                key_order = ["logits", "probs", "mean", "mu", "rate", "log_rate"]
             elif p == "mean":
                 key_order = ["mean", "mu", "rate", "probs", "logits", "log_rate"]
             elif p == "mu":
@@ -105,7 +105,7 @@ def _extract_tensor_from_decoder_output(
             elif p == "rate":
                 key_order = ["rate", "log_rate", "mu", "mean", "probs", "logits"]
             else:
-                key_order = key_order_auto
+                key_order = ["mean", "mu", "rate", "probs", "logits", "log_rate", "logvar"]
 
             x = None
             for k in key_order:
@@ -139,6 +139,24 @@ def _extract_tensor_from_decoder_output(
 
 def _to_numpy(x: torch.Tensor) -> np.ndarray:
     return x.detach().cpu().numpy()
+
+
+def _infer_model_modality_order(model, fallback: Sequence[str]) -> List[str]:
+    """
+    Best-effort inference of the modality order used by the model (for gates).
+    Falls back to the provided sequence.
+    """
+    # common: model.cfg.modalities is list[ModalityConfig(name=...)]
+    cfg = getattr(model, "cfg", None)
+    if cfg is not None and hasattr(cfg, "modalities"):
+        mods = getattr(cfg, "modalities")
+        try:
+            names = [getattr(m, "name") for m in mods]
+            if all(isinstance(x, str) and x for x in names):
+                return list(names)
+        except Exception:
+            pass
+    return list(map(str, list(fallback)))
 
 
 # =============================================================================
@@ -195,17 +213,19 @@ def compute_foscttm(
 
     n = int(Z1.shape[0])
     if n <= 1:
+        fos = np.zeros(n, dtype=np.float32)
+        m, s = _mean_sem(fos.astype(float))
         if return_sem and return_per_cell:
-            return 0.0, 0.0, np.zeros(n, dtype=np.float32)
+            return float(m), float(s), fos
         if return_sem:
-            return 0.0, 0.0
+            return float(m), float(s)
         if return_per_cell:
-            return 0.0, np.zeros(n, dtype=np.float32)
-        return 0.0
+            return float(m), fos
+        return float(m)
 
     metric = str(metric).lower().strip()
     if metric not in {"euclidean", "cosine"}:
-        raise ValueError("compute_foscttm currently supports metric in {'euclidean','cosine'}.")
+        raise ValueError("compute_foscttm supports metric in {'euclidean','cosine'}.")
 
     fos = np.empty(n, dtype=np.float32)
 
@@ -272,7 +292,7 @@ def compute_match_recall_at_k(
     k = int(max(1, min(int(k), n)))
     metric = str(metric).lower().strip()
     if metric not in {"euclidean", "cosine"}:
-        raise ValueError("compute_match_recall_at_k currently supports metric in {'euclidean','cosine'}.")
+        raise ValueError("compute_match_recall_at_k supports metric in {'euclidean','cosine'}.")
 
     hits = np.empty(n, dtype=np.float32)
 
@@ -311,7 +331,7 @@ def compute_match_recall_at_k(
 
 
 # =============================================================================
-# Modality mixing / entropy / distances
+# Modality mixing / entropy
 # =============================================================================
 def compute_modality_mixing(
     Z: np.ndarray,
@@ -328,13 +348,15 @@ def compute_modality_mixing(
 
     n = int(Z.shape[0])
     if n <= 1:
+        frac_other = np.zeros(n, dtype=np.float32)
+        m, s = _mean_sem(frac_other.astype(float))
         if return_sem and return_per_cell:
-            return 0.0, 0.0, np.zeros(n, dtype=np.float32)
+            return float(m), float(s), frac_other
         if return_sem:
-            return 0.0, 0.0
+            return float(m), float(s)
         if return_per_cell:
-            return 0.0, np.zeros(n, dtype=np.float32)
-        return 0.0
+            return float(m), frac_other
+        return float(m)
 
     metric = str(metric).lower().strip()
     k_eff = int(min(max(int(k), 1), n - 1))
@@ -420,46 +442,6 @@ def compute_modality_entropy(
     return float(m)
 
 
-def compute_same_vs_diff_neighbor_distances(
-    Z: np.ndarray,
-    modality_labels: np.ndarray,
-    k: int = 30,
-    metric: str = "euclidean",
-) -> Dict[str, Any]:
-    Z = np.asarray(Z, dtype=np.float32)
-    modality_labels = np.asarray(modality_labels)
-
-    n = int(Z.shape[0])
-    if n <= 1:
-        return {"same_mean": np.nan, "same_median": np.nan, "diff_mean": np.nan, "diff_median": np.nan, "k": int(k)}
-
-    k_eff = int(min(max(int(k), 1), n - 1))
-    nn = NearestNeighbors(n_neighbors=k_eff + 1, metric=str(metric))
-    nn.fit(Z)
-    dists, idx = nn.kneighbors(Z, return_distance=True)
-    dists, idx = dists[:, 1:], idx[:, 1:]
-
-    same = []
-    diff = []
-    for i in range(n):
-        neigh = idx[i]
-        dm = dists[i]
-        mask_same = modality_labels[neigh] == modality_labels[i]
-        same.append(dm[mask_same])
-        diff.append(dm[~mask_same])
-
-    same = np.concatenate(same) if len(same) else np.array([], dtype=np.float32)
-    diff = np.concatenate(diff) if len(diff) else np.array([], dtype=np.float32)
-
-    return {
-        "same_mean": float(np.mean(same)) if same.size else np.nan,
-        "same_median": float(np.median(same)) if same.size else np.nan,
-        "diff_mean": float(np.mean(diff)) if diff.size else np.nan,
-        "diff_median": float(np.median(diff)) if diff.size else np.nan,
-        "k": int(k_eff),
-    }
-
-
 # =============================================================================
 # Label transfer (kNN)
 # =============================================================================
@@ -540,14 +522,11 @@ def summarize_bidirectional_transfer(
         return_label_order=True, return_f1=True,
     )
 
-    worst_macro = float(min(f1_ab["macro_f1"], f1_ba["macro_f1"]))
-    worst_weighted = float(min(f1_ab["weighted_f1"], f1_ba["weighted_f1"]))
-
     return {
         "ab": {"acc": acc_ab, "f1": f1_ab, "cm": cm_ab, "order": order_ab, "pred": pred_ab},
         "ba": {"acc": acc_ba, "f1": f1_ba, "cm": cm_ba, "order": order_ba, "pred": pred_ba},
-        "worst_direction_macro_f1": worst_macro,
-        "worst_direction_weighted_f1": worst_weighted,
+        "worst_direction_macro_f1": float(min(f1_ab["macro_f1"], f1_ba["macro_f1"])),
+        "worst_direction_weighted_f1": float(min(f1_ab["weighted_f1"], f1_ba["weighted_f1"])),
         "k": int(k),
         "metric": str(metric),
     }
@@ -628,7 +607,7 @@ def reconstruction_metrics(
 
 
 # =============================================================================
-# Encoding + cross-modal prediction (robust decoder outputs)
+# Encoding (single modality) + cross-modal prediction
 # =============================================================================
 def encode_adata(
     model,
@@ -645,7 +624,7 @@ def encode_adata(
     Encode a *single* modality into z.
 
     latent:
-      - "moe_mean" / "moe_sample": fused MoE/PoE posterior
+      - "moe_mean" / "moe_sample": fused MoE/PoE posterior using only provided experts
       - "modality_mean" / "modality_sample": that modality posterior only
     """
     from .data import _get_matrix
@@ -709,7 +688,9 @@ def cross_modal_predict(
 ) -> np.ndarray:
     """
     Encode src_mod then decode tgt_mod.
-    Robust to decoder outputs that are dicts.
+
+    Robust to decoder outputs that are dicts (NB/ZINB/Poisson/Bernoulli/...).
+    Returns a mean-like matrix for evaluation/plotting.
     """
     from .data import _get_matrix
 
@@ -729,6 +710,8 @@ def cross_modal_predict(
 
             if use_moe and hasattr(model, "mixture_of_experts"):
                 mu_z, _ = model.mixture_of_experts(mu_dict, logvar_dict)
+            elif hasattr(model, "fuse_posteriors"):
+                mu_z, _ = model.fuse_posteriors(mu_dict, logvar_dict)
             else:
                 mu_z = mu_dict[src_mod]
 
@@ -747,7 +730,369 @@ def cross_modal_predict(
 
 
 # =============================================================================
-# NEW: Latent sampling / generation utilities (README-compatible)
+# README: fused encoding + gate retrieval (paired / multi-observed)
+# =============================================================================
+def encode_fused_adata_pair(
+    model,
+    adata_by_mod: Mapping[str, Any],
+    *,
+    device: str = "cpu",
+    batch_size: int = 1024,
+    use_mean: bool = True,
+    return_gates: bool = True,
+    return_gate_logits: bool = True,
+    write_to_adatas: bool = True,
+    fused_obsm_key: str = "X_univi_fused",
+    gate_prefix: str = "gate",
+    layer_by_mod: Optional[Mapping[str, Optional[str]]] = None,
+    X_key_by_mod: Optional[Mapping[str, str]] = None,
+) -> Dict[str, Any]:
+    """
+    Encode a fused posterior for paired/multi-observed cells.
+
+    Expected:
+      - all AnnData share identical obs_names in the same order.
+
+    Returns dict with keys:
+      - "Z_fused" (n_cells, latent_dim)
+      - "mu", "logvar"
+      - "gates" (or None)
+      - "gate_logits" (or None)
+      - "modality_order" (the order corresponding to columns of gates)
+    """
+    from .data import _get_matrix
+
+    mods_in = list(adata_by_mod.keys())
+    if len(mods_in) == 0:
+        raise ValueError("adata_by_mod is empty.")
+
+    # validate paired obs
+    first = adata_by_mod[mods_in[0]]
+    n = int(first.n_obs)
+    obs0 = list(first.obs_names)
+    for m in mods_in[1:]:
+        a = adata_by_mod[m]
+        if int(a.n_obs) != n:
+            raise ValueError(f"All modalities must have same n_obs. {mods_in[0]}={n}, {m}={a.n_obs}")
+        if list(a.obs_names) != obs0:
+            raise ValueError(f"All modalities must have identical obs_names order. Mismatch at {m!r}.")
+
+    # stable ordering for inputs; gates order should follow model order if possible
+    mods_sorted = sorted(mods_in)
+    modality_order = _infer_model_modality_order(model, fallback=mods_sorted)
+
+    # fetch matrices once (can be sparse); slice per batch
+    X_by_mod = {}
+    for m in mods_sorted:
+        layer = None if layer_by_mod is None else layer_by_mod.get(m, None)
+        xkey = "X" if X_key_by_mod is None else X_key_by_mod.get(m, "X")
+        X_by_mod[m] = _get_matrix(adata_by_mod[m], layer=layer, X_key=xkey)
+
+    dev = torch.device(device)
+    model.eval()
+
+    mu_chunks: List[np.ndarray] = []
+    lv_chunks: List[np.ndarray] = []
+    z_chunks: List[np.ndarray] = []
+    gates_chunks: List[np.ndarray] = []
+    glog_chunks: List[np.ndarray] = []
+
+    with torch.no_grad():
+        for start in range(0, n, int(batch_size)):
+            end = min(start + int(batch_size), n)
+
+            x_dict_t = {}
+            for m in mods_sorted:
+                Xm = X_by_mod[m][start:end]
+                Xm = Xm.toarray() if sp.issparse(Xm) else np.asarray(Xm)
+                x_dict_t[m] = torch.as_tensor(np.asarray(Xm), dtype=torch.float32, device=dev)
+
+            out = model.encode_fused(
+                x_dict_t,
+                use_mean=bool(use_mean),
+                return_gates=bool(return_gates),
+                return_gate_logits=bool(return_gate_logits),
+            )
+
+            # model.encode_fused returns:
+            #   mu, logvar, z  OR  mu, logvar, z, gates, gate_logits
+            if isinstance(out, (tuple, list)) and len(out) >= 3:
+                mu, logvar, z = out[0], out[1], out[2]
+                gates = out[3] if len(out) > 3 else None
+                gate_logits = out[4] if len(out) > 4 else None
+            else:
+                raise TypeError("encode_fused returned unexpected output type.")
+
+            mu_chunks.append(_to_numpy(mu))
+            lv_chunks.append(_to_numpy(logvar))
+            z_chunks.append(_to_numpy(z))
+
+            if gates is not None:
+                gates_chunks.append(_to_numpy(gates))
+            if gate_logits is not None:
+                glog_chunks.append(_to_numpy(gate_logits))
+
+    mu_all = np.vstack(mu_chunks) if mu_chunks else np.zeros((0, 0), dtype=np.float32)
+    lv_all = np.vstack(lv_chunks) if lv_chunks else np.zeros((0, 0), dtype=np.float32)
+    z_all = np.vstack(z_chunks) if z_chunks else np.zeros((0, 0), dtype=np.float32)
+    gates_all = np.vstack(gates_chunks) if gates_chunks else None
+    glog_all = np.vstack(glog_chunks) if glog_chunks else None
+
+    rep: Dict[str, Any] = {
+        "mu": mu_all,
+        "logvar": lv_all,
+        "Z_fused": z_all,
+        "gates": gates_all,
+        "gate_logits": glog_all,
+        "modality_order": modality_order,
+    }
+
+    if write_to_adatas:
+        for m in mods_in:
+            adata_by_mod[m].obsm[str(fused_obsm_key)] = z_all
+
+        # write gates into .obs columns if present
+        if gates_all is not None:
+            # gates columns correspond to model modality_order (best-effort)
+            for j, name in enumerate(modality_order[: gates_all.shape[1]]):
+                col = f"{gate_prefix}_{name}"
+                for m in mods_in:
+                    adata_by_mod[m].obs[col] = gates_all[:, j].astype(np.float32)
+
+        if glog_all is not None:
+            for j, name in enumerate(modality_order[: glog_all.shape[1]]):
+                col = f"{gate_prefix}_logit_{name}"
+                for m in mods_in:
+                    adata_by_mod[m].obs[col] = glog_all[:, j].astype(np.float32)
+
+    return rep
+
+
+# =============================================================================
+# README: denoising
+# =============================================================================
+def denoise_adata(
+    model,
+    adata,
+    *,
+    modality: str,
+    device: str = "cpu",
+    out_layer: str = "denoised_fused",
+    overwrite_X: bool = False,
+    batch_size: int = 512,
+    # If provided -> true multimodal denoising via fused latent:
+    adata_by_mod: Optional[Mapping[str, Any]] = None,
+    layer_by_mod: Optional[Mapping[str, Optional[str]]] = None,
+    X_key_by_mod: Optional[Mapping[str, str]] = None,
+    use_mean: bool = True,
+    # Decoder output handling:
+    decoder_prefer: str = "auto",
+    decoder_link: Optional[str] = None,
+) -> Any:
+    """
+    Denoise (reconstruct) a modality.
+
+    - If adata_by_mod is None: encodes only this modality, decodes this modality (self denoise).
+    - If adata_by_mod is provided: encodes a fused posterior from adata_by_mod (paired/multi-observed),
+      then decodes `modality` and writes into `adata.layers[out_layer]`.
+
+    Returns the modified `adata` (for chaining).
+    """
+    from .data import _get_matrix
+
+    dev = torch.device(device)
+    model.eval()
+
+    n = int(adata.n_obs)
+    preds: List[np.ndarray] = []
+
+    # fast path: fused denoise
+    if adata_by_mod is not None:
+        # ensure target modality exists in mapping (or at least decodable)
+        if modality not in adata_by_mod:
+            # still okay: you can decode a modality even if it wasn't observed,
+            # but we need paired obs_names source for fused encoding.
+            pass
+
+        fused = encode_fused_adata_pair(
+            model,
+            adata_by_mod=adata_by_mod,
+            device=device,
+            batch_size=batch_size,
+            use_mean=use_mean,
+            return_gates=False,
+            return_gate_logits=False,
+            write_to_adatas=False,
+            layer_by_mod=layer_by_mod,
+            X_key_by_mod=X_key_by_mod,
+        )
+        Z = np.asarray(fused["Z_fused"], dtype=np.float32)
+
+        with torch.no_grad():
+            for start in range(0, n, int(batch_size)):
+                end = min(start + int(batch_size), n)
+                zb = torch.as_tensor(Z[start:end], dtype=torch.float32, device=dev)
+                dec = model.decode_modalities(zb)
+                if modality not in dec:
+                    raise KeyError(f"Decoder did not return modality {modality!r}. Available: {list(dec.keys())}")
+                x = _extract_tensor_from_decoder_output(dec[modality], prefer=decoder_prefer, apply_link=decoder_link)
+                preds.append(_to_numpy(x))
+
+    # self denoise: encode only this modality
+    else:
+        X = _get_matrix(adata, layer=None, X_key="X")
+        X = X.toarray() if sp.issparse(X) else np.asarray(X)
+
+        with torch.no_grad():
+            for start in range(0, n, int(batch_size)):
+                end = min(start + int(batch_size), n)
+                xb = torch.as_tensor(np.asarray(X[start:end]), dtype=torch.float32, device=dev)
+                mu_dict, logvar_dict = model.encode_modalities({modality: xb})
+
+                # prefer fused/moe if model wants to do that with single expert? for self-denoise,
+                # simplest/most intuitive is the modality posterior mean.
+                mu = mu_dict[modality]
+                dec = model.decode_modalities(mu)
+                if modality not in dec:
+                    raise KeyError(f"Decoder did not return modality {modality!r}. Available: {list(dec.keys())}")
+                x = _extract_tensor_from_decoder_output(dec[modality], prefer=decoder_prefer, apply_link=decoder_link)
+                preds.append(_to_numpy(x))
+
+    Xhat = np.vstack(preds) if preds else np.zeros((0, 0), dtype=np.float32)
+
+    if overwrite_X:
+        adata.X = Xhat
+    else:
+        adata.layers[str(out_layer)] = Xhat
+
+    return adata
+
+
+def denoise_from_multimodal(
+    model,
+    adata,
+    *,
+    modality: str,
+    adata_by_mod: Mapping[str, Any],
+    device: str = "cpu",
+    out_layer: str = "denoised_fused",
+    overwrite_X: bool = False,
+    batch_size: int = 512,
+    layer_by_mod: Optional[Mapping[str, Optional[str]]] = None,
+    X_key_by_mod: Optional[Mapping[str, str]] = None,
+    use_mean: bool = True,
+    decoder_prefer: str = "auto",
+    decoder_link: Optional[str] = None,
+) -> Any:
+    """README alias: true multimodal denoising via fused latent."""
+    return denoise_adata(
+        model,
+        adata=adata,
+        modality=modality,
+        device=device,
+        out_layer=out_layer,
+        overwrite_X=overwrite_X,
+        batch_size=batch_size,
+        adata_by_mod=adata_by_mod,
+        layer_by_mod=layer_by_mod,
+        X_key_by_mod=X_key_by_mod,
+        use_mean=use_mean,
+        decoder_prefer=decoder_prefer,
+        decoder_link=decoder_link,
+    )
+
+
+# =============================================================================
+# README: alignment evaluation (one-call)
+# =============================================================================
+def evaluate_alignment(
+    *,
+    Z1: np.ndarray,
+    Z2: np.ndarray,
+    metric: str = "euclidean",
+    recall_ks: Sequence[int] = (1, 5, 10),
+    k_mixing: int = 20,
+    k_entropy: int = 30,
+    labels_source: Optional[np.ndarray] = None,
+    labels_target: Optional[np.ndarray] = None,
+    compute_bidirectional_transfer: bool = True,
+    k_transfer: int = 15,
+    json_safe: bool = True,
+    block_size: int = 512,
+) -> Dict[str, Any]:
+    """
+    README-facing alignment evaluation.
+
+    Computes:
+      - FOSCTTM (mean + SEM)
+      - Recall@k (mean + SEM) for each k
+      - modality mixing + entropy in the *stacked* space
+      - label transfer (source->target), and optionally bidirectional summary
+
+    Returns a flat dict with stable keys used by README examples.
+    """
+    Z1 = np.asarray(Z1, dtype=np.float32)
+    Z2 = np.asarray(Z2, dtype=np.float32)
+
+    out: Dict[str, Any] = {
+        "metric": str(metric),
+        "n_cells": int(Z1.shape[0]),
+    }
+
+    fos_m, fos_s = compute_foscttm(Z1, Z2, metric=metric, block_size=block_size, return_sem=True)
+    out["foscttm_mean"] = float(fos_m)
+    out["foscttm_sem"] = float(fos_s)
+
+    recalls = {}
+    for k in recall_ks:
+        rm, rs = compute_match_recall_at_k(Z1, Z2, k=int(k), metric=metric, block_size=block_size, return_sem=True)
+        recalls[int(k)] = {"mean": float(rm), "sem": float(rs)}
+    out["recall_at_k"] = recalls
+
+    # modality mixing/entropy computed on stacked space
+    Z_stack = np.vstack([Z1, Z2])
+    mod_labels = np.array(["mod1"] * Z1.shape[0] + ["mod2"] * Z2.shape[0], dtype=object)
+
+    mix_m, mix_s = compute_modality_mixing(Z_stack, mod_labels, k=int(k_mixing), metric=metric, return_sem=True)
+    ent_m, ent_s = compute_modality_entropy(Z_stack, mod_labels, k=int(k_entropy), metric=metric, return_sem=True)
+    out["modality_mixing_mean"] = float(mix_m)
+    out["modality_mixing_sem"] = float(mix_s)
+    out["modality_entropy_mean"] = float(ent_m)
+    out["modality_entropy_sem"] = float(ent_s)
+    out["k_mixing"] = int(k_mixing)
+    out["k_entropy"] = int(k_entropy)
+
+    # label transfer
+    if labels_source is not None and labels_target is not None:
+        pred, acc, cm, order, f1d = label_transfer_knn(
+            Z_source=Z1,
+            labels_source=np.asarray(labels_source),
+            Z_target=Z2,
+            labels_target=np.asarray(labels_target),
+            k=int(k_transfer),
+            metric=str(metric),
+            return_label_order=True,
+            return_f1=True,
+        )
+        out["label_transfer_acc"] = float(acc)
+        out["label_transfer_cm"] = cm
+        out["label_transfer_label_order"] = order
+        out["label_transfer_macro_f1"] = float(f1d["macro_f1"])
+        out["label_transfer_weighted_f1"] = float(f1d["weighted_f1"])
+        out["label_transfer_pred"] = pred
+        out["k_transfer"] = int(k_transfer)
+
+        if compute_bidirectional_transfer:
+            bi = summarize_bidirectional_transfer(Z1, np.asarray(labels_source), Z2, np.asarray(labels_target), k=int(k_transfer), metric=str(metric))
+            out["bidirectional_transfer"] = bi
+            out["worst_direction_macro_f1"] = float(bi["worst_direction_macro_f1"])
+            out["worst_direction_weighted_f1"] = float(bi["worst_direction_weighted_f1"])
+
+    return _json_safe(out) if json_safe else out
+
+
+# =============================================================================
+# README: latent sampling / generation utilities
 # =============================================================================
 def fit_latent_gaussians_by_label(
     Z: np.ndarray,
@@ -833,8 +1178,8 @@ def generate_from_latent(
     z_source: str = "prior",
     z: Optional[np.ndarray] = None,
     batch_size: int = 512,
-    return_mean: bool = True,
-    sample_likelihood: bool = False,
+    return_mean: bool = True,        # kept for API parity
+    sample_likelihood: bool = False, # accepted but not implemented
     decoder_prefer: str = "auto",
     decoder_link: Optional[str] = None,
     random_state: int = 0,
@@ -842,16 +1187,15 @@ def generate_from_latent(
     """
     README-compatible generator.
 
-    Examples
-    --------
-    Xgen = generate_from_latent(model, n=5000, target_mod="rna", z_source="prior")
-
     Notes
     -----
     - If z is None, samples z ~ N(0, I) when z_source == "prior".
     - return_mean is kept for API parity (decoders return mean-like outputs).
     - sample_likelihood is accepted but not implemented here.
     """
+    if not return_mean:
+        # decoders here return mean-like outputs; we keep the knob but warn by behavior.
+        pass
     if sample_likelihood:
         raise NotImplementedError("sample_likelihood=True is not implemented yet in generate_from_latent().")
 
@@ -887,7 +1231,7 @@ def generate_from_latent(
 
 
 # =============================================================================
-# NEW: Evaluate reconstruction / imputation error against ground truth (README-compatible)
+# README: Evaluate reconstruction / imputation error against ground truth
 # =============================================================================
 def evaluate_prediction_against_adata(
     adata_true,
@@ -941,15 +1285,13 @@ def evaluate_prediction_against_adata(
     met["feature_names"] = feat_names_out
 
     # README convenience: "summary" + "per_feature"
-    if kind == "binary":
+    if str(kind).lower().strip() == "binary":
         met["summary"] = {
             "auc_mean": float(met["auc_mean"]),
             "auc_median": float(met["auc_median"]),
             "per_cell_mean": float(met["per_cell_mean"]),
         }
-        met["per_feature"] = {
-            "auc": np.asarray(met["auc_per_feature"]),
-        }
+        met["per_feature"] = {"auc": np.asarray(met["auc_per_feature"])}
     else:
         met["summary"] = {
             "mse_mean": float(met["mse_mean"]),
@@ -994,8 +1336,6 @@ def evaluate_cross_reconstruction(
           - "summary"
           - "per_feature"
           - "X_true", "X_pred", "feature_names" (for plotting)
-
-    This is the function README calls.
     """
     X_pred = cross_modal_predict(
         model,
@@ -1020,7 +1360,6 @@ def evaluate_cross_reconstruction(
         feature_names=feature_names,
     )
 
-    # Add a bit of metadata to help users/debugging
     rep["src_mod"] = str(src_mod)
     rep["tgt_mod"] = str(tgt_mod)
     rep["kind"] = str(kind)
@@ -1033,7 +1372,7 @@ def evaluate_cross_reconstruction(
 
 
 # =============================================================================
-# Backwards/README-compatible aliases you referenced
+# Backwards/README-compatible aliases
 # =============================================================================
 def fit_label_latent_gaussians(
     Z: np.ndarray,
@@ -1053,4 +1392,5 @@ def sample_latent_by_label(
     random_state: int = 0,
 ) -> np.ndarray:
     return sample_latent_from_label_gaussians(gauss, label, n, random_state=random_state)
+
 

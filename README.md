@@ -1,17 +1,17 @@
 # UniVI
 
-[![PyPI version](https://img.shields.io/pypi/v/univi?v=0.4.3)](https://pypi.org/project/univi/)
+[![PyPI version](https://img.shields.io/pypi/v/univi?v=0.4.4)](https://pypi.org/project/univi/)
 [![pypi downloads](https://img.shields.io/pepy/dt/univi?label=pypi%20downloads)](https://pepy.tech/project/univi)
 [![Conda version](https://img.shields.io/conda/vn/conda-forge/univi?cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
 [![conda-forge downloads](https://img.shields.io/conda/dn/conda-forge/univi?label=conda-forge%20downloads\&cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.4.3)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.4.4)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.3/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.4/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.3/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.4/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
@@ -152,47 +152,58 @@ val_loader   = DataLoader(Subset(dataset, val_idx),   batch_size=256, shuffle=Fa
 
 ```python
 univi_cfg = UniVIConfig(
-    latent_dim=40,
-    beta=1.5,
-    gamma=2.5,
-    encoder_dropout=0.1,
-    decoder_dropout=0.0,
+    latent_dim=30,
+    beta=1.15,
+    gamma=3.25,
+    encoder_dropout=0.10,
+    decoder_dropout=0.05,
+    kl_anneal_start=75,
+    kl_anneal_end=150,
+    align_anneal_start=100,
+    align_anneal_end=175,
     modalities=[
-        # likelihood could also be: "nb", "zinb", "poisson", "mse", etc.
-        # depending on closest modality input distribution
+        # likelihood could also be: "mse", "nb", "zinb", "poisson", 
+        # "bernoulli", etc. depending on closest modality input distribution 
+        # and experiment goals (e.g., "bernoulli" for raw binarized ATAC peaks, 
+        # "nb" or "zinb" for raw scRNA-seq count inputs, "gaussian" for most 
+        # normalized/scaled feature inputs, like log-normed RNA, CLR-normed ADT, 
+        # TF-IDF/LSI normed ATAC features)
         ModalityConfig(
-            "rna",
-            rna.n_vars,
-            [512, 256, 128],
-            [128, 256, 512],
+            name="rna",
+            input_dim=rna_tr.n_vars,
+            encoder_hidden=[1024, 512, 256, 128],
+            decoder_hidden=[128, 256, 512, 1024],
             likelihood="gaussian",
         ),
         ModalityConfig(
-            "adt",
-            adt.n_vars,
-            [128, 64],
-            [64, 128],
+            name="adt",
+            input_dim=adt_tr.n_vars,
+            encoder_hidden=[256, 128, 64],
+            decoder_hidden=[64, 128, 256],
             likelihood="gaussian",
         ),
     ],
 )
 
 train_cfg = TrainingConfig(
-    n_epochs=1000,
-    batch_size=256,
+    n_epochs=5000,
+    batch_size=batch_size,
     lr=1e-3,
     weight_decay=1e-4,
     device=device,
-    log_every=20,
+    log_every=25,
     grad_clip=5.0,
+    num_workers=0,
+    seed=42,
     early_stopping=True,
-    best_epoch_warmup=50,  # in UniVI v0.4.1+
-    patience=50,
+    best_epoch_warmup=75,
+    patience=50,                  # in UniVI v0.4.1+
+    min_delta=0.0,
 )
 
 model = UniVIMultiModalVAE(
     univi_cfg,
-    loss_mode="v1",                # or "v2"
+    loss_mode="v1",               # or "v2" - "v1" recommended (used in the manuscript)
     v1_recon="avg",
     normalize_v1_terms=True,
 ).to(device)
