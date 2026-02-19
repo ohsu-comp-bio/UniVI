@@ -35,8 +35,8 @@ It’s designed for experiments like:
 
 If you use UniVI in your work, please cite:
 
-> Ashford AJ, Enright T, Somers J, Nikolova O, Demir E.
-> **Unifying multimodal single-cell data with a mixture-of-experts β-variational autoencoder framework.**
+> Ashford AJ, Enright T, Somers J, Nikolova O, Demir E.  
+> **Unifying multimodal single-cell data with a mixture-of-experts β-variational autoencoder framework.**  
 > *bioRxiv* (2025; updated 2026). doi: [10.1101/2025.02.28.640429](https://doi.org/10.1101/2025.02.28.640429)
 
 ```bibtex
@@ -49,7 +49,7 @@ If you use UniVI in your work, please cite:
   url     = {https://www.biorxiv.org/content/10.1101/2025.02.28.640429},
   note    = {Preprint (updated 2026)}
 }
-```
+````
 
 ---
 
@@ -98,7 +98,7 @@ You can keep multiple representations around:
 
 * `.layers["counts"]` = raw
 * `.X` = model input (e.g., log1p normalized RNA, CLR ADT, LSI ATAC, etc.)
-* `.layers["denoised_*"]` = UniVI outputs
+* `.layers["denoised_*"]` / `.layers["imputed_*"]` = UniVI outputs
 
 ---
 
@@ -186,7 +186,7 @@ train_cfg = TrainingConfig(
     log_every=20,
     grad_clip=5.0,
     early_stopping=True,
-    best_epoch_warmup=50,         # in UniVI v0.4.1+
+    best_epoch_warmup=50,  # in UniVI v0.4.1+
     patience=50,
 )
 
@@ -212,10 +212,10 @@ trainer.fit()
 
 ## After training: evaluation + plotting workflows
 
-UniVI ships two “post-training workhorse” modules:
+UniVI ships two post-training workhorse modules:
 
 * `univi.evaluation`: encoding, denoising, cross-modal prediction, alignment metrics, optional MoE gate extraction
-* `univi.plotting`: scanpy/matplotlib utilities (UMAPs, raw-vs-denoised overlays, confusion matrices, MoE gate plots)
+* `univi.plotting`: Scanpy/Matplotlib utilities (UMAP panels with compact legends, modality-stacked UMAPs, raw-vs-denoised overlays, confusion matrices, MoE gate plots)
 
 ### 0) Imports + plotting defaults
 
@@ -233,7 +233,7 @@ from univi.evaluation import (
 )
 from univi.plotting import (
     set_style,
-    umap_single_adata,
+    umap,
     umap_by_modality,
     compare_raw_vs_denoised_umap_features,
     plot_confusion_matrix,
@@ -257,10 +257,10 @@ Z_rna = encode_adata(
     adata=rna,
     modality="rna",
     device=device,
-    layer=None,        # reads adata.X by default; set layer="counts" if your encoder expects counts
+    layer=None,         # reads adata.X by default; set layer="counts" if your encoder expects counts
     X_key="X",
     batch_size=1024,
-    latent="moe_mean", # {"moe_mean","moe_sample","modality_mean","modality_sample"}
+    latent="moe_mean",  # {"moe_mean","moe_sample","modality_mean","modality_sample"}
     random_state=0,
 )
 rna.obsm["X_univi"] = Z_rna
@@ -279,21 +279,27 @@ Z_adt = encode_adata(
 adt.obsm["X_univi"] = Z_adt
 ```
 
-Plot UMAPs from the stored embedding:
+Plot UMAPs from the stored embedding (new API; compact legends by default):
 
 ```python
-umap_single_adata(
+umap(
     rna,
     obsm_key="X_univi",
     color=["celltype.l2", "batch"],
+    legend="outside",           # "outside" (recommended), "right_margin", "on_data", "none"
+    legend_subset_topk=25,      # optional: show top-k categories by frequency in legend
     savepath="umap_rna_univi.png",
+    show=False,
 )
 
-umap_single_adata(
+umap(
     adt,
     obsm_key="X_univi",
     color=["celltype.l2", "batch"],
+    legend="outside",
+    legend_subset_topk=25,
     savepath="umap_adt_univi.png",
+    show=False,
 )
 ```
 
@@ -301,14 +307,16 @@ umap_single_adata(
 
 ### 2) Plot modality mixing / co-embedding across modalities
 
-If each modality AnnData has `.obsm["X_univi"]`, you can concatenate and color by modality:
+If each modality AnnData has `.obsm["X_univi"]`, you can concatenate and color by modality via `univi_modality`:
 
 ```python
 umap_by_modality(
     {"rna": rna, "adt": adt},
     obsm_key="X_univi",
-    color="celltype.l2",
+    color=["celltype.l2", "univi_modality"],
+    legend="outside",
     savepath="umap_rna_adt_by_modality.png",
+    show=False,
 )
 ```
 
@@ -340,18 +348,17 @@ adt.layers["imputed_from_rna"] = adt_hat_from_rna
 
 If you have multiple observed modalities for the same cells, you can denoise through the fused latent.
 
+```python
+def to_dense(X):
+    return X.toarray() if sp.issparse(X) else np.asarray(X)
+```
+
 **Option A — provide tensors directly (`denoise_from_multimodal`)**:
 
 ```python
-X_rna = rna.X
-X_adt = adt.X
-
-X_rna = X_rna.toarray() if sp.issparse(X_rna) else np.asarray(X_rna)
-X_adt = X_adt.toarray() if sp.issparse(X_adt) else np.asarray(X_adt)
-
 rna_denoised = denoise_from_multimodal(
     model,
-    x_dict={"rna": X_rna, "adt": X_adt},
+    x_dict={"rna": to_dense(rna.X), "adt": to_dense(adt.X)},
     target_mod="rna",
     device=device,
     batch_size=512,
@@ -393,6 +400,7 @@ compare_raw_vs_denoised_umap_features(
     raw_layer=None,                      # None -> adata.X
     denoised_layer="denoised_fused",     # must exist in adata.layers
     savepath="umap_raw_vs_denoised_markers.png",
+    show=False,
 )
 ```
 
@@ -400,7 +408,7 @@ compare_raw_vs_denoised_umap_features(
 
 ### 6) Alignment evaluation (FOSCTTM, Recall@k, mixing/entropy, label transfer)
 
-`evaluate_alignment(...)` is meant to return a single **figure-ready metrics dict**.
+`evaluate_alignment(...)` returns a figure-ready metrics dict:
 
 ```python
 metrics = evaluate_alignment(
@@ -424,18 +432,16 @@ print("Entropy:", metrics["modality_entropy"], "+/-", metrics["modality_entropy_
 print("Worst-direction macro-F1:", metrics["bidirectional_transfer"]["worst_direction_macro_f1"])
 ```
 
-Plot the label-transfer confusion matrix:
+Plot the label-transfer confusion matrix (no seaborn):
 
 ```python
-cm = np.asarray(metrics["label_transfer_cm"])
-labels = np.asarray(metrics["label_transfer_label_order"])
-
 plot_confusion_matrix(
-    cm,
-    labels=labels,
+    np.asarray(metrics["label_transfer_cm"]),
+    labels=np.asarray(metrics["label_transfer_label_order"]),
     title="Label transfer (RNA → ADT)",
     normalize="true",                     # None / "true" / "pred"
     savepath="label_transfer_confusion.png",
+    show=False,
 )
 ```
 
@@ -446,21 +452,19 @@ plot_confusion_matrix(
 If your model supports `model.mixture_of_experts(..., return_weights=True)`, you can inspect per-cell modality reliance.
 
 ```python
-X_rna = rna.X
-X_adt = adt.X
-X_rna = X_rna.toarray() if sp.issparse(X_rna) else np.asarray(X_rna)
-X_adt = X_adt.toarray() if sp.issparse(X_adt) else np.asarray(X_adt)
-
 gate = encode_moe_gates_from_tensors(
     model,
-    x_dict={"rna": X_rna, "adt": X_adt},
+    x_dict={"rna": to_dense(rna.X), "adt": to_dense(adt.X)},
     device=device,
     batch_size=1024,
     modality_order=["rna", "adt"],
+    kind="effective_precision",  # recommended: contribution to fused posterior
+    return_logits=True,
 )
 
-W = gate["weights"]           # (n_cells, n_modalities)
-mods = gate["modality_order"] # ["rna","adt"]
+W = gate["weights"]             # (n_cells, n_modalities)
+mods = gate["modality_order"]   # ["rna","adt"]
+print("Gate means:", gate["per_modality_mean"])
 ```
 
 Write gates to `.obs` and plot summaries:
@@ -473,6 +477,7 @@ plot_moe_gate_summary(
     gate_prefix="moe_gate_",
     groupby=None,
     savepath="moe_gates_all_cells.png",
+    show=False,
 )
 
 plot_moe_gate_summary(
@@ -482,6 +487,7 @@ plot_moe_gate_summary(
     kind="meanbar",
     max_groups=25,
     savepath="moe_gates_by_celltype.png",
+    show=False,
 )
 ```
 
@@ -493,6 +499,7 @@ metrics_with_gates = evaluate_alignment(
     Z2=adt.obsm["X_univi"],
     gate_weights=W,
     gate_modality_order=mods,
+    gate_kind=gate.get("kind", None),
     json_safe=True,
 )
 ```
@@ -543,7 +550,7 @@ UniVI/
 │   └── univi_env.yml                      # Recommended env (CUDA-friendly)
 ├── data/                                  # Small example data notes (datasets are typically external)
 │   └── README.md                          # Notes on data sources / formats
-├── notebooks/                             # Jupyter notebook analyses to reproduce every figure from our revised manuscript (in progress for Genome Research)
+├── notebooks/                             # Jupyter notebook analyses to reproduce figures from our revised manuscript (in progress for Genome Research)
 │   ├── UniVI_manuscript_GR-Figure__2__CITE_paired.ipynb
 │   ├── UniVI_manuscript_GR-Figure__3__CITE_paired_biological_latent.ipynb
 │   ├── UniVI_manuscript_GR-Figure__4__Multiome_paired.ipynb
@@ -630,3 +637,4 @@ MIT License — see `LICENSE`.
   * UniVI version: `python -c "import univi; print(univi.__version__)"`
   * a minimal notebook/code snippet
   * stack trace + OS/CUDA/PyTorch versions
+
