@@ -1,7 +1,7 @@
 # univi/evaluation.py
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple, Union, Mapping, Sequence, List, Iterable
+from typing import Any, Dict, Optional, Tuple, Union, Mapping, Sequence, List
 
 import numpy as np
 import scipy.sparse as sp
@@ -21,9 +21,8 @@ from sklearn.cluster import KMeans
 
 
 # =============================================================================
-# Small helpers
+# Helpers
 # =============================================================================
-
 def to_dense(X):
     return X.toarray() if sp.issparse(X) else np.asarray(X)
 
@@ -67,10 +66,8 @@ def _extract_tensor_from_decoder_output(
     """
     Turn a decoder output into a tensor suitable for returning/storing.
 
-    Parameters
-    ----------
     out:
-      Either a torch.Tensor OR a dict produced by a decoder.
+      - torch.Tensor OR a dict produced by a decoder.
 
     prefer:
       - "auto" : pick sensible default by keys
@@ -81,42 +78,22 @@ def _extract_tensor_from_decoder_output(
       - "probs": pick probs if available, otherwise compute if possible
 
     apply_link:
-      - None: do nothing
-      - "sigmoid": if tensor are logits for Bernoulli, return probs
-      - "softmax": if logits for categorical/composition, return probs
-      - "softplus": for Poisson log_rate -> rate (rarely needed because decoder returns rate)
-
-    Notes
-    -----
-    This does not guess likelihood perfectly without metadata; it just provides a robust,
-    deterministic mapping that prevents crashes and supports the common workflows.
+      - None
+      - "sigmoid": logits -> probs
+      - "softmax": logits -> probs
+      - "softplus": log_rate -> rate
     """
     if _is_tensor(out):
         x = out
     elif isinstance(out, dict):
-        # normalize prefer
         p = str(prefer).lower().strip()
 
-        # Explicit prefer
         if p in out and _is_tensor(out[p]):
             x = out[p]
         else:
-            # Common keys by decoder type
-            # GaussianDiag: {"mean","logvar"}
-            # NB/ZINB: {"mu","log_theta",...}
-            # Bernoulli: {"logits"}
-            # Poisson: {"rate","log_rate"}
-            # Categorical/LogisticNormal: {"probs","logits"}
             key_order_auto = [
-                "mean",        # gaussian diag / mean recon
-                "mu",          # nb/zinb
-                "rate",        # poisson
-                "probs",       # categorical / logistic normal
-                "logits",      # bernoulli / categorical fallback
-                "log_rate",    # poisson fallback
-                "logvar",      # gaussian diag fallback (rare)
+                "mean", "mu", "rate", "probs", "logits", "log_rate", "logvar",
             ]
-            # For explicit requests
             if p == "probs":
                 key_order = ["probs", "logits", "mean", "mu", "rate", "log_rate"]
             elif p == "logits":
@@ -135,6 +112,7 @@ def _extract_tensor_from_decoder_output(
                 if k in out and _is_tensor(out[k]):
                     x = out[k]
                     break
+
             if x is None:
                 if len(out) == 1:
                     x = next(iter(out.values()))
@@ -145,7 +123,6 @@ def _extract_tensor_from_decoder_output(
     else:
         raise TypeError(f"Unsupported decoder output type: {type(out)}")
 
-    # Optional link function
     if apply_link is not None:
         link = str(apply_link).lower().strip()
         if link == "sigmoid":
@@ -165,9 +142,8 @@ def _to_numpy(x: torch.Tensor) -> np.ndarray:
 
 
 # =============================================================================
-# Manuscript helpers (LSC17 score) - unchanged
+# Manuscript helpers (LSC17 score)
 # =============================================================================
-
 LSC17_GENES = [
     "DNMT3B", "ZBTB46", "NYNRIN", "ARHGAP22", "LAPTM4B", "MMRN1", "DPYSL3", "FAM30A",
     "CDK6", "CPXM1", "SOCS2", "SMIM24", "EMP1", "BEX3", "CD34", "AKR1C3", "ADGRG1",
@@ -203,7 +179,6 @@ def add_lsc17_scores(
 # =============================================================================
 # FOSCTTM + Recall@k
 # =============================================================================
-
 def compute_foscttm(
     Z1: np.ndarray,
     Z2: np.ndarray,
@@ -338,7 +313,6 @@ def compute_match_recall_at_k(
 # =============================================================================
 # Modality mixing / entropy / distances
 # =============================================================================
-
 def compute_modality_mixing(
     Z: np.ndarray,
     modality_labels: np.ndarray,
@@ -487,9 +461,8 @@ def compute_same_vs_diff_neighbor_distances(
 
 
 # =============================================================================
-# Label transfer (kNN) - unchanged
+# Label transfer (kNN)
 # =============================================================================
-
 def label_transfer_knn(
     Z_source: np.ndarray,
     labels_source: np.ndarray,
@@ -583,7 +556,6 @@ def summarize_bidirectional_transfer(
 # =============================================================================
 # Reconstruction metrics (continuous + binary)
 # =============================================================================
-
 def mse_per_feature(x_true: np.ndarray, x_pred: np.ndarray) -> np.ndarray:
     x_true = np.asarray(x_true)
     x_pred = np.asarray(x_pred)
@@ -609,7 +581,6 @@ def pearson_corr_per_feature(x_true: np.ndarray, x_pred: np.ndarray) -> np.ndarr
 def auc_per_feature_binary(x_true01: np.ndarray, x_score: np.ndarray) -> np.ndarray:
     """
     Per-feature AUC for binary ground-truth.
-
     x_true01: 0/1
     x_score: probabilities or logits (both ok for AUC)
     """
@@ -657,9 +628,8 @@ def reconstruction_metrics(
 
 
 # =============================================================================
-# Encoding + cross-modal prediction (FIXED for decoder dict outputs)
+# Encoding + cross-modal prediction (robust decoder outputs)
 # =============================================================================
-
 def encode_adata(
     model,
     adata,
@@ -734,16 +704,12 @@ def cross_modal_predict(
     X_key: str = "X",
     batch_size: int = 512,
     use_moe: bool = True,
-    # NEW (backwards-compatible defaults)
     decoder_prefer: str = "auto",
     decoder_link: Optional[str] = None,
 ) -> np.ndarray:
     """
     Encode src_mod then decode tgt_mod.
-
-    Fixes:
-      - handles decoder outputs that are dicts (Bernoulli/NB/ZINB/Poisson/etc.)
-      - optional `decoder_link` to convert logits->probs for Bernoulli ("sigmoid")
+    Robust to decoder outputs that are dicts.
     """
     from .data import _get_matrix
 
@@ -780,325 +746,9 @@ def cross_modal_predict(
     return np.vstack(preds) if preds else np.zeros((0, 0), dtype=np.float32)
 
 
-def denoise_from_multimodal(
-    model,
-    x_dict: Dict[str, np.ndarray],
-    target_mod: str,
-    device: str = "cpu",
-    batch_size: int = 512,
-    use_mean: bool = True,
-    attn_bias_cfg: Optional[Mapping[str, Any]] = None,
-    # NEW
-    decoder_prefer: str = "auto",
-    decoder_link: Optional[str] = None,
-) -> np.ndarray:
-    """
-    True multimodal denoising:
-      (observed modalities) -> fused latent -> decode target_mod
-
-    Fixes:
-      - robust decoder dict outputs via _extract_tensor_from_decoder_output
-    """
-    model.eval()
-    dev = torch.device(device)
-
-    mods = list(x_dict.keys())
-    if not mods:
-        raise ValueError("x_dict is empty.")
-    n = int(np.asarray(x_dict[mods[0]]).shape[0])
-
-    out: List[np.ndarray] = []
-    with torch.no_grad():
-        for start in range(0, n, int(batch_size)):
-            end = min(start + int(batch_size), n)
-
-            xb = {
-                m: torch.as_tensor(np.asarray(x_dict[m][start:end]), dtype=torch.float32, device=dev)
-                for m in mods
-            }
-
-            mu_z, logvar_z, z, *_rest = model.encode_fused(
-                xb,
-                use_mean=bool(use_mean),
-                inject_label_expert=False,
-                attn_bias_cfg=attn_bias_cfg,
-            )
-
-            dec = model.decode_modalities(z)
-            if target_mod not in dec:
-                raise KeyError(f"target_mod {target_mod!r} not found in decode_modalities output.")
-
-            xhat_t = _extract_tensor_from_decoder_output(
-                dec[target_mod], prefer=decoder_prefer, apply_link=decoder_link
-            )
-            out.append(_to_numpy(xhat_t))
-
-    return np.vstack(out) if out else np.zeros((0, 0), dtype=np.float32)
-
-
-def denoise_adata(
-    model,
-    adata,
-    modality: str,
-    device: str = "cpu",
-    layer: Optional[str] = None,
-    X_key: str = "X",
-    batch_size: int = 512,
-    out_layer: Optional[str] = None,
-    overwrite_X: bool = False,
-    dtype: Optional[np.dtype] = np.float32,
-    *,
-    adata_by_mod: Optional[Dict[str, Any]] = None,
-    layer_by_mod: Optional[Dict[str, Optional[str]]] = None,
-    X_key_by_mod: Optional[Dict[str, str]] = None,
-    use_mean: bool = True,
-    attn_bias_cfg: Optional[Mapping[str, Any]] = None,
-    # NEW
-    decoder_prefer: str = "auto",
-    decoder_link: Optional[str] = None,
-) -> np.ndarray:
-    """
-    Backwards compatible:
-      - if adata_by_mod is None: self-reconstruction using cross_modal_predict
-      - else: fused denoise using denoise_from_multimodal
-    """
-    if adata_by_mod is None:
-        X_hat = cross_modal_predict(
-            model,
-            adata_src=adata,
-            src_mod=modality,
-            tgt_mod=modality,
-            device=device,
-            layer=layer,
-            X_key=X_key,
-            batch_size=batch_size,
-            use_moe=True,
-            decoder_prefer=decoder_prefer,
-            decoder_link=decoder_link,
-        )
-        if dtype is not None:
-            X_hat = np.asarray(X_hat, dtype=dtype)
-
-        if overwrite_X:
-            adata.X = X_hat
-        elif out_layer is not None:
-            adata.layers[out_layer] = X_hat
-        return X_hat
-
-    from .data import _get_matrix
-
-    if modality not in adata_by_mod:
-        adata_by_mod = dict(adata_by_mod)
-        adata_by_mod[modality] = adata
-
-    layer_by_mod = layer_by_mod or {}
-    X_key_by_mod = X_key_by_mod or {}
-
-    mods = list(adata_by_mod.keys())
-    if not mods:
-        raise ValueError("adata_by_mod is empty.")
-
-    x_dict_np: Dict[str, np.ndarray] = {}
-    n = None
-    for m, a in adata_by_mod.items():
-        lay = layer_by_mod.get(m, None)
-        xk = X_key_by_mod.get(m, "X")
-        X = _get_matrix(a, layer=lay, X_key=xk)
-        X = X.toarray() if sp.issparse(X) else np.asarray(X)
-        X = np.asarray(X, dtype=np.float32)
-
-        if n is None:
-            n = int(X.shape[0])
-        elif int(X.shape[0]) != int(n):
-            raise ValueError("All adata objects in adata_by_mod must have same n_obs.")
-        x_dict_np[m] = X
-
-    X_hat = denoise_from_multimodal(
-        model,
-        x_dict=x_dict_np,
-        target_mod=modality,
-        device=device,
-        batch_size=batch_size,
-        use_mean=use_mean,
-        attn_bias_cfg=attn_bias_cfg,
-        decoder_prefer=decoder_prefer,
-        decoder_link=decoder_link,
-    )
-
-    if dtype is not None:
-        X_hat = np.asarray(X_hat, dtype=dtype)
-
-    if overwrite_X:
-        adata.X = X_hat
-    elif out_layer is not None:
-        adata.layers[out_layer] = X_hat
-
-    return X_hat
-
-
 # =============================================================================
-# Fused encoding for paired multimodal adatas
+# NEW: Latent sampling / generation utilities (README-compatible)
 # =============================================================================
-def encode_fused_adata_pair(
-    model,
-    adata_by_mod: Mapping[str, Any],
-    *,
-    device: str = "cpu",
-    layer_by_mod: Optional[Mapping[str, Optional[str]]] = None,
-    X_key_by_mod: Optional[Mapping[str, str]] = None,
-    batch_size: int = 1024,
-    use_mean: bool = True,
-    epoch: int = 0,
-    y: Optional[Any] = None,
-    inject_label_expert: bool = False,
-    attn_bias_cfg: Optional[Mapping[str, Any]] = None,
-    return_gates: bool = True,
-    return_gate_logits: bool = True,
-    write_to_adatas: bool = False,
-    fused_obsm_key: str = "X_univi_fused",
-    gate_prefix: str = "gate",
-    gate_diff: bool = True,
-) -> Dict[str, Any]:
-    from .data import _get_matrix
-
-    model.eval()
-    dev = torch.device(device)
-
-    layer_by_mod = dict(layer_by_mod or {})
-    X_key_by_mod = dict(X_key_by_mod or {})
-
-    mods = list(adata_by_mod.keys())
-    if not mods:
-        raise ValueError("adata_by_mod is empty.")
-
-    X_np: Dict[str, np.ndarray] = {}
-    n = None
-    for m, ad in adata_by_mod.items():
-        lay = layer_by_mod.get(m, None)
-        xk = X_key_by_mod.get(m, "X")
-        Xm = _get_matrix(ad, layer=lay, X_key=xk)
-        Xm = to_dense(Xm).astype(np.float32, copy=False)
-
-        if n is None:
-            n = int(Xm.shape[0])
-        elif int(Xm.shape[0]) != int(n):
-            raise ValueError("All adatas in adata_by_mod must have identical n_obs.")
-        X_np[m] = Xm
-
-    n = int(n) if n is not None else 0
-    if n == 0:
-        return {"Z_fused": np.zeros((0, 0), dtype=np.float32),
-                "gates": None, "gate_logits": None, "modality_order": list(mods)}
-
-    if hasattr(model, "modality_names"):
-        modality_order = [m for m in list(getattr(model, "modality_names")) if m in X_np]
-        if not modality_order:
-            modality_order = mods
-    else:
-        modality_order = mods
-
-    Z_chunks: List[np.ndarray] = []
-    G_chunks: List[np.ndarray] = []
-    L_chunks: List[np.ndarray] = []
-
-    with torch.no_grad():
-        for start in range(0, n, int(batch_size)):
-            end = min(start + int(batch_size), n)
-            xb = {
-                m: torch.as_tensor(X_np[m][start:end], dtype=torch.float32, device=dev)
-                for m in modality_order
-            }
-
-            mu, logvar, z, gates, gate_logits = model.encode_fused(
-                xb,
-                epoch=int(epoch),
-                y=y,
-                use_mean=bool(use_mean),
-                inject_label_expert=bool(inject_label_expert),
-                attn_bias_cfg=attn_bias_cfg,
-                return_gates=bool(return_gates),
-                return_gate_logits=bool(return_gate_logits),
-            )
-
-            Z_chunks.append(_to_numpy(z))
-            if gates is not None:
-                G_chunks.append(_to_numpy(gates))
-            if gate_logits is not None:
-                L_chunks.append(_to_numpy(gate_logits))
-
-    Z_fused = np.vstack(Z_chunks).astype(np.float32, copy=False)
-    G = np.vstack(G_chunks).astype(np.float32, copy=False) if G_chunks else None
-    L = np.vstack(L_chunks).astype(np.float32, copy=False) if L_chunks else None
-
-    if write_to_adatas:
-        for _m, ad in adata_by_mod.items():
-            ad.obsm[fused_obsm_key] = Z_fused
-
-        if G is not None:
-            for i, m in enumerate(modality_order):
-                col = f"{gate_prefix}_{m}"
-                for _mm, ad in adata_by_mod.items():
-                    ad.obs[col] = G[:, i]
-
-            if gate_diff:
-                if len(modality_order) == 2:
-                    m0, m1 = modality_order[0], modality_order[1]
-                    diff = (G[:, 0] - G[:, 1]).astype(np.float32, copy=False)
-                    col = f"{gate_prefix}_{m0}_minus_{m1}"
-                    for _mm, ad in adata_by_mod.items():
-                        ad.obs[col] = diff
-                else:
-                    for i in range(len(modality_order)):
-                        for j in range(i + 1, len(modality_order)):
-                            mi, mj = modality_order[i], modality_order[j]
-                            diff = (G[:, i] - G[:, j]).astype(np.float32, copy=False)
-                            col = f"{gate_prefix}_{mi}_minus_{mj}"
-                            for _mm, ad in adata_by_mod.items():
-                                ad.obs[col] = diff
-
-    return {"Z_fused": Z_fused, "gates": G, "gate_logits": L, "modality_order": list(modality_order)}
-
-
-# =============================================================================
-# Fused-space metrics - unchanged
-# =============================================================================
-
-def compute_kmeans_ari_nmi(
-    Z: np.ndarray,
-    labels: np.ndarray,
-    n_clusters: Optional[int] = None,
-    random_state: int = 0,
-) -> Dict[str, float]:
-    Z = np.asarray(Z, dtype=np.float32)
-    labels = np.asarray(labels)
-
-    uniq = np.unique(labels)
-    k = int(n_clusters) if n_clusters is not None else int(len(uniq))
-    if k <= 1 or Z.shape[0] == 0:
-        return {"kmeans_ari": float("nan"), "kmeans_nmi": float("nan"), "kmeans_k": float(k)}
-
-    km = KMeans(n_clusters=k, random_state=int(random_state), n_init="auto")
-    pred = km.fit_predict(Z)
-    return {
-        "kmeans_ari": float(adjusted_rand_score(labels, pred)),
-        "kmeans_nmi": float(normalized_mutual_info_score(labels, pred)),
-        "kmeans_k": float(k),
-    }
-
-
-def compute_silhouette(Z: np.ndarray, labels: np.ndarray, metric: str = "euclidean") -> float:
-    Z = np.asarray(Z, dtype=np.float32)
-    labels = np.asarray(labels)
-    uniq, counts = np.unique(labels, return_counts=True)
-    if uniq.size < 2 or np.any(counts < 2) or Z.shape[0] < 3:
-        return float("nan")
-    return float(silhouette_score(Z, labels, metric=str(metric)))
-
-
-# =============================================================================
-# NEW: Latent sampling / generation utilities
-# =============================================================================
-
 def fit_latent_gaussians_by_label(
     Z: np.ndarray,
     labels: Sequence[Any],
@@ -1143,27 +793,6 @@ def sample_latent_from_label_gaussians(
     return mu[None, :] + eps * np.sqrt(var[None, :]).astype(np.float32)
 
 
-def sample_latent_around_existing_cells(
-    Z: np.ndarray,
-    idx: Sequence[int],
-    n: int,
-    *,
-    sigma: float = 0.2,
-    random_state: int = 0,
-) -> np.ndarray:
-    """
-    Pick random anchor cells among idx and add isotropic Gaussian noise.
-    """
-    Z = np.asarray(Z, dtype=np.float32)
-    idx = np.asarray(list(idx), dtype=int)
-    if idx.size == 0:
-        raise ValueError("idx is empty.")
-    rng = np.random.default_rng(int(random_state))
-    anchors = rng.choice(idx, size=int(n), replace=True)
-    eps = rng.standard_normal((int(n), Z.shape[1]), dtype=np.float32) * float(sigma)
-    return Z[anchors] + eps
-
-
 def decode_from_latent(
     model,
     Z: np.ndarray,
@@ -1174,8 +803,7 @@ def decode_from_latent(
     decoder_link: Optional[str] = None,
 ) -> Dict[str, np.ndarray]:
     """
-    Decode synthetic latents into *all* modalities returned by model.decode_modalities.
-
+    Decode latents into *all* modalities returned by model.decode_modalities.
     Returns modality -> numpy array
     """
     model.eval()
@@ -1196,10 +824,71 @@ def decode_from_latent(
     return {m: np.vstack(chunks) for m, chunks in outs.items()}
 
 
-# =============================================================================
-# NEW: Evaluate reconstruction / imputation error against ground truth
-# =============================================================================
+def generate_from_latent(
+    model,
+    n: Optional[int] = None,
+    *,
+    target_mod: Optional[str] = None,
+    device: str = "cpu",
+    z_source: str = "prior",
+    z: Optional[np.ndarray] = None,
+    batch_size: int = 512,
+    return_mean: bool = True,
+    sample_likelihood: bool = False,
+    decoder_prefer: str = "auto",
+    decoder_link: Optional[str] = None,
+    random_state: int = 0,
+) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+    """
+    README-compatible generator.
 
+    Examples
+    --------
+    Xgen = generate_from_latent(model, n=5000, target_mod="rna", z_source="prior")
+
+    Notes
+    -----
+    - If z is None, samples z ~ N(0, I) when z_source == "prior".
+    - return_mean is kept for API parity (decoders return mean-like outputs).
+    - sample_likelihood is accepted but not implemented here.
+    """
+    if sample_likelihood:
+        raise NotImplementedError("sample_likelihood=True is not implemented yet in generate_from_latent().")
+
+    if z is None:
+        if n is None:
+            raise ValueError("Provide either `z` or `n`.")
+        if str(z_source).lower().strip() != "prior":
+            raise ValueError("Only z_source='prior' is supported when `z` is not provided.")
+
+        latent_dim = getattr(getattr(model, "cfg", None), "latent_dim", None)
+        if latent_dim is None:
+            latent_dim = getattr(model, "latent_dim", None)
+        if latent_dim is None:
+            raise ValueError("Could not infer latent_dim from model; provide `z` explicitly.")
+
+        rng = np.random.default_rng(int(random_state))
+        z = rng.standard_normal((int(n), int(latent_dim)), dtype=np.float32)
+
+    dec = decode_from_latent(
+        model,
+        np.asarray(z, dtype=np.float32),
+        device=device,
+        batch_size=batch_size,
+        decoder_prefer=decoder_prefer,
+        decoder_link=decoder_link,
+    )
+
+    if target_mod is None:
+        return dec
+    if target_mod not in dec:
+        raise KeyError(f"target_mod {target_mod!r} not found. Available: {list(dec.keys())}")
+    return dec[target_mod]
+
+
+# =============================================================================
+# NEW: Evaluate reconstruction / imputation error against ground truth (README-compatible)
+# =============================================================================
 def evaluate_prediction_against_adata(
     adata_true,
     X_pred: np.ndarray,
@@ -1207,15 +896,13 @@ def evaluate_prediction_against_adata(
     layer_true: Optional[str] = None,
     X_key_true: str = "X",
     kind: str = "continuous",     # "continuous" | "binary"
-    max_features: Optional[int] = None,
-    random_state: int = 0,
+    feature_names: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """
     Compare X_pred (n_cells, n_features) to adata_true ground truth matrix.
 
-    kind:
-      - continuous: mse + pearson
-      - binary: per-feature AUC (requires 0/1 truth)
+    If feature_names is provided, it subsets BOTH true and pred to those features
+    (by matching adata_true.var_names).
     """
     from .data import _get_matrix
 
@@ -1226,205 +913,144 @@ def evaluate_prediction_against_adata(
     if X_true.shape != X_pred.shape:
         raise ValueError(f"Shape mismatch: true {X_true.shape} vs pred {X_pred.shape}")
 
-    if max_features is not None and int(max_features) < X_true.shape[1]:
-        rng = np.random.default_rng(int(random_state))
-        cols = rng.choice(X_true.shape[1], size=int(max_features), replace=False)
+    feat_names_out: Optional[List[str]] = None
+    if feature_names is not None:
+        wanted = [str(x) for x in list(feature_names)]
+        name_to_j = {str(n): j for j, n in enumerate(map(str, list(adata_true.var_names)))}
+        cols = []
+        for f in wanted:
+            if f not in name_to_j:
+                raise KeyError(f"Feature {f!r} not found in adata_true.var_names.")
+            cols.append(int(name_to_j[f]))
+        cols = np.asarray(cols, dtype=int)
         X_true = X_true[:, cols]
         X_pred = X_pred[:, cols]
+        feat_names_out = wanted
+    else:
+        feat_names_out = [str(x) for x in list(map(str, list(adata_true.var_names)))]
 
     met = reconstruction_metrics(X_true, X_pred, kind=kind)
 
-    # per-cell summary (useful for UMAP overlay)
+    per_cell = np.mean((X_true - X_pred) ** 2, axis=1)
+    met["per_cell_mse"] = per_cell.astype(np.float32)
+    met["per_cell_mean"] = float(np.mean(per_cell))
+
+    # For plotting + downstream use
+    met["X_true"] = X_true
+    met["X_pred"] = X_pred
+    met["feature_names"] = feat_names_out
+
+    # README convenience: "summary" + "per_feature"
     if kind == "binary":
-        # use mean squared error against binary for a rough per-cell error too
-        per_cell = np.mean((X_true - X_pred) ** 2, axis=1)
-        met["per_cell_mse"] = per_cell.astype(np.float32)
-        met["per_cell_mean"] = float(np.mean(per_cell))
+        met["summary"] = {
+            "auc_mean": float(met["auc_mean"]),
+            "auc_median": float(met["auc_median"]),
+            "per_cell_mean": float(met["per_cell_mean"]),
+        }
+        met["per_feature"] = {
+            "auc": np.asarray(met["auc_per_feature"]),
+        }
     else:
-        per_cell = np.mean((X_true - X_pred) ** 2, axis=1)
-        met["per_cell_mse"] = per_cell.astype(np.float32)
-        met["per_cell_mean"] = float(np.mean(per_cell))
+        met["summary"] = {
+            "mse_mean": float(met["mse_mean"]),
+            "mse_median": float(met["mse_median"]),
+            "pearson_mean": float(met["pearson_mean"]),
+            "pearson_median": float(met["pearson_median"]),
+            "per_cell_mean": float(met["per_cell_mean"]),
+        }
+        met["per_feature"] = {
+            "mse": np.asarray(met["mse_per_feature"]),
+            "pearson": np.asarray(met["pearson_per_feature"]),
+        }
 
     return met
 
 
-# =============================================================================
-# High-level alignment eval (kept for backwards compatibility)
-# =============================================================================
-
-def evaluate_alignment(
-    Z1: Optional[np.ndarray] = None,
-    Z2: Optional[np.ndarray] = None,
-    model=None,
-    adata1=None,
-    adata2=None,
-    mod1: Optional[str] = None,
-    mod2: Optional[str] = None,
+def evaluate_cross_reconstruction(
+    model,
+    adata_src,
+    adata_tgt,
+    *,
+    src_mod: str,
+    tgt_mod: str,
     device: str = "cpu",
-    layer1: Optional[str] = None,
-    layer2: Optional[str] = None,
-    X_key1: str = "X",
-    X_key2: str = "X",
-    batch_size: int = 1024,
-    latent: str = "moe_mean",
-    latent1: Optional[str] = None,
-    latent2: Optional[str] = None,
-    random_state: int = 0,
-    metric: str = "euclidean",
-    k_mixing: int = 20,
-    k_entropy: int = 30,
-    k_transfer: int = 15,
-    modality_labels: Optional[np.ndarray] = None,
-    labels_source: Optional[np.ndarray] = None,
-    labels_target: Optional[np.ndarray] = None,
-    compute_bidirectional_transfer: bool = False,
-    recall_ks: Tuple[int, ...] = (1, 5, 10),
-    foscttm_block_size: int = 512,
-    Z_fused: Optional[np.ndarray] = None,
-    fused_labels: Optional[np.ndarray] = None,
-    fused_kmeans: bool = True,
-    fused_silhouette: bool = True,
-    fused_random_state: int = 0,
-    gate_weights: Optional[np.ndarray] = None,
-    gate_modality_order: Optional[Sequence[str]] = None,
-    gate_kind: Optional[str] = None,
-    json_safe: bool = True,
+    src_layer: Optional[str] = None,
+    src_X_key: str = "X",
+    tgt_layer: Optional[str] = None,
+    tgt_X_key: str = "X",
+    batch_size: int = 512,
+    kind: str = "continuous",
+    feature_names: Optional[Sequence[str]] = None,
+    use_moe: bool = True,
+    decoder_prefer: str = "auto",
+    decoder_link: Optional[str] = None,
 ) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
+    """
+    README-style one-call cross-reconstruction evaluation:
 
-    lat1 = latent if latent1 is None else latent1
-    lat2 = latent if latent2 is None else latent2
+      1) X_pred = cross_modal_predict(model, adata_src, src_mod -> tgt_mod)
+      2) compare X_pred against adata_tgt truth (layer/X_key)
+      3) return dict with:
+          - "summary"
+          - "per_feature"
+          - "X_true", "X_pred", "feature_names" (for plotting)
 
-    if Z1 is None or Z2 is None:
-        if model is None or adata1 is None or adata2 is None or mod1 is None or mod2 is None:
-            raise ValueError("Provide either (Z1, Z2) or (model, adata1, adata2, mod1, mod2).")
+    This is the function README calls.
+    """
+    X_pred = cross_modal_predict(
+        model,
+        adata_src=adata_src,
+        src_mod=src_mod,
+        tgt_mod=tgt_mod,
+        device=device,
+        layer=src_layer,
+        X_key=src_X_key,
+        batch_size=batch_size,
+        use_moe=use_moe,
+        decoder_prefer=decoder_prefer,
+        decoder_link=decoder_link,
+    )
 
-        Z1 = encode_adata(model, adata1, modality=mod1, device=device, layer=layer1, X_key=X_key1,
-                          batch_size=batch_size, latent=lat1, random_state=random_state)
-        Z2 = encode_adata(model, adata2, modality=mod2, device=device, layer=layer2, X_key=X_key2,
-                          batch_size=batch_size, latent=lat2, random_state=random_state)
+    rep = evaluate_prediction_against_adata(
+        adata_tgt,
+        X_pred,
+        layer_true=tgt_layer,
+        X_key_true=tgt_X_key,
+        kind=kind,
+        feature_names=feature_names,
+    )
 
-    Z1 = np.asarray(Z1)
-    Z2 = np.asarray(Z2)
+    # Add a bit of metadata to help users/debugging
+    rep["src_mod"] = str(src_mod)
+    rep["tgt_mod"] = str(tgt_mod)
+    rep["kind"] = str(kind)
+    rep["device"] = str(device)
+    rep["batch_size"] = int(batch_size)
+    rep["decoder_prefer"] = str(decoder_prefer)
+    rep["decoder_link"] = decoder_link
 
-    out["n1"] = int(Z1.shape[0])
-    out["n2"] = int(Z2.shape[0])
-    out["dim"] = int(Z1.shape[1]) if Z1.ndim == 2 else None
-    out["latent1"] = lat1
-    out["latent2"] = lat2
-    out["metric"] = str(metric)
+    return rep
 
-    # FOSCTTM
-    if Z1.shape == Z2.shape and Z1.shape[0] > 1:
-        fos_mean, fos_sem = compute_foscttm(Z1, Z2, metric=metric, block_size=foscttm_block_size, return_sem=True)
-        out["foscttm"] = fos_mean
-        out["foscttm_sem"] = fos_sem
-    else:
-        out["foscttm"] = None
-        out["foscttm_sem"] = None
 
-    # Recall@k
-    if Z1.shape == Z2.shape and Z1.shape[0] > 1:
-        for k in recall_ks:
-            r_mean, r_sem = compute_match_recall_at_k(Z1, Z2, k=int(k), metric=metric,
-                                                      block_size=foscttm_block_size, return_sem=True)
-            out[f"recall_at_{int(k)}"] = r_mean
-            out[f"recall_at_{int(k)}_sem"] = r_sem
-    else:
-        for k in recall_ks:
-            out[f"recall_at_{int(k)}"] = None
-            out[f"recall_at_{int(k)}_sem"] = None
+# =============================================================================
+# Backwards/README-compatible aliases you referenced
+# =============================================================================
+def fit_label_latent_gaussians(
+    Z: np.ndarray,
+    labels: Sequence[Any],
+    *,
+    min_n: int = 20,
+    shrink: float = 1e-3,
+) -> Dict[str, Dict[str, Any]]:
+    return fit_latent_gaussians_by_label(Z, labels, min_n=min_n, shrink=shrink)
 
-    # Modality mixing / entropy
-    Z_concat = None
-    if (Z1.ndim == 2 and Z2.ndim == 2 and Z1.shape[1] == Z2.shape[1]):
-        Z_concat = np.vstack([Z1, Z2])
 
-    if Z_concat is not None and Z_concat.shape[0] > 1:
-        if modality_labels is None:
-            modality_labels = np.concatenate([np.repeat("mod1", Z1.shape[0]), np.repeat("mod2", Z2.shape[0])])
-
-        mix_mean, mix_sem = compute_modality_mixing(Z_concat, modality_labels=np.asarray(modality_labels),
-                                                    k=k_mixing, metric=metric, return_sem=True)
-        out["modality_mixing"] = mix_mean
-        out["modality_mixing_sem"] = mix_sem
-        out["k_mixing"] = int(k_mixing)
-
-        ent_mean, ent_sem = compute_modality_entropy(Z_concat, modality_labels=np.asarray(modality_labels),
-                                                     k=k_entropy, metric=metric, return_sem=True)
-        out["modality_entropy"] = ent_mean
-        out["modality_entropy_sem"] = ent_sem
-        out["k_entropy"] = int(k_entropy)
-
-        out["same_vs_diff_neighbor_distances"] = compute_same_vs_diff_neighbor_distances(
-            Z_concat, modality_labels=np.asarray(modality_labels), k=k_entropy, metric=metric
-        )
-    else:
-        out["modality_mixing"] = None
-        out["modality_mixing_sem"] = None
-        out["k_mixing"] = int(k_mixing)
-        out["modality_entropy"] = None
-        out["modality_entropy_sem"] = None
-        out["k_entropy"] = int(k_entropy)
-        out["same_vs_diff_neighbor_distances"] = None
-
-    # Label transfer
-    if labels_source is not None:
-        pred, acc, cm, order, f1d = label_transfer_knn(
-            Z_source=Z1, labels_source=np.asarray(labels_source),
-            Z_target=Z2, labels_target=np.asarray(labels_target) if labels_target is not None else None,
-            k=k_transfer, metric=metric, return_label_order=True, return_f1=True,
-        )
-        out["label_transfer_pred"] = pred
-        out["label_transfer_acc"] = acc
-        out["label_transfer_cm"] = cm
-        out["label_transfer_label_order"] = order
-        out["label_transfer_f1"] = f1d
-        out["k_transfer"] = int(k_transfer)
-
-        if compute_bidirectional_transfer and (labels_target is not None):
-            out["bidirectional_transfer"] = summarize_bidirectional_transfer(
-                Z_a=Z1, y_a=np.asarray(labels_source),
-                Z_b=Z2, y_b=np.asarray(labels_target),
-                k=k_transfer, metric=metric,
-            )
-        else:
-            out["bidirectional_transfer"] = None
-    else:
-        out["label_transfer_pred"] = None
-        out["label_transfer_acc"] = None
-        out["label_transfer_cm"] = None
-        out["label_transfer_label_order"] = None
-        out["label_transfer_f1"] = None
-        out["k_transfer"] = int(k_transfer)
-        out["bidirectional_transfer"] = None
-
-    # Fused-space metrics
-    if Z_fused is not None and fused_labels is not None:
-        Zf = np.asarray(Z_fused, dtype=np.float32)
-        yl = np.asarray(fused_labels)
-        out["fused_n"] = int(Zf.shape[0])
-        out["fused_dim"] = int(Zf.shape[1]) if Zf.ndim == 2 else None
-        out["fused_kmeans"] = compute_kmeans_ari_nmi(Zf, yl, random_state=fused_random_state) if fused_kmeans else None
-        out["fused_silhouette"] = compute_silhouette(Zf, yl, metric=metric) if fused_silhouette else None
-    else:
-        out["fused_kmeans"] = None
-        out["fused_silhouette"] = None
-
-    # Gating summaries (left as minimal; longer gating suite can be plugged back in)
-    if gate_weights is not None:
-        W = np.asarray(gate_weights, dtype=np.float32)
-        out["gate_kind"] = gate_kind
-        out["gate_weights_mean"] = float(np.mean(W)) if W.size else np.nan
-        if gate_modality_order is None:
-            gate_modality_order = [str(i) for i in range(W.shape[1])]
-        out["gate_weights_per_mod_mean"] = {m: float(np.mean(W[:, i])) for i, m in enumerate(gate_modality_order)}
-    else:
-        out["gate_kind"] = None
-        out["gate_weights_mean"] = None
-        out["gate_weights_per_mod_mean"] = None
-
-    if json_safe:
-        out = {k: _json_safe(v) for k, v in out.items()}
-    return out
+def sample_latent_by_label(
+    gauss: Dict[str, Dict[str, Any]],
+    label: str,
+    n: int,
+    *,
+    random_state: int = 0,
+) -> np.ndarray:
+    return sample_latent_from_label_gaussians(gauss, label, n, random_state=random_state)
 

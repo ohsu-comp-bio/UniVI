@@ -1,7 +1,7 @@
 # univi/plotting.py
 from __future__ import annotations
 
-from typing import Dict, Optional, Sequence, List, Union, Tuple, Any, Mapping
+from typing import Dict, Optional, Sequence, List, Union, Tuple, Any
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -412,7 +412,7 @@ def umap_by_modality(
 
 
 # =============================================================================
-# NEW: Convenience helpers for logits/probs + error plots
+# Convenience helpers for logits/probs + error plots
 # =============================================================================
 def layer_sigmoid_inplace(adata: AnnData, src_layer: str, dst_layer: str) -> None:
     """
@@ -530,7 +530,7 @@ def plot_feature_scatter_observed_vs_pred(
     show: bool = True,
 ) -> plt.Figure:
     """
-    Scatter: predicted vs observed for one feature.
+    Scatter: predicted vs observed for one feature (AnnData-based).
     """
     j = adata.var_names.get_loc(feature)
 
@@ -561,7 +561,141 @@ def plot_feature_scatter_observed_vs_pred(
 
 
 # =============================================================================
-# Backwards-compatible aliases
+# README-compatible names (FULL implementations)
+# =============================================================================
+def compare_raw_vs_denoised_umap_features(
+    adata: AnnData,
+    *,
+    obsm_key: str = "X_univi",
+    features: Sequence[str],
+    raw_layer: Optional[str] = None,
+    denoised_layer: str = "denoised_fused",
+    denoised_is_logits: bool = False,
+    n_neighbors: int = 30,
+    random_state: int = 0,
+    force_recompute: bool = False,
+    panel_size: Tuple[float, float] = (4.0, 3.6),
+    wspace: float = 0.15,
+    hspace: float = 0.15,
+    savepath: Optional[str] = None,
+    show: bool = True,
+    close: Optional[bool] = None,
+    return_fig: bool = False,
+    bbox_inches: str = "tight",
+    pad_inches: float = 0.02,
+    **scanpy_kwargs,
+) -> Union[None, Tuple[plt.Figure, np.ndarray]]:
+    """
+    README name -> plots raw vs denoised in a 2-row UMAP feature grid.
+    """
+    return compare_raw_vs_pred_umap_features(
+        adata,
+        obsm_key=obsm_key,
+        features=features,
+        pred_layer=denoised_layer,
+        raw_layer=raw_layer,
+        pred_is_logits=denoised_is_logits,
+        n_neighbors=n_neighbors,
+        random_state=random_state,
+        force_recompute=force_recompute,
+        panel_size=panel_size,
+        wspace=wspace,
+        hspace=hspace,
+        savepath=savepath,
+        show=show,
+        close=close,
+        return_fig=return_fig,
+        bbox_inches=bbox_inches,
+        pad_inches=pad_inches,
+        **scanpy_kwargs,
+    )
+
+
+def plot_featurewise_reconstruction_scatter(
+    rep: Dict[str, Any],
+    *,
+    features: Sequence[str],
+    max_points: int = 20000,
+    random_state: int = 0,
+    s: float = 4.0,
+    alpha: float = 0.3,
+    title: Optional[str] = None,
+    savepath: Optional[str] = None,
+    show: bool = True,
+    close: bool = True,
+) -> Union[plt.Figure, Dict[str, plt.Figure]]:
+    """
+    README name -> scatter plots of TRUE vs PRED for selected features,
+    using the dict returned by univi.evaluation.evaluate_cross_reconstruction(...).
+
+    Expected keys in rep:
+      - "X_true": (n_cells, n_features)
+      - "X_pred": (n_cells, n_features)
+      - "feature_names": list of feature names aligned to columns
+    """
+    feats = list(features)
+    if len(feats) == 0:
+        raise ValueError("features must be non-empty.")
+
+    if "X_true" not in rep or "X_pred" not in rep:
+        raise KeyError("rep must contain keys 'X_true' and 'X_pred'.")
+
+    X_true = np.asarray(rep["X_true"])
+    X_pred = np.asarray(rep["X_pred"])
+    if X_true.shape != X_pred.shape:
+        raise ValueError(f"Shape mismatch: X_true {X_true.shape} vs X_pred {X_pred.shape}")
+
+    feat_names = rep.get("feature_names", None)
+    if feat_names is None:
+        feat_names = [str(i) for i in range(X_true.shape[1])]
+    else:
+        feat_names = [str(x) for x in list(feat_names)]
+
+    name_to_j = {n: j for j, n in enumerate(feat_names)}
+
+    figs: Dict[str, plt.Figure] = {}
+    for f in feats:
+        if f not in name_to_j:
+            raise KeyError(f"Feature {f!r} not found in rep['feature_names'] (n={len(feat_names)}).")
+
+        j = name_to_j[f]
+        yt = X_true[:, j].astype(float, copy=False)
+        yp = X_pred[:, j].astype(float, copy=False)
+
+        n = yt.shape[0]
+        if n > int(max_points):
+            rng = np.random.default_rng(int(random_state))
+            idx = rng.choice(n, size=int(max_points), replace=False)
+            yt = yt[idx]
+            yp = yp[idx]
+
+        fig = plt.figure(figsize=(4.8, 4.2))
+        plt.scatter(yp, yt, s=float(s), alpha=float(alpha))
+        plt.xlabel("pred")
+        plt.ylabel("true")
+        plt.title(title or f)
+        plt.tight_layout()
+
+        if savepath is not None:
+            if len(feats) == 1:
+                out = savepath
+            else:
+                root, ext = (savepath.rsplit(".", 1) + ["png"])[:2]
+                out = f"{root}__{f}.{ext}"
+            fig.savefig(out, dpi=300, bbox_inches="tight", pad_inches=0.02)
+
+        if show:
+            plt.show()
+        if close:
+            plt.close(fig)
+
+        figs[f] = fig
+
+    return figs[feats[0]] if len(feats) == 1 else figs
+
+
+# =============================================================================
+# Backwards-compatible aliases (older names)
 # =============================================================================
 def umap_single_adata(
     adata_obj: AnnData,
@@ -667,4 +801,111 @@ def umap_by_modality_old(
             "return_fig", "bbox_inches", "pad_inches",
         }},
     )
+
+
+def plot_reconstruction_error_summary(
+    rep: Dict[str, Any],
+    *,
+    top_k: int = 25,
+    metric: str = "mse",  # "mse" | "pearson" | "auc"
+    sort: str = "worst",  # "worst" | "best"
+    title: Optional[str] = None,
+    show: bool = True,
+    savepath: Optional[str] = None,
+    close: bool = True,
+) -> plt.Figure:
+    """
+    README-friendly summary plot for reconstruction reports.
+
+    Expects `rep` from univi.evaluation.evaluate_cross_reconstruction(...), which includes:
+      - rep["summary"] (dict)
+      - rep["per_feature"] (dict of arrays)
+      - rep["feature_names"] (list[str])
+
+    Behavior
+    --------
+    - metric="mse": larger is worse (default)
+    - metric="pearson": smaller is worse if sort="worst", larger is better if sort="best"
+    - metric="auc": smaller is worse if sort="worst", larger is better if sort="best"
+    """
+    if "per_feature" not in rep or "feature_names" not in rep:
+        raise KeyError("rep must contain keys 'per_feature' and 'feature_names'.")
+
+    metric = str(metric).lower().strip()
+    sort = str(sort).lower().strip()
+    if sort not in {"worst", "best"}:
+        raise ValueError("sort must be 'worst' or 'best'.")
+
+    feat_names = [str(x) for x in rep["feature_names"]]
+
+    pf = rep["per_feature"]
+    if metric == "mse":
+        if "mse" not in pf:
+            raise KeyError("rep['per_feature'] must contain 'mse' for metric='mse'.")
+        vals = np.asarray(pf["mse"], dtype=float)
+        # worst = largest
+        order = np.argsort(vals)[::-1] if sort == "worst" else np.argsort(vals)
+        xlabel = "MSE (higher = worse)"
+    elif metric == "pearson":
+        if "pearson" not in pf:
+            raise KeyError("rep['per_feature'] must contain 'pearson' for metric='pearson'.")
+        vals = np.asarray(pf["pearson"], dtype=float)
+        # worst = smallest
+        order = np.argsort(vals) if sort == "worst" else np.argsort(vals)[::-1]
+        xlabel = "Pearson r (higher = better)"
+    elif metric == "auc":
+        if "auc" not in pf:
+            raise KeyError("rep['per_feature'] must contain 'auc' for metric='auc'.")
+        vals = np.asarray(pf["auc"], dtype=float)
+        # worst = smallest
+        order = np.argsort(vals) if sort == "worst" else np.argsort(vals)[::-1]
+        xlabel = "AUC (higher = better)"
+    else:
+        raise ValueError("metric must be one of: 'mse', 'pearson', 'auc'.")
+
+    # Handle NaNs gracefully (push NaNs to end)
+    nan_mask = np.isnan(vals)
+    if nan_mask.any():
+        good = np.where(~nan_mask)[0]
+        bad = np.where(nan_mask)[0]
+        order = np.concatenate([order[~nan_mask[order]], bad])
+
+    top_k = int(max(1, min(int(top_k), len(feat_names))))
+    idx = order[:top_k]
+
+    names_top = [feat_names[i] for i in idx]
+    vals_top = vals[idx]
+
+    # Plot: horizontal bar chart
+    fig = plt.figure(figsize=(7.6, max(3.2, 0.22 * top_k + 1.8)))
+    y = np.arange(top_k)[::-1]  # top item at top
+    plt.barh(y, vals_top[::-1])
+    plt.yticks(y, names_top[::-1], fontsize=9)
+
+    # Title: include summary numbers if present
+    if title is None:
+        base = "Reconstruction summary"
+        if "summary" in rep and isinstance(rep["summary"], dict):
+            s = rep["summary"]
+            if metric == "mse" and "mse_mean" in s:
+                base += f" (mse_mean={s['mse_mean']:.4g}, r_mean={s.get('pearson_mean', float('nan')):.3g})"
+            elif metric == "pearson" and "pearson_mean" in s:
+                base += f" (r_mean={s['pearson_mean']:.3g})"
+            elif metric == "auc" and "auc_mean" in s:
+                base += f" (auc_mean={s['auc_mean']:.3g})"
+        title = base
+
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.tight_layout()
+
+    if savepath is not None:
+        fig.savefig(savepath, dpi=300, bbox_inches="tight", pad_inches=0.02)
+
+    if show:
+        plt.show()
+    if close:
+        plt.close(fig)
+
+    return fig
 
