@@ -262,7 +262,7 @@ from univi.plotting import (
 )
 
 set_style(font_scale=1.2, dpi=150)
-device = "cuda"  # or "mps" (Mac), or "cpu"
+device = "cuda"  # or "mps" (Mac M-chips), or "cpu"
 ```
 
 Helper for sparse matrices:
