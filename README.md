@@ -515,20 +515,268 @@ metrics_with_gates = evaluate_alignment(
 
 Choose via `loss_mode` at construction time (Python) or config JSON (scripts).
 
-### Optional: transformer encoders and fused multimodal transformer posterior
+## Advanced model features
 
-UniVI can swap MLP encoders for transformers, and can optionally build a **fused transformer posterior** that sees tokens across modalities (when enabled).
+This section covers the “advanced” knobs in `univi/models/univi.py` and when to use them. Everything below is optional: you can train and evaluate UniVI without touching any of it.
 
-(Kept out of the main flow on purpose — see `univi/models/` + notebooks for full examples.)
+---
 
-### Supervised heads and categorical “label modalities”
+### 1) Fused multimodal transformer posterior (optional)
 
-UniVI supports:
+**What it is:**  
+A *single* fused encoder that tokenizes each observed modality, concatenates tokens, runs a multimodal transformer, and outputs a fused posterior `(mu_fused, logvar_fused)`.
 
-* **classification heads** (predict labels from latent; optionally adversarial/GRL)
-* **categorical modalities** (labels as a generative modality with encoder+decoder)
+**Why you’d use it:**  
+- You want the posterior to be learned jointly across modalities (rather than fused analytically via PoE/MoE precision fusion).
+- You want token-level interpretability hooks (e.g., ATAC top-k peak indices; optional attention maps if enabled in the encoder stack).
+- You want a learnable “cross-modality mixing” mechanism beyond precision fusion.
 
-These are great for harmonized annotation / confounding checks / semi-supervision, but are intentionally “advanced” relative to the core train→evaluate loop.
+**How to enable (config):**
+- Set `cfg.fused_encoder_type = "multimodal_transformer"`.
+- Optionally set:
+  - `cfg.fused_modalities = ["rna","adt","atac"]` (defaults to all)
+  - `cfg.fused_require_all_modalities = True` (default): only use fused posterior when all required modalities are present; otherwise falls back to `mixture_of_experts()`.
+
+**Key API points:**
+- Training: the model will automatically decide whether to use fused encoder or fallback based on presence and `fused_require_all_modalities`.
+- Encoding: use `model.encode_fused(...)` to get the fused latent and optionally gates from fallback fusion.
+
+```python
+mu, logvar, z = model.encode_fused(
+    {"rna": X_rna, "adt": X_adt, "atac": X_atac},
+    use_mean=True,
+)
+````
+
+---
+
+### 2) Attention bias for transformer encoders (distance bias for ATAC, optional)
+
+**What it is:**
+A safe, optional attention bias that can encourage local genomic context for tokenized ATAC (or any modality tokenizer that supports it). It’s a **no-op** unless:
+
+* the encoder is transformer-based *and*
+* its tokenizer exposes `build_distance_attn_bias()` *and*
+* you pass `attn_bias_cfg`.
+
+**Why you’d use it:**
+
+* ATAC token sets are sparse and positional: distance-aware attention can help the transformer focus on local regulatory structure.
+
+**How to use (forward / encode / predict):**
+Pass `attn_bias_cfg` into `forward(...)`, `encode_fused(...)`, or `predict_heads(...)`.
+
+```python
+attn_bias_cfg = {
+  "atac": {"type": "distance", "lengthscale_bp": 50_000, "same_chrom_only": True}
+}
+
+out = model(x_dict, epoch=ep, attn_bias_cfg=attn_bias_cfg)
+mu, logvar, z = model.encode_fused(x_dict, attn_bias_cfg=attn_bias_cfg)
+pred = model.predict_heads(x_dict, attn_bias_cfg=attn_bias_cfg)
+```
+
+**Notes:**
+
+* For the *fused* multimodal transformer posterior, UniVI applies distance bias *within* the ATAC token block and leaves cross-modality blocks neutral (0), so it won’t artificially “force” cross-modality locality.
+
+---
+
+### 3) Learnable MoE gating for fusion (optional)
+
+**What it is:**
+A learnable gate that produces per-cell modality weights and uses them to scale per-modality precisions before PoE-style fusion. This is **off by default**; without it, fusion is pure precision fusion.
+
+**Why you’d use it:**
+
+* Modalities have variable quality per cell (e.g., low ADT counts, sparse ATAC, stressed RNA).
+* You want a *data-driven* “trust score” per modality per cell.
+* You want interpretable per-cell reliance weights (gate weights) to diagnose integration behavior.
+
+**How to enable (config):**
+
+* `cfg.use_moe_gating = True`
+* Optional:
+
+  * `cfg.moe_gating_type = "per_modality"` (default) or `"shared"`
+  * `cfg.moe_gating_hidden = [..]`, `cfg.moe_gating_dropout`, `cfg.moe_gating_batchnorm`, `cfg.moe_gating_activation`
+  * `cfg.moe_gate_eps` to avoid exact zeros in gated precisions
+
+**How to retrieve gates:**
+Use `encode_fused(..., return_gates=True)` (works when not using fused transformer posterior; if fused posterior is used, gates are `None`).
+
+```python
+mu, logvar, z, gates, gate_logits = model.encode_fused(
+    x_dict,
+    use_mean=True,
+    return_gates=True,
+    return_gate_logits=True,
+)
+
+# gates: (n_cells, n_modalities) in the model's modality order
+```
+
+**Tip:**
+Gate weights are useful for plots like “ADT reliance by celltype” or identifying low-quality subsets.
+
+---
+
+### 4) Multi-head supervised decoders (classification + adversarial heads)
+
+UniVI supports two supervised head systems:
+
+#### A) Legacy single label head (kept for backwards compatibility)
+
+**What it is:**
+A single categorical head via `label_decoder` controlled by init args:
+
+* `n_label_classes`, `label_loss_weight`, `label_ignore_index`, `classify_from_mu`, `label_head_name`
+
+**When to use it:**
+If you already rely on the legacy label head in notebooks/scripts and want a stable API.
+
+**Label names helpers:**
+
+```python
+model.set_label_names(["B", "T", "NK", ...])
+```
+
+#### B) New `cfg.class_heads` multi-head system (recommended for new work)
+
+**What it is:**
+Any number of heads defined via `ClassHeadConfig`. Heads can be:
+
+* **categorical**: softmax + cross-entropy
+* **binary**: single logit + BCEWithLogitsLoss (optionally with `pos_weight`)
+
+Heads can also be **adversarial**: they apply a gradient reversal layer (GRL) to encourage invariance (domain confusion).
+
+**Why you’d use it:**
+
+* Predict multiple labels simultaneously (celltype, batch, donor, tissue, QC flags, etc.).
+* Add domain-adversarial training (e.g., suppress batch/donor information).
+* Semi-supervised setups where only some labels exist per head.
+
+**How labels are passed at training time:**
+`y` should be a dict keyed by head name:
+
+```python
+y = {
+  "celltype": celltype_ids,   # categorical (shape [B] or one-hot [B,C])
+  "batch": batch_ids,         # adversarial categorical, for batch-invariant latents
+  "is_doublet": doublet_01,   # binary head (0/1, ignore_index supported)
+}
+out = model(x_dict, epoch=ep, y=y)
+```
+
+**How to predict heads after training:**
+Use `predict_heads(...)` to run encoding + head prediction in one call.
+
+```python
+pred = model.predict_heads(x_dict, return_probs=True)
+# pred[head] returns probabilities (softmax for categorical, sigmoid for binary)
+```
+
+**Head label name helpers (categorical):**
+
+```python
+model.set_head_label_names("celltype", ["B", "T", "NK", ...])
+```
+
+**Inspect head configuration (useful for logging):**
+
+```python
+meta = model.get_classification_meta()
+```
+
+---
+
+### 5) Label expert injection into the fused posterior (semi-supervised “label as expert”)
+
+**What it is:**
+Optionally treats labels as an additional expert by encoding the label into a Gaussian posterior and fusing it with the base fused posterior. Controlled by:
+
+* `use_label_encoder=True` and `n_label_classes>0`
+* `label_encoder_warmup` (epoch threshold before injection starts)
+* `label_moe_weight` (how strong labels influence fusion)
+* `unlabeled_logvar` (large => labels contribute little when missing)
+
+**Why you’d use it:**
+
+* Semi-supervised alignment: labels can stabilize the latent when paired signals are weak.
+* Controlled injection after warmup to avoid early collapse.
+
+**How to use in encoding:**
+`encode_fused(..., inject_label_expert=True, y=...)`
+
+```python
+mu, logvar, z = model.encode_fused(
+    x_dict,
+    epoch=ep,
+    y={"label": y_ids},          # or just pass y_ids if using legacy path
+    inject_label_expert=True,
+)
+```
+
+---
+
+### 6) Recon scaling across modalities (important when dims differ a lot)
+
+**What it is:**
+Per-modality reconstruction losses are typically summed across features; large modalities (RNA) can dominate gradients. UniVI supports:
+
+* `recon_normalize_by_dim` + `recon_dim_power` (divide by `D**power`)
+* per-modality `ModalityConfig.recon_weight`
+
+**Defaults:**
+
+* v1-style losses: normalize is off by default, `power=0.5`
+* v2/lite: normalize is on by default, `power=1.0`
+
+**Why you’d use it:**
+
+* Stabilize training when RNA has 2k–20k dims but ADT has 30–200 dims and ATAC-LSI has ~50–500 dims.
+* Tune modality balance without hand-waving.
+
+**How to tune:**
+
+* For “equal per-cell contribution” across modalities: `recon_normalize_by_dim=True` and `recon_dim_power=1.0`
+* If you want a softer correction: `power=0.5`
+* Or set `recon_weight` per modality.
+
+---
+
+### 7) Convenience APIs you’ll actually call
+
+#### `encode_fused(...)`
+
+**Purpose:** Encode any subset of modalities into a fused posterior, with optional gate outputs.
+
+```python
+mu, logvar, z = model.encode_fused(
+    x_dict,
+    epoch=0,
+    use_mean=True,                 # True: return mu; False: sample
+    inject_label_expert=True,
+    attn_bias_cfg=None,
+)
+
+# Optional: get fusion gates (only when fused transformer posterior is NOT used)
+mu, logvar, z, gates, gate_logits = model.encode_fused(
+    x_dict,
+    return_gates=True,
+    return_gate_logits=True,
+)
+```
+
+#### `predict_heads(...)`
+
+**Purpose:** Encode fused latent, then emit probabilities/logits for the legacy head + all multi-head configs.
+
+```python
+pred = model.predict_heads(x_dict, return_probs=True)
+# pred[head] -> probs (softmax/sigmoid)
+```
 
 ---
 
