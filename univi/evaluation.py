@@ -41,6 +41,10 @@ def _json_safe(obj: Any) -> Any:
     return obj
 
 
+def to_dense(X):
+    return X.toarray() if sp.issparse(X) else np.asarray(X)
+
+
 # =============================================================================
 # Manuscript helpers (LSC17 score)
 # =============================================================================
@@ -568,6 +572,162 @@ def reconstruction_metrics(x_true: np.ndarray, x_pred: np.ndarray) -> Dict[str, 
 # =============================================================================
 # Encoding + cross-modal prediction + MoE gate extraction (FIXED)
 # =============================================================================
+
+def encode_fused_adata_pair(
+    model,
+    adata_by_mod: Mapping[str, Any],
+    *,
+    device: str = "cpu",
+    layer_by_mod: Optional[Mapping[str, Optional[str]]] = None,
+    X_key_by_mod: Optional[Mapping[str, str]] = None,
+    batch_size: int = 1024,
+    use_mean: bool = True,
+    epoch: int = 0,
+    y: Optional[Any] = None,
+    inject_label_expert: bool = False,
+    attn_bias_cfg: Optional[Mapping[str, Any]] = None,
+    return_gates: bool = True,
+    return_gate_logits: bool = True,
+    # if True, write into each adata: obsm["X_univi_fused"], and obs gate columns
+    write_to_adatas: bool = False,
+    fused_obsm_key: str = "X_univi_fused",
+    gate_prefix: str = "gate",
+    gate_diff: bool = True,
+) -> Dict[str, Any]:
+    """
+    True multimodal fused encoding (multiple observed modalities per cell):
+      (rna, atac, ...) -> model.encode_fused -> Z_fused (+ optional router gates/logits)
+
+    Parameters
+    ----------
+    adata_by_mod:
+      dict like {"rna": rna_adata, "atac": atac_adata, ...}
+      All adatas must have the same n_obs and aligned rows (paired cells).
+
+    Returns
+    -------
+    dict with:
+      - Z_fused: (n_cells, latent_dim)
+      - gates: (n_cells, n_modalities) or None
+      - gate_logits: (n_cells, n_modalities) or None
+      - modality_order: list[str] (the order used for gates/logits)
+    """
+    from .data import _get_matrix  # local import to avoid hard dependency if unused
+
+    model.eval()
+    dev = torch.device(device)
+
+    layer_by_mod = dict(layer_by_mod or {})
+    X_key_by_mod = dict(X_key_by_mod or {})
+
+    mods = list(adata_by_mod.keys())
+    if not mods:
+        raise ValueError("adata_by_mod is empty.")
+
+    # --- load numpy matrices ---
+    X_np: Dict[str, np.ndarray] = {}
+    n = None
+    for m, ad in adata_by_mod.items():
+        lay = layer_by_mod.get(m, None)
+        xk = X_key_by_mod.get(m, "X")
+        Xm = _get_matrix(ad, layer=lay, X_key=xk)
+        Xm = to_dense(Xm).astype(np.float32, copy=False)
+
+        if n is None:
+            n = int(Xm.shape[0])
+        elif int(Xm.shape[0]) != int(n):
+            raise ValueError("All adatas in adata_by_mod must have identical n_obs.")
+        X_np[m] = Xm
+
+    n = int(n) if n is not None else 0
+    if n == 0:
+        return {"Z_fused": np.zeros((0, 0), dtype=np.float32),
+                "gates": None, "gate_logits": None, "modality_order": list(mods)}
+
+    # --- determine gate order ---
+    # encode_fused returns gates in the *same order it passes into mixture_of_experts*.
+    # For safety, we enforce a stable order here.
+    # Prefer model.modality_names if it exists, but only keep present mods.
+    if hasattr(model, "modality_names"):
+        modality_order = [m for m in list(getattr(model, "modality_names")) if m in X_np]
+        if not modality_order:
+            modality_order = mods
+    else:
+        modality_order = mods
+
+    Z_chunks: List[np.ndarray] = []
+    G_chunks: List[np.ndarray] = []
+    L_chunks: List[np.ndarray] = []
+
+    with torch.no_grad():
+        for start in range(0, n, int(batch_size)):
+            end = min(start + int(batch_size), n)
+
+            xb = {
+                m: torch.as_tensor(X_np[m][start:end], dtype=torch.float32, device=dev)
+                for m in modality_order
+            }
+
+            # NOTE: encode_fused may return gates/logits=None when fused transformer posterior is used.
+            mu, logvar, z, gates, gate_logits = model.encode_fused(
+                xb,
+                epoch=int(epoch),
+                y=y,
+                use_mean=bool(use_mean),
+                inject_label_expert=bool(inject_label_expert),
+                attn_bias_cfg=attn_bias_cfg,
+                return_gates=bool(return_gates),
+                return_gate_logits=bool(return_gate_logits),
+            )
+
+            Z_chunks.append(z.detach().cpu().numpy())
+
+            if gates is not None:
+                G_chunks.append(gates.detach().cpu().numpy())
+            if gate_logits is not None:
+                L_chunks.append(gate_logits.detach().cpu().numpy())
+
+    Z_fused = np.vstack(Z_chunks).astype(np.float32, copy=False)
+    G = np.vstack(G_chunks).astype(np.float32, copy=False) if G_chunks else None
+    L = np.vstack(L_chunks).astype(np.float32, copy=False) if L_chunks else None
+
+    # --- optionally write into adatas ---
+    if write_to_adatas:
+        for _m, ad in adata_by_mod.items():
+            ad.obsm[fused_obsm_key] = Z_fused
+
+        if G is not None:
+            # write per-modality weights
+            for i, m in enumerate(modality_order):
+                col = f"{gate_prefix}_{m}"
+                for _mm, ad in adata_by_mod.items():
+                    ad.obs[col] = G[:, i]
+
+            # write pairwise diffs (only if exactly 2 mods OR if you want all diffs)
+            if gate_diff:
+                if len(modality_order) == 2:
+                    m0, m1 = modality_order[0], modality_order[1]
+                    diff = (G[:, 0] - G[:, 1]).astype(np.float32, copy=False)
+                    col = f"{gate_prefix}_{m0}_minus_{m1}"
+                    for _mm, ad in adata_by_mod.items():
+                        ad.obs[col] = diff
+                else:
+                    # all pairwise diffs: gate_A_minus_B
+                    for i in range(len(modality_order)):
+                        for j in range(i + 1, len(modality_order)):
+                            mi, mj = modality_order[i], modality_order[j]
+                            diff = (G[:, i] - G[:, j]).astype(np.float32, copy=False)
+                            col = f"{gate_prefix}_{mi}_minus_{mj}"
+                            for _mm, ad in adata_by_mod.items():
+                                ad.obs[col] = diff
+
+    return {
+        "Z_fused": Z_fused,
+        "gates": G,
+        "gate_logits": L,
+        "modality_order": list(modality_order),
+    }
+
 
 def encode_adata(
     model,
@@ -1137,6 +1297,24 @@ def evaluate_alignment(
     fused_kmeans: bool = True,
     fused_silhouette: bool = True,
     fused_random_state: int = 0,
+    # -------------------------------------------------------------
+    # NEW: auto-compute fused latent + gates directly from adatas
+    # -------------------------------------------------------------
+    adata_by_mod: Optional[Mapping[str, Any]] = None,
+    layer_by_mod: Optional[Mapping[str, Optional[str]]] = None,
+    X_key_by_mod: Optional[Mapping[str, str]] = None,
+    fused_batch_size: Optional[int] = None,   # if None, uses batch_size
+    fused_use_mean: bool = True,
+    fused_epoch: int = 0,
+    fused_y: Optional[Any] = None,
+    fused_inject_label_expert: bool = False,
+    fused_attn_bias_cfg: Optional[Mapping[str, Any]] = None,
+    fused_gate_kind: str = "router",          # "router" | "precision" | "effective_precision"
+    fused_return_gate_logits: bool = True,
+    fused_write_to_adatas: bool = False,
+    fused_obsm_key: str = "X_univi_fused",
+    fused_gate_prefix: str = "gate",
+    fused_gate_diff: bool = True,
     # gating
     gate_weights: Optional[np.ndarray] = None,
     gate_modality_order: Optional[Sequence[str]] = None,
@@ -1178,6 +1356,100 @@ def evaluate_alignment(
     out["latent1"] = lat1
     out["latent2"] = lat2
     out["metric"] = str(metric)
+
+    # -------------------------------------------------------------------------
+    # NEW: optional auto fused embedding + gates from paired multi-observed adatas
+    # -------------------------------------------------------------------------
+    if adata_by_mod is not None:
+        if model is None:
+            raise ValueError("When adata_by_mod is provided, you must also provide model.")
+
+        bs_fused = int(batch_size if fused_batch_size is None else fused_batch_size)
+
+        # If the model uses a fused transformer posterior, encode_fused may return gates=None.
+        # That’s okay: we still return Z_fused and can compute fused metrics.
+        fused_out = encode_fused_adata_pair(
+            model,
+            adata_by_mod=adata_by_mod,
+            device=device,
+            layer_by_mod=layer_by_mod,
+            X_key_by_mod=X_key_by_mod,
+            batch_size=bs_fused,
+            use_mean=bool(fused_use_mean),
+            epoch=int(fused_epoch),
+            y=fused_y,
+            inject_label_expert=bool(fused_inject_label_expert),
+            attn_bias_cfg=fused_attn_bias_cfg,
+            return_gates=True,
+            return_gate_logits=bool(fused_return_gate_logits),
+            write_to_adatas=bool(fused_write_to_adatas),
+            fused_obsm_key=str(fused_obsm_key),
+            gate_prefix=str(fused_gate_prefix),
+            gate_diff=bool(fused_gate_diff),
+        )
+
+        # Attach fused embedding to evaluation payload
+        Z_fused = fused_out.get("Z_fused", None)
+        if Z_fused is not None:
+            out["Z_fused_source"] = "encode_fused_adata_pair"
+        else:
+            out["Z_fused_source"] = None
+
+        # Prefer router/effective_precision if available, otherwise fall back to precision gates
+        G = fused_out.get("gates", None)
+        modality_order = fused_out.get("modality_order", None) or list(adata_by_mod.keys())
+
+        gate_weights = None
+        gate_logits = fused_out.get("gate_logits", None)
+
+        # If we requested router-based gates but encode_fused returned None (e.g. fused transformer posterior),
+        # we can still compute a "precision" gate proxy from per-modality logvars using encode_moe_gates_from_tensors.
+        # That keeps gate plots working even when the router isn't used.
+        want_kind = str(fused_gate_kind).lower().strip()
+        if want_kind not in {"router", "precision", "effective_precision"}:
+            want_kind = "router"
+
+        if (want_kind in {"router", "effective_precision"}) and (G is None):
+            # compute proxy gates from tensors
+            # Build x_dict from adatas (same as encode_fused_adata_pair loading does)
+            from .data import _get_matrix
+            x_dict_np = {}
+            layer_by_mod_eff = dict(layer_by_mod or {})
+            X_key_by_mod_eff = dict(X_key_by_mod or {})
+            for m, ad in adata_by_mod.items():
+                lay = layer_by_mod_eff.get(m, None)
+                xk = X_key_by_mod_eff.get(m, "X")
+                Xm = _get_matrix(ad, layer=lay, X_key=xk)
+                x_dict_np[m] = to_dense(Xm).astype(np.float32, copy=False)
+
+            # If router weights aren't available, "effective_precision" collapses to "precision"
+            kind_eff = "precision"
+            gates_proxy = encode_moe_gates_from_tensors(
+                model,
+                x_dict=x_dict_np,
+                device=device,
+                batch_size=bs_fused,
+                modality_order=modality_order,
+                kind=kind_eff,
+                return_logits=False,
+            )
+            gate_weights = gates_proxy["weights"]
+            gate_modality_order = gates_proxy["modality_order"]
+            gate_kind = gates_proxy["kind"]
+            out["gate_logits_available"] = False
+        else:
+            gate_weights = (np.asarray(G) if G is not None else None)
+            gate_modality_order = list(modality_order)
+            gate_kind = ("router" if G is not None else None)
+            out["gate_logits_available"] = (gate_logits is not None)
+
+        # Wire into the existing gating summary hooks at the end of evaluate_alignment
+        out["_auto_gate_weights"] = gate_weights
+        out["_auto_gate_modality_order"] = gate_modality_order
+        out["_auto_gate_kind"] = gate_kind
+
+        # Also keep gate logits if present (useful for debugging / plotting)
+        out["gate_logits"] = _json_safe(gate_logits) if (gate_logits is not None and json_safe) else gate_logits
 
     # FOSCTTM + SEM
     if Z1.shape == Z2.shape and Z1.shape[0] > 1:
@@ -1277,6 +1549,11 @@ def evaluate_alignment(
         out["bidirectional_transfer"] = None
 
     # Fused-space metrics (optional)
+    if Z_fused is None and ("Z_fused_source" in out) and (out["Z_fused_source"] == "encode_fused_adata_pair"):
+        # grab computed Z_fused from earlier block (we didn't stash it in out to avoid huge payload)
+        # easiest: re-use the local variable Z_fused (still in scope) if you inserted the block above.
+        pass
+
     if Z_fused is not None and fused_labels is not None:
         Zf = np.asarray(Z_fused, dtype=np.float32)
         yl = np.asarray(fused_labels)
@@ -1295,6 +1572,12 @@ def evaluate_alignment(
     else:
         out["fused_kmeans"] = None
         out["fused_silhouette"] = None
+
+    # If user didn't pass gate_weights, but we auto-computed them from adata_by_mod, use those.
+    if gate_weights is None and "_auto_gate_weights" in out:
+        gate_weights = out["_auto_gate_weights"]
+        gate_modality_order = out.get("_auto_gate_modality_order", gate_modality_order)
+        gate_kind = out.get("_auto_gate_kind", gate_kind)
 
     # Gating summaries (optional)
     if gate_weights is not None:
