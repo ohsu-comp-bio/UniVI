@@ -344,6 +344,20 @@ umap(
 )
 ```
 
+Plot fused both modalities by modality and celltype:
+
+```python
+umap_by_modality(
+    {"rna": rna, "adt": adt},
+    obsm_key="X_univi_fused",
+    color=["univi_modality", "celltype.l2"],
+    legend="outside",
+    size=8,
+    savepath="umap_fused_both_modalities.png",
+    show=False,
+)
+```
+
 ---
 
 ## 3) Cross-modal prediction (imputation): encode source → decode target
