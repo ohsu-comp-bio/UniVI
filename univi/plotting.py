@@ -1,7 +1,7 @@
 # univi/plotting.py
 from __future__ import annotations
 
-from typing import Dict, Optional, Sequence, List, Union, Tuple, Any, Mapping
+from typing import Dict, Optional, Sequence, List, Union, Tuple, Any
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -43,6 +43,51 @@ def set_style(
     sc.settings.set_figure_params(dpi=int(dpi), dpi_save=300, frameon=False)
 
 
+# =============================================================================
+# Display / lifecycle helpers
+# =============================================================================
+def _default_close(show: bool, savepath: Optional[str], return_fig: bool) -> bool:
+    """
+    Sensible default:
+      - If the user wants a figure object back, do NOT close by default.
+      - If show=True, do NOT close by default (so interactive use behaves normally).
+      - If show=False AND not returning fig: close by default (prevents Jupyter double-render).
+      - If saving without showing and not returning fig: close by default.
+    """
+    if return_fig:
+        return False
+    if show:
+        return False
+    # show=False and not returning fig => close to prevent stray display
+    return True
+
+
+def _finalize_figure(
+    fig: plt.Figure,
+    *,
+    savepath: Optional[str],
+    show: bool,
+    close: bool,
+    tight: bool = True,
+    bbox_inches: str = "tight",
+    pad_inches: float = 0.02,
+) -> None:
+    if tight:
+        try:
+            fig.tight_layout()
+        except Exception:
+            pass
+    if savepath is not None:
+        fig.savefig(savepath, dpi=300, bbox_inches=bbox_inches, pad_inches=float(pad_inches))
+    if show:
+        plt.show()
+    if close:
+        plt.close(fig)
+
+
+# =============================================================================
+# Scanpy legend / category helpers
+# =============================================================================
 def _is_categorical_obs(adata: AnnData, key: str) -> bool:
     if key not in adata.obs:
         return False
@@ -154,29 +199,6 @@ def _add_outside_legend(
     )
 
 
-def _finalize_figure(
-    fig: plt.Figure,
-    *,
-    savepath: Optional[str],
-    show: bool,
-    close: bool,
-    tight: bool = True,
-    bbox_inches: str = "tight",
-    pad_inches: float = 0.02,
-) -> None:
-    if tight:
-        try:
-            fig.tight_layout()
-        except Exception:
-            pass
-    if savepath is not None:
-        fig.savefig(savepath, dpi=300, bbox_inches=bbox_inches, pad_inches=float(pad_inches))
-    if show:
-        plt.show()
-    if close:
-        plt.close(fig)
-
-
 # =============================================================================
 # Embedding / UMAP helpers
 # =============================================================================
@@ -253,7 +275,7 @@ def umap(
     n_panels = max(1, len(colors)) if len(colors) > 0 else 1
 
     if close is None:
-        close = (not show) and (savepath is not None)
+        close = _default_close(show=show, savepath=savepath, return_fig=return_fig)
 
     ncols_eff = int(min(max(1, ncols), n_panels))
     nrows_eff = int(np.ceil(n_panels / ncols_eff))
@@ -390,6 +412,7 @@ def umap_by_modality(
     combined = AnnData(X=np.zeros((Z.shape[0], 0), dtype=np.float32), obs=obs_all)
     combined.obsm[obsm_key] = Z
 
+    # NOTE: close/return_fig behavior is handled inside umap()
     return umap(
         combined,
         obsm_key=obsm_key,
@@ -425,14 +448,17 @@ def plot_confusion_matrix(
     cm: np.ndarray,
     *,
     labels: Optional[Sequence[str]] = None,
+    xlabels: Optional[Sequence[str]] = None,
+    ylabels: Optional[Sequence[str]] = None,
     title: Optional[str] = None,
     normalize: Optional[str] = None,  # None | "true" | "pred" | "all"
     figsize: Tuple[float, float] = (6.0, 5.4),
     rotate_xticks: int = 90,
     show: bool = True,
     savepath: Optional[str] = None,
-    close: bool = True,
-) -> plt.Figure:
+    close: Optional[bool] = None,
+    return_fig: bool = False,
+) -> Optional[plt.Figure]:
     """
     Simple matplotlib confusion matrix plot.
 
@@ -461,11 +487,28 @@ def plot_confusion_matrix(
 
     n = M.shape[0]
     if labels is None:
-        labels = [str(i) for i in range(n)]
+        labels0 = [str(i) for i in range(n)]
     else:
-        labels = [str(x) for x in labels]
-        if len(labels) != n:
+        labels0 = [str(x) for x in labels]
+        if len(labels0) != n:
             raise ValueError(f"labels length must match cm size ({n}).")
+
+    if ylabels is None:
+        ylabels = labels0
+    else:
+        ylabels = [str(x) for x in ylabels]
+        if len(ylabels) != n:
+            raise ValueError(f"ylabels length must match cm size ({n}).")
+
+    if xlabels is None:
+        xlabels = labels0
+    else:
+        xlabels = [str(x) for x in xlabels]
+        if len(xlabels) != n:
+            raise ValueError(f"xlabels length must match cm size ({n}).")
+
+    if close is None:
+        close = _default_close(show=show, savepath=savepath, return_fig=return_fig)
 
     fig = plt.figure(figsize=figsize)
     ax = plt.gca()
@@ -474,22 +517,18 @@ def plot_confusion_matrix(
 
     ax.set_xticks(np.arange(n))
     ax.set_yticks(np.arange(n))
-    ax.set_xticklabels(labels, rotation=rotate_xticks, ha="right")
-    ax.set_yticklabels(labels)
+    ax.set_xticklabels(xlabels, rotation=rotate_xticks, ha="right")
+    ax.set_yticklabels(ylabels)
 
     ax.set_xlabel("Predicted")
     ax.set_ylabel("True")
     if title is not None:
         ax.set_title(title)
 
-    plt.tight_layout()
-    if savepath is not None:
-        fig.savefig(savepath, dpi=300, bbox_inches="tight", pad_inches=0.02)
-    if show:
-        plt.show()
-    if close:
-        plt.close(fig)
-    return fig
+    _finalize_figure(fig, savepath=savepath, show=show, close=bool(close),
+                     tight=True, bbox_inches="tight", pad_inches=0.02)
+
+    return fig if return_fig else None
 
 
 # =============================================================================
@@ -543,8 +582,9 @@ def plot_moe_gate_summary(
     title: Optional[str] = None,
     show: bool = True,
     savepath: Optional[str] = None,
-    close: bool = True,
-) -> plt.Figure:
+    close: Optional[bool] = None,
+    return_fig: bool = False,
+) -> Optional[plt.Figure]:
     """
     Heatmap summary of MoE gate usage by group.
 
@@ -555,7 +595,6 @@ def plot_moe_gate_summary(
         raise KeyError(f"groupby={groupby!r} not in adata.obs")
 
     if modality_names is None:
-        # infer from obs columns
         modality_names = []
         for c in adata.obs.columns:
             if c.startswith(f"{gate_prefix}_") and not c.startswith(f"{gate_prefix}_logit"):
@@ -579,13 +618,15 @@ def plot_moe_gate_summary(
     else:
         mat = df.groupby(groupby)[cols].mean()
 
-    # order by size
     sizes = df[groupby].value_counts()
     mat = mat.loc[sizes.index]
 
     M = mat.to_numpy(dtype=float)
     ylabels = [str(x) for x in mat.index]
     xlabels = [str(x) for x in mods]
+
+    if close is None:
+        close = _default_close(show=show, savepath=savepath, return_fig=return_fig)
 
     fig = plt.figure(figsize=figsize)
     ax = plt.gca()
@@ -603,14 +644,10 @@ def plot_moe_gate_summary(
         title = f"MoE gates by {groupby} ({agg})"
     ax.set_title(title)
 
-    plt.tight_layout()
-    if savepath is not None:
-        fig.savefig(savepath, dpi=300, bbox_inches="tight", pad_inches=0.02)
-    if show:
-        plt.show()
-    if close:
-        plt.close(fig)
-    return fig
+    _finalize_figure(fig, savepath=savepath, show=show, close=bool(close),
+                     tight=True, bbox_inches="tight", pad_inches=0.02)
+
+    return fig if return_fig else None
 
 
 # =============================================================================
@@ -683,7 +720,7 @@ def compare_raw_vs_pred_umap_features(
         plot_pred_layer = tmp_layer
 
     if close is None:
-        close = (not show) and (savepath is not None)
+        close = _default_close(show=show, savepath=savepath, return_fig=return_fig)
 
     ncol = len(feats)
     fig, axes = plt.subplots(
@@ -729,9 +766,16 @@ def plot_feature_scatter_observed_vs_pred(
     alpha: float = 0.3,
     title: Optional[str] = None,
     show: bool = True,
-) -> plt.Figure:
+    savepath: Optional[str] = None,
+    close: Optional[bool] = None,
+    return_fig: bool = False,
+) -> Optional[plt.Figure]:
     """
     Scatter: predicted vs observed for one feature (AnnData-based).
+
+    IMPORTANT NOTE (Jupyter):
+      If you call with show=False and you don't want any display, also ensure
+      the function closes the figure (default behavior here does that unless return_fig=True).
     """
     j = adata.var_names.get_loc(feature)
 
@@ -750,15 +794,19 @@ def plot_feature_scatter_observed_vs_pred(
         idx = rng.choice(n, size=int(max_points), replace=False)
         yo, yp = yo[idx], yp[idx]
 
+    if close is None:
+        close = _default_close(show=show, savepath=savepath, return_fig=return_fig)
+
     fig = plt.figure(figsize=(4.8, 4.2))
     plt.scatter(yp, yo, s=float(s), alpha=float(alpha))
     plt.xlabel("pred")
     plt.ylabel("obs")
     plt.title(title or feature)
-    plt.tight_layout()
-    if show:
-        plt.show()
-    return fig
+
+    _finalize_figure(fig, savepath=savepath, show=show, close=bool(close),
+                     tight=True, bbox_inches="tight", pad_inches=0.02)
+
+    return fig if return_fig else None
 
 
 # =============================================================================
@@ -823,21 +871,20 @@ def plot_featurewise_reconstruction_scatter(
     title: Optional[str] = None,
     savepath: Optional[str] = None,
     show: bool = True,
-    close: bool = True,
-) -> Union[plt.Figure, Dict[str, plt.Figure]]:
+    close: Optional[bool] = None,
+    return_fig: bool = False,
+) -> Union[None, plt.Figure, Dict[str, plt.Figure]]:
     """
-    README name -> scatter plots of TRUE vs PRED for selected features,
-    using the dict returned by univi.evaluation.evaluate_cross_reconstruction(...).
+    Scatter plots of TRUE vs PRED for selected features,
+    using dict returned by univi.evaluation.evaluate_cross_reconstruction(...).
 
-    Expected keys in rep:
-      - "X_true": (n_cells, n_features)
-      - "X_pred": (n_cells, n_features)
-      - "feature_names": list of feature names aligned to columns
+    If return_fig=False, returns None (prevents notebook auto-render).
+    If len(features)==1 and return_fig=True, returns a Figure.
+    Otherwise returns dict[str, Figure].
     """
     feats = list(features)
     if len(feats) == 0:
         raise ValueError("features must be non-empty.")
-
     if "X_true" not in rep or "X_pred" not in rep:
         raise KeyError("rep must contain keys 'X_true' and 'X_pred'.")
 
@@ -870,6 +917,12 @@ def plot_featurewise_reconstruction_scatter(
             yt = yt[idx]
             yp = yp[idx]
 
+        # decide lifecycle per-figure
+        if close is None:
+            close_i = _default_close(show=show, savepath=savepath, return_fig=return_fig)
+        else:
+            close_i = bool(close)
+
         fig = plt.figure(figsize=(4.8, 4.2))
         plt.scatter(yp, yt, s=float(s), alpha=float(alpha))
         plt.xlabel("pred")
@@ -887,11 +940,13 @@ def plot_featurewise_reconstruction_scatter(
 
         if show:
             plt.show()
-        if close:
+        if close_i:
             plt.close(fig)
 
         figs[f] = fig
 
+    if not return_fig:
+        return None
     return figs[feats[0]] if len(feats) == 1 else figs
 
 
@@ -904,21 +959,13 @@ def plot_reconstruction_error_summary(
     title: Optional[str] = None,
     show: bool = True,
     savepath: Optional[str] = None,
-    close: bool = True,
-) -> plt.Figure:
+    close: Optional[bool] = None,
+    return_fig: bool = False,
+) -> Optional[plt.Figure]:
     """
     README-friendly summary plot for reconstruction reports.
 
-    Expects `rep` from univi.evaluation.evaluate_cross_reconstruction(...), which includes:
-      - rep["summary"] (dict)
-      - rep["per_feature"] (dict of arrays)
-      - rep["feature_names"] (list[str])
-
-    Behavior
-    --------
-    - metric="mse": larger is worse (default)
-    - metric="pearson": smaller is worse if sort="worst", larger is better if sort="best"
-    - metric="auc": smaller is worse if sort="worst", larger is better if sort="best"
+    If return_fig=False, returns None (prevents notebook auto-render).
     """
     if "per_feature" not in rep or "feature_names" not in rep:
         raise KeyError("rep must contain keys 'per_feature' and 'feature_names'.")
@@ -963,6 +1010,9 @@ def plot_reconstruction_error_summary(
     names_top = [feat_names[i] for i in idx]
     vals_top = vals[idx]
 
+    if close is None:
+        close = _default_close(show=show, savepath=savepath, return_fig=return_fig)
+
     fig = plt.figure(figsize=(7.6, max(3.2, 0.22 * top_k + 1.8)))
     y = np.arange(top_k)[::-1]
     plt.barh(y, vals_top[::-1])
@@ -982,17 +1032,11 @@ def plot_reconstruction_error_summary(
 
     plt.title(title)
     plt.xlabel(xlabel)
-    plt.tight_layout()
 
-    if savepath is not None:
-        fig.savefig(savepath, dpi=300, bbox_inches="tight", pad_inches=0.02)
+    _finalize_figure(fig, savepath=savepath, show=show, close=bool(close),
+                     tight=True, bbox_inches="tight", pad_inches=0.02)
 
-    if show:
-        plt.show()
-    if close:
-        plt.close(fig)
-
-    return fig
+    return fig if return_fig else None
 
 
 # =============================================================================
@@ -1025,6 +1069,7 @@ def umap_single_adata(
     return_fig: bool = False,
     **scanpy_kwargs,
 ) -> Union[None, Tuple[plt.Figure, np.ndarray]]:
+    # Preserve historical behavior defaults: show=False, close=True
     if show is None:
         show = False
     if close is None:
@@ -1074,6 +1119,7 @@ def umap_by_modality_old(
     close: Optional[bool] = None,
     **kwargs,
 ) -> None:
+    # Preserve historical behavior defaults: show=False, close=True
     if show is None:
         show = False
     if close is None:
