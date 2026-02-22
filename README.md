@@ -992,7 +992,7 @@ UniVI/
 ├── data/                                  # Small example data notes (datasets are typically external)
 │   └── README.md                          # Notes on data sources / formats
 ├── notebooks/                             # End-to-end Jupyter Notebook analyses and examples
-│   ├── UniVI_GR_revised_manuscript/       # Reproduce figures from our revised manuscript (in progress for Genome Research)
+│   ├── GR_manuscript_reproducibility/     # Reproduce figures from our revised manuscript (in progress for Genome Research, on bioRxiv (manuscript v2))
 │   │   ├── UniVI_manuscript_GR-Figure__2__CITE_paired.ipynb
 │   │   ├── UniVI_manuscript_GR-Figure__3__CITE_paired_biological_latent.ipynb
 │   │   ├── UniVI_manuscript_GR-Figure__4__Multiome_paired.ipynb
@@ -1008,7 +1008,7 @@ UniVI/
 │   │   ├── UniVI_manuscript_GR-Figure_10__cell_population_ablation_MoE_compile_plots_from_results_df.ipynb
 │   │   ├── UniVI_manuscript_GR-Supple_____grid-sweep.ipynb
 │   │   └── UniVI_manuscript_GR-Supple_____grid-sweep_compile_plots_from_results_df.ipynb
-│   └── UniVI_GR_revised_manuscript/       # Other examples of UniVI workflow functionality
+│   └── UniVI_additional_examples/         # Additional examples of UniVI workflow functionality and cool things you can do with our method
 │       └── Multiome_NB-RNA-counts_Poisson_or_Bernoulli-ATAC_peak-counts_Peak_perturbation_to_RNA_expression_cross-generation_experiment.ipynb
 ├── parameter_files/                       # JSON configs for model + training + data selectors
 │   ├── defaults_*.json                    # Default configs (per experiment)
