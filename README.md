@@ -991,22 +991,25 @@ UniVI/
 │   └── univi_env.yml                      # Recommended env (CUDA-friendly)
 ├── data/                                  # Small example data notes (datasets are typically external)
 │   └── README.md                          # Notes on data sources / formats
-├── notebooks/                             # Jupyter notebook analyses to reproduce figures from our revised manuscript (in progress for Genome Research)
-│   ├── UniVI_manuscript_GR-Figure__2__CITE_paired.ipynb
-│   ├── UniVI_manuscript_GR-Figure__3__CITE_paired_biological_latent.ipynb
-│   ├── UniVI_manuscript_GR-Figure__4__Multiome_paired.ipynb
-│   ├── UniVI_manuscript_GR-Figure__5__Multiome_bridge_mapping_and_fine-tuning.ipynb
-│   ├── UniVI_manuscript_GR-Figure__6__TEA-seq_tri-modal.ipynb
-│   ├── UniVI_manuscript_GR-Figure__7__AML_bridge_mapping_and_fine-tuning.ipynb
-│   ├── UniVI_manuscript_GR-Figure__8__benchmarking_against_pytorch_tools.ipynb
-│   ├── UniVI_manuscript_GR-Figure__8__benchmarking_against_R_tools.ipynb
-│   ├── UniVI_manuscript_GR-Figure__8__benchmarking_merging_and_plotting_runs.ipynb
-│   ├── UniVI_manuscript_GR-Figure__9__paired_data_ablation_and_computational_scaling_performance.ipynb
-│   ├── UniVI_manuscript_GR-Figure__9__paired_data_ablation_and_computational_scaling_performance_compile_plots_from_results_df.ipynb
-│   ├── UniVI_manuscript_GR-Figure_10__cell_population_ablation_MoE.ipynb
-│   ├── UniVI_manuscript_GR-Figure_10__cell_population_ablation_MoE_compile_plots_from_results_df.ipynb
-│   ├── UniVI_manuscript_GR-Supple_____grid-sweep.ipynb
-│   └── UniVI_manuscript_GR-Supple_____grid-sweep_compile_plots_from_results_df.ipynb
+├── notebooks/                             # End-to-end Jupyter Notebook analyses and examples
+│   ├── UniVI_GR_revised_manuscript/       # Reproduce figures from our revised manuscript (in progress for Genome Research)
+│   │   ├── UniVI_manuscript_GR-Figure__2__CITE_paired.ipynb
+│   │   ├── UniVI_manuscript_GR-Figure__3__CITE_paired_biological_latent.ipynb
+│   │   ├── UniVI_manuscript_GR-Figure__4__Multiome_paired.ipynb
+│   │   ├── UniVI_manuscript_GR-Figure__5__Multiome_bridge_mapping_and_fine-tuning.ipynb
+│   │   ├── UniVI_manuscript_GR-Figure__6__TEA-seq_tri-modal.ipynb
+│   │   ├── UniVI_manuscript_GR-Figure__7__AML_bridge_mapping_and_fine-tuning.ipynb
+│   │   ├── UniVI_manuscript_GR-Figure__8__benchmarking_against_pytorch_tools.ipynb
+│   │   ├── UniVI_manuscript_GR-Figure__8__benchmarking_against_R_tools.ipynb
+│   │   ├── UniVI_manuscript_GR-Figure__8__benchmarking_merging_and_plotting_runs.ipynb
+│   │   ├── UniVI_manuscript_GR-Figure__9__paired_data_ablation_and_computational_scaling_performance.ipynb
+│   │   ├── UniVI_manuscript_GR-Figure__9__paired_data_ablation_and_computational_scaling_performance_compile_plots_from_results_df.ipynb
+│   │   ├── UniVI_manuscript_GR-Figure_10__cell_population_ablation_MoE.ipynb
+│   │   ├── UniVI_manuscript_GR-Figure_10__cell_population_ablation_MoE_compile_plots_from_results_df.ipynb
+│   │   ├── UniVI_manuscript_GR-Supple_____grid-sweep.ipynb
+│   │   └── UniVI_manuscript_GR-Supple_____grid-sweep_compile_plots_from_results_df.ipynb
+│   └── UniVI_GR_revised_manuscript/       # Other examples of UniVI workflow functionality
+│       └── Multiome_NB-RNA-counts_Poisson_or_Bernoulli-ATAC_peak-counts_Peak_perturbation_to_RNA_expression_cross-generation_experiment.ipynb
 ├── parameter_files/                       # JSON configs for model + training + data selectors
 │   ├── defaults_*.json                    # Default configs (per experiment)
 │   └── params_*.json                      # Example “named” configs (RNA, ADT, ATAC, etc.)
