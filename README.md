@@ -162,12 +162,17 @@ univi_cfg = UniVIConfig(
     align_anneal_start=100,
     align_anneal_end=175,
     modalities=[
-        # likelihood could also be: "mse", "nb", "zinb", "poisson", 
-        # "bernoulli", etc. depending on closest modality input distribution 
-        # and experiment goals (e.g., "bernoulli" for raw binarized ATAC peaks, 
-        # "nb" or "zinb" for raw scRNA-seq count inputs, "gaussian" for most 
-        # normalized/scaled feature inputs, like log-normed RNA, CLR-normed ADT, 
-        # TF-IDF/LSI normed ATAC features)
+        # Modality decoder likelihood can also be: "mse", "nb", "zinb", "poisson", 
+        # "bernoulli", etc. depending on closest modality input distribution (e.g.,
+        # "bernoulli" for raw binarized ATAC peaks, "poisson" for raw ATAC peak counts, 
+        # "nb" or "zinb" for raw scRNA-seq count inputs, "gaussian" for most normalized/
+        # scaled feature inputs, like log-normed RNA, CLR-normed ADT, TF-IDF/LSI normed 
+        # ATAC features).
+        #
+        # NOTE: Manuscript-esque "gaussian" input data and decoders lead to the best 
+        # aligned latent spaces on a cell-to-cell basis. Depending on experiment goals, 
+        # this could be a consideration.
+        #
         ModalityConfig(
             name="rna",
             input_dim=rna_tr.n_vars,
