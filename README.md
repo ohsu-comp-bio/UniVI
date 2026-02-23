@@ -219,6 +219,39 @@ trainer = UniVITrainer(
 trainer.fit()
 ```
 
+### 4) Saving + loading trained models
+
+Saving the trained model:
+
+```python
+import torch
+
+ckpt = {
+    "model_state_dict": model.state_dict(),
+    "model_config": univi_cfg,
+    "train_cfg": train_cfg,  # optional
+    "history": getattr(trainer, "history", None),
+    # optional fields if trainer exposes them:
+    "best_epoch": getattr(trainer, "best_epoch", None),
+    "best_metric": getattr(trainer, "best_metric", None),
+}
+torch.save(ckpt, "./saved_models/univi_model_state.pt")
+```
+
+Loading the saved model and metadata:
+
+```python
+import torch
+
+ckpt = torch.load("./saved_model/univi_model_state.pt", map_location=device)
+
+model = UniVI(ckpt["model_config"]).to(device)  # or UniVI(univi_cfg) if you prefer
+model.load_state_dict(ckpt["model_state_dict"])
+model.eval()
+
+print("Best epoch:", ckpt.get("best_epoch"))
+```
+
 ---
 
 ## After training: what you can do with a UniVI model
