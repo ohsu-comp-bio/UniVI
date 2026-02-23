@@ -19,7 +19,19 @@ from .utils.io import restore_checkpoint, save_checkpoint
 from .utils.logging import get_logger
 
 YType = Union[torch.Tensor, Dict[str, torch.Tensor]]
-BatchType = Union[Dict[str, torch.Tensor], Tuple[Dict[str, torch.Tensor], YType]]
+ReconTargetsType = Dict[str, Dict[str, torch.Tensor]]
+
+# Supported batch forms:
+#   x_dict
+#   (x_dict, y)
+#   (x_dict, recon_targets)                          # convenience
+#   (x_dict, y, recon_targets)                       # full
+BatchType = Union[
+    Dict[str, torch.Tensor],
+    Tuple[Dict[str, torch.Tensor], YType],
+    Tuple[Dict[str, torch.Tensor], ReconTargetsType],
+    Tuple[Dict[str, torch.Tensor], YType, ReconTargetsType],
+]
 
 
 class UniVITrainer:
@@ -227,25 +239,66 @@ class UniVITrainer:
 
     # ------------------------------ batch handling ------------------------------
 
-    def _split_batch(self, batch: BatchType) -> Tuple[Dict[str, torch.Tensor], Optional[YType]]:
+    def _split_batch(
+        self, batch: BatchType
+    ) -> Tuple[Dict[str, torch.Tensor], Optional[YType], Optional[ReconTargetsType]]:
         """
-        Accepts either:
+        Accepts any of:
           - x_dict
-          - (x_dict, y) where y is either:
-              * LongTensor (B,)  [back-compat]
-              * dict[str -> LongTensor(B,)]  [multi-head]
+          - (x_dict, y)
+          - (x_dict, recon_targets)
+          - (x_dict, y, recon_targets)
 
-        Moves tensors to device. Does NOT force-cast x modalities (keeps float32, float16, etc).
-        Ensures y is long if provided.
+        where:
+          y can be:
+            * LongTensor (B,)                    [back-compat]
+            * dict[str -> LongTensor(B,)]        [multi-head]
+          recon_targets is:
+            * dict[modality -> dict[target_name -> tensor]]
+              e.g. {"atac": {"successes": ..., "total_count": ...}}
+
+        Moves tensors to device.
+        - x tensors: preserves dtype unless non-tensor (casts to float32)
+        - y tensors: coerced to long (classification labels)
+        - recon target tensors: preserves dtype if already tensor; otherwise float32
         """
-        if isinstance(batch, (tuple, list)) and len(batch) == 2:
-            x_dict, y = batch
+        x_dict = None
+        y: Optional[YType] = None
+        recon_targets: Optional[ReconTargetsType] = None
+
+        # ---------- parse batch shape ----------
+        if isinstance(batch, (tuple, list)):
+            if len(batch) == 2:
+                a0, a1 = batch
+                x_dict = a0
+                # Heuristic: if second item looks like recon_targets (nested mapping), treat as such
+                if isinstance(a1, Mapping):
+                    is_nested_mapping = any(isinstance(v, Mapping) for v in a1.values()) if len(a1) > 0 else False
+                    if is_nested_mapping:
+                        recon_targets = a1  # type: ignore[assignment]
+                    else:
+                        y = a1  # type: ignore[assignment]
+                else:
+                    y = a1  # type: ignore[assignment]
+
+            elif len(batch) == 3:
+                a0, a1, a2 = batch
+                x_dict = a0
+                y = a1  # type: ignore[assignment]
+                recon_targets = a2  # type: ignore[assignment]
+
+            else:
+                raise TypeError(
+                    f"Expected batch to be dict, (dict,y), (dict,recon_targets), or (dict,y,recon_targets). "
+                    f"Got tuple/list length={len(batch)}"
+                )
         else:
-            x_dict, y = batch, None
+            x_dict = batch
 
         if not isinstance(x_dict, dict):
-            raise TypeError(f"Expected batch to be dict or (dict, y). Got {type(x_dict)!r}")
+            raise TypeError(f"Expected x_dict to be dict. Got {type(x_dict)!r}")
 
+        # ---------- x_dict ----------
         x_out: Dict[str, torch.Tensor] = {}
         for k, v in x_dict.items():
             if v is None:
@@ -256,6 +309,7 @@ class UniVITrainer:
             else:
                 x_out[k] = torch.as_tensor(v, dtype=torch.float32, device=self.device)
 
+        # ---------- y ----------
         y_out: Optional[YType] = None
         if y is not None:
             if isinstance(y, Mapping):
@@ -273,26 +327,94 @@ class UniVITrainer:
                     y = torch.as_tensor(y)
                 y_out = y.long().to(self.device, non_blocking=True)
 
-        return x_out, y_out
+        # ---------- recon_targets ----------
+        rt_out: Optional[ReconTargetsType] = None
+        if recon_targets is not None:
+            if not isinstance(recon_targets, Mapping):
+                raise TypeError(f"recon_targets must be a mapping, got {type(recon_targets)!r}")
+
+            rt_cast: ReconTargetsType = {}
+            for mod, target_dict in recon_targets.items():
+                if target_dict is None:
+                    continue
+                if not isinstance(target_dict, Mapping):
+                    raise TypeError(
+                        f"recon_targets[{mod!r}] must be a mapping of target_name->tensor, "
+                        f"got {type(target_dict)!r}"
+                    )
+
+                td_cast: Dict[str, torch.Tensor] = {}
+                for tk, tv in target_dict.items():
+                    if tv is None:
+                        continue
+                    if torch.is_tensor(tv):
+                        td_cast[str(tk)] = tv.to(self.device, non_blocking=True)
+                    else:
+                        # keep float32 by default for count-like tensors too (works with torch distributions)
+                        td_cast[str(tk)] = torch.as_tensor(tv, dtype=torch.float32, device=self.device)
+
+                if len(td_cast) > 0:
+                    rt_cast[str(mod)] = td_cast
+
+            rt_out = rt_cast if len(rt_cast) > 0 else None
+
+        return x_out, y_out, rt_out
 
     # ------------------------------ forward wrappers ------------------------------
 
-    def _forward_model(self, x_dict: Dict[str, torch.Tensor], epoch: int, y: Optional[YType]):
+    def _forward_model(
+        self,
+        x_dict: Dict[str, torch.Tensor],
+        epoch: int,
+        y: Optional[YType],
+        recon_targets: Optional[ReconTargetsType] = None,
+    ):
         """
         Best-effort forward dispatch for multiple model signatures.
 
         Tries newest first:
-          model(x, epoch=..., y=..., feature_coords=..., attn_bias_cfg=...)
+          model(x, epoch=..., y=..., recon_targets=..., feature_coords=..., attn_bias_cfg=...)
 
-        Then falls back to:
-          model(x, epoch=..., y=...)
-          model(x, epoch=...)
-          model(x, y=...)
-          model(x)
+        Then falls back progressively to older signatures.
         """
         fc = self.feature_coords if self.feature_coords else None
         ab = self.attn_bias_cfg if self.attn_bias_cfg else None
 
+        # Newest / richest signature
+        try:
+            return self.model(
+                x_dict,
+                epoch=epoch,
+                y=y,
+                recon_targets=recon_targets,
+                feature_coords=fc,
+                attn_bias_cfg=ab,
+            )
+        except TypeError:
+            pass
+
+        # Without feature coords / attn bias
+        try:
+            return self.model(
+                x_dict,
+                epoch=epoch,
+                y=y,
+                recon_targets=recon_targets,
+            )
+        except TypeError:
+            pass
+
+        # Without y
+        try:
+            return self.model(
+                x_dict,
+                epoch=epoch,
+                recon_targets=recon_targets,
+            )
+        except TypeError:
+            pass
+
+        # Older signatures (no recon_targets support)
         try:
             return self.model(x_dict, epoch=epoch, y=y, feature_coords=fc, attn_bias_cfg=ab)
         except TypeError:
@@ -353,14 +475,19 @@ class UniVITrainer:
         n_batches = 0
 
         for batch in loader:
-            x_dict, y = self._split_batch(batch)
+            x_dict, y, recon_targets = self._split_batch(batch)
 
             if train:
                 self.optimizer.zero_grad(set_to_none=True)
 
             with torch.set_grad_enabled(train):
                 with self._amp_context():
-                    out = self._forward_model(x_dict, epoch=epoch, y=y)
+                    out = self._forward_model(
+                        x_dict,
+                        epoch=epoch,
+                        y=y,
+                        recon_targets=recon_targets,
+                    )
                     loss = out["loss"] if train else out.get("loss_fixed", out["loss"])
 
                 if train:
