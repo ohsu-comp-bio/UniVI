@@ -1,17 +1,17 @@
 # UniVI
 
-[![PyPI version](https://img.shields.io/pypi/v/univi?v=0.4.6)](https://pypi.org/project/univi/)
+[![PyPI version](https://img.shields.io/pypi/v/univi?v=0.4.7)](https://pypi.org/project/univi/)
 [![pypi downloads](https://img.shields.io/pepy/dt/univi?label=pypi%20downloads)](https://pepy.tech/project/univi)
 [![Conda version](https://img.shields.io/conda/vn/conda-forge/univi?cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
 [![conda-forge downloads](https://img.shields.io/conda/dn/conda-forge/univi?label=conda-forge%20downloads\&cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.4.6)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.4.7)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.6/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.7/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.6/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.7/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
@@ -71,6 +71,13 @@ conda install -c conda-forge univi
 mamba install -c conda-forge univi
 ```
 
+> Optional (cleaner env setup):
+>
+> ```bash
+> mamba create -n univi python=3.10 univi -c conda-forge
+> mamba activate univi
+> ```
+
 ### Development install (from source)
 
 ```bash
@@ -128,6 +135,8 @@ For this case, use:
 In this setup, the model input can still be a convenient representation in `.X` (e.g., fractions, transformed fractions, or embeddings), **but reconstruction targets must provide both successes and total_count** via `recon_targets` during training/evaluation.
 
 > Practical note: keep successes/coverage matrices accessible (e.g., in `.layers`, side arrays, or a custom dataset object) if you plan to use `binomial` / `beta_binomial`.
+>
+> For `binomial` / `beta_binomial`, the model input (`x_dict[mod]`, usually from `.X`) can be fractions or embeddings, while the reconstruction loss is computed against `recon_targets[mod]` (successes + total_count).
 
 ---
 
@@ -158,7 +167,7 @@ adata_dict = align_paired_obs_names({"rna": rna, "adt": adt})
 ### 2) Dataset + dataloaders
 
 ```python
-device = "cuda" if torch.cuda.is_available() else ("mps" if torch.mps.is_available() else "cpu")
+device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
 
 dataset = MultiModalDataset(
     adata_dict=adata_dict,
@@ -196,13 +205,14 @@ univi_cfg = UniVIConfig(
         # - RNA (raw counts): "nb" or "zinb"
         # - ADT (CLR/scaled): often "gaussian"
         # - ATAC (binarized peaks): "bernoulli"
-        # - ATAC (peak counts): "poisson" (sometimes)
+        # - ATAC (peak counts): "poisson" (sometimes; often too restrictive if overdispersed)
+        # - ATAC (LSI / reduced features): often "gaussian" for integration-focused workflows
         # - Methylome fractions in (0,1): "beta"
         # - Methylome counts+coverage: "binomial" or "beta_binomial" (often preferred)
         #
         # IMPORTANT for "binomial" / "beta_binomial":
         #   The reconstruction target must include BOTH successes and total_count
-        #   (passed via `recon_targets` to the model/training step), e.g.:
+        #   (passed via `recon_targets` as a keyword argument to the model/training step), e.g.:
         #     {"successes": m, "total_count": n}
         #
         # NOTE:
@@ -313,7 +323,7 @@ It also supports common aliases such as:
 * successes: `successes`, `m`, `counts`, `k`
 * total count: `total_count`, `n`, `coverage`, `depth`, `trials`
 
-#### Example (direct model call)
+#### Example (direct model call; keyword args recommended)
 
 ```python
 out = model(
@@ -328,6 +338,8 @@ out = model(
 )
 ```
 
+> **Important:** pass `recon_targets=` as a **keyword argument** (not a positional argument), since `forward(...)` expects positional arguments in the order `(x_dict, epoch, y, attn_bias_cfg, recon_targets)`.
+>
 > **Trainer note:** If you use `UniVITrainer`, your dataset/collate path must yield these `recon_targets` and your training step must forward them into `model(..., recon_targets=...)`.
 > If you want the standard Quickstart path with no trainer changes, use fraction-valued methylome features with `likelihood="beta"` first.
 
@@ -354,14 +366,20 @@ Loading the saved model and additional model info:
 import torch
 from univi import UniVIMultiModalVAE
 
-ckpt = torch.load("./saved_models/univi_model_state.pt", weights_only=False, map_location=device)
+# For broad compatibility across PyTorch versions:
+ckpt = torch.load("./saved_models/univi_model_state.pt", map_location=device)
 
-model = UniVIMultiModalVAE(ckpt["model_config"]).to(device)  # or UniVIMultiModalVAE(univi_cfg) if you prefer
+# (If you're on newer PyTorch and prefer explicit behavior, you can use:
+# ckpt = torch.load("./saved_models/univi_model_state.pt", weights_only=False, map_location=device))
+
+model = UniVIMultiModalVAE(ckpt["model_config"]).to(device)
 model.load_state_dict(ckpt["model_state_dict"])
 model.eval()
 
 print("Best epoch:", ckpt.get("best_epoch"))
 ```
+
+> **Portability note:** Saving the config dataclass object is convenient, but checkpoint unpickling can be version-sensitive if config classes move/change. For long-term portability, also consider saving a JSON-serializable config alongside the checkpoint.
 
 ---
 
@@ -418,6 +436,7 @@ UniVI models are **generative** (decoders + likelihoods) and **alignment-oriente
 ```python
 import numpy as np
 import scipy.sparse as sp
+import torch
 
 from univi.evaluation import (
     encode_adata,
@@ -447,7 +466,7 @@ from univi.plotting import (
 )
 
 set_style(font_scale=1.2, dpi=150)
-device = "cuda"  # or "mps" (Mac M-chips), or "cpu"
+device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
 ```
 
 Helper for sparse matrices:
@@ -803,7 +822,7 @@ gate = encode_moe_gates_from_tensors(
     device=device,
     batch_size=1024,
     modality_order=["rna", "adt"],
-    kind="router_x_precision",  # will fall back to "effective_precision" if router logits are unavailable
+    kind="router_x_precision",  # falls back to "effective_precision" if router logits are unavailable
     return_logits=True,
 )
 
@@ -954,7 +973,7 @@ attn_bias_cfg = {
   "atac": {"type": "distance", "lengthscale_bp": 50_000, "same_chrom_only": True}
 }
 
-out = model(x_dict, epoch=ep, attn_bias_cfg=attn_bias_cfg)
+out = model(x_dict=x_dict, epoch=ep, attn_bias_cfg=attn_bias_cfg)
 mu, logvar, z = model.encode_fused(x_dict, attn_bias_cfg=attn_bias_cfg)
 pred = model.predict_heads(x_dict, attn_bias_cfg=attn_bias_cfg)
 ```
@@ -1049,7 +1068,7 @@ y = {
   "batch": batch_ids,         # adversarial categorical, for batch-invariant latents
   "is_doublet": doublet_01,   # binary head (0/1, ignore_index supported)
 }
-out = model(x_dict, epoch=ep, y=y)
+out = model(x_dict=x_dict, epoch=ep, y=y)
 ```
 
 **How to predict heads after training:**
@@ -1182,7 +1201,7 @@ UniVI/
 ├── data/                                  # Small example data notes (datasets are typically external)
 │   └── README.md                          # Notes on data sources / formats
 ├── notebooks/                             # End-to-end Jupyter Notebook analyses and examples
-│   ├── GR_manuscript_reproducibility/     # Reproduce figures from our revised manuscript (in progress for Genome Research, on bioRxiv (manuscript v2))
+│   ├── GR_manuscript_reproducibility/     # Reproduce figures from revised manuscript (in progress for Genome Research; bioRxiv manuscript v2)
 │   │   ├── UniVI_manuscript_GR-Figure__2__CITE_paired.ipynb
 │   │   ├── UniVI_manuscript_GR-Figure__3__CITE_paired_biological_latent.ipynb
 │   │   ├── UniVI_manuscript_GR-Figure__4__Multiome_paired.ipynb
@@ -1198,7 +1217,7 @@ UniVI/
 │   │   ├── UniVI_manuscript_GR-Figure_10__cell_population_ablation_MoE_compile_plots_from_results_df.ipynb
 │   │   ├── UniVI_manuscript_GR-Supple_____grid-sweep.ipynb
 │   │   └── UniVI_manuscript_GR-Supple_____grid-sweep_compile_plots_from_results_df.ipynb
-│   └── UniVI_additional_examples/         # Additional examples of UniVI workflow functionality and cool things you can do with our method
+│   └── UniVI_additional_examples/         # Additional examples of UniVI workflow functionality
 │       └── Multiome_NB-RNA-counts_Poisson_or_Bernoulli-ATAC_peak-counts_Peak_perturbation_to_RNA_expression_cross-generation_experiment.ipynb
 ├── parameter_files/                       # JSON configs for model + training + data selectors
 │   ├── defaults_*.json                    # Default configs (per experiment)
@@ -1244,7 +1263,6 @@ UniVI/
     │   ├── run_citeseq_hparam_search.py
     │   ├── run_multiome_hparam_search.py
     │   ├── run_rna_hparam_search.py
-    │   ├── run_atac_hparam_search.py
     │   └── run_teaseq_hparam_search.py
     └── utils/                             # General utilities
         ├── __init__.py
