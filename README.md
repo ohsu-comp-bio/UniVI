@@ -224,8 +224,6 @@ trainer.fit()
 Saving the trained model:
 
 ```python
-import torch
-
 ckpt = {
     "model_state_dict": model.state_dict(),
     "model_config": univi_cfg,
@@ -241,8 +239,6 @@ torch.save(ckpt, "./saved_models/univi_model_state.pt")
 Loading the saved model and metadata:
 
 ```python
-import torch
-
 ckpt = torch.load("./saved_model/univi_model_state.pt", map_location=device)
 
 model = UniVI(ckpt["model_config"]).to(device)  # or UniVI(univi_cfg) if you prefer
