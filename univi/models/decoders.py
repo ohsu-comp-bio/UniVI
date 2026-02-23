@@ -1,5 +1,3 @@
-# univi/models/decoders.py
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -21,6 +19,9 @@ class DecoderConfig:
     batchnorm: bool = False
 
 
+# ---------------------------------------------------------------------
+# Continuous decoders
+# ---------------------------------------------------------------------
 class GaussianDecoder(nn.Module):
     """z -> mean reconstruction (use with MSE/Gaussian losses)."""
 
@@ -59,6 +60,73 @@ class GaussianDiagDecoder(nn.Module):
         return {"mean": mean, "logvar": logvar}
 
 
+class BetaDecoder(nn.Module):
+    """
+    z -> parameters for Beta likelihoods on continuous targets in (0,1).
+
+    Useful for fraction-valued features (e.g., methylation/accessibility fractions)
+    when you do NOT explicitly model coverage counts.
+
+    Returns:
+      {
+        'alpha': alpha,
+        'beta': beta,
+        'mu_logits': mu_logits,
+        'log_conc': log_conc,
+        'mu': mu,         # convenience
+        'conc': conc,     # convenience
+      }
+
+    Parameterization:
+      mu   = sigmoid(mu_logits) in (0,1)
+      conc = softplus(log_conc_raw) + min_conc
+      alpha = mu * conc
+      beta  = (1-mu) * conc
+    """
+
+    def __init__(
+        self,
+        cfg: DecoderConfig,
+        latent_dim: int,
+        eps: float = 1e-8,
+        min_conc: float = 1e-4,
+    ):
+        super().__init__()
+        self.cfg = cfg
+        self.eps = float(eps)
+        self.min_conc = float(min_conc)
+
+        self.backbone = build_mlp(
+            in_dim=latent_dim,
+            hidden_dims=cfg.hidden_dims,
+            out_dim=2 * cfg.output_dim,
+            dropout=cfg.dropout,
+            batchnorm=cfg.batchnorm,
+        )
+
+    def forward(self, z: torch.Tensor) -> Dict[str, torch.Tensor]:
+        out = self.backbone(z)
+        mu_logits, log_conc_raw = out.chunk(2, dim=-1)
+
+        mu = torch.sigmoid(mu_logits).clamp(self.eps, 1.0 - self.eps)
+        conc = F.softplus(log_conc_raw) + self.min_conc
+
+        alpha = (mu * conc).clamp_min(self.eps)
+        beta = ((1.0 - mu) * conc).clamp_min(self.eps)
+
+        return {
+            "alpha": alpha,
+            "beta": beta,
+            "mu_logits": mu_logits,
+            "log_conc": torch.log(conc + self.eps),
+            "mu": mu,
+            "conc": conc,
+        }
+
+
+# ---------------------------------------------------------------------
+# Bernoulli / count / proportion-count decoders
+# ---------------------------------------------------------------------
 class BernoulliDecoder(nn.Module):
     """z -> {'logits'} for Bernoulli likelihoods."""
 
@@ -76,6 +144,97 @@ class BernoulliDecoder(nn.Module):
     def forward(self, z: torch.Tensor) -> Dict[str, torch.Tensor]:
         logits = self.net(z)
         return {"logits": logits}
+
+
+class BinomialDecoder(nn.Module):
+    """
+    z -> {'logits'} for Binomial likelihoods.
+
+    Intended for targets like:
+      successes m ~ Binomial(total_count=n, p)
+    where `n` (coverage / trials) is provided to the loss function, not the decoder.
+
+    Decoder returns logits for p.
+    """
+
+    def __init__(self, cfg: DecoderConfig, latent_dim: int):
+        super().__init__()
+        self.cfg = cfg
+        self.net = build_mlp(
+            in_dim=latent_dim,
+            hidden_dims=cfg.hidden_dims,
+            out_dim=cfg.output_dim,
+            dropout=cfg.dropout,
+            batchnorm=cfg.batchnorm,
+        )
+
+    def forward(self, z: torch.Tensor) -> Dict[str, torch.Tensor]:
+        logits = self.net(z)
+        return {"logits": logits}
+
+
+class BetaBinomialDecoder(nn.Module):
+    """
+    z -> parameters for Beta-Binomial likelihoods (overdispersed Binomial).
+
+    Intended for count-with-coverage observations such as methylome or
+    proportion-like assays with sampling noise and extra-binomial variance.
+
+    Returns:
+      {
+        'mu_logits': mu_logits,
+        'log_conc': log_conc,
+        'mu': mu,         # convenience
+        'conc': conc,     # convenience
+        'alpha': alpha,   # convenience (for losses that prefer alpha/beta)
+        'beta': beta,     # convenience
+      }
+
+    Parameterization:
+      mu   = sigmoid(mu_logits) in (0,1)
+      conc = softplus(log_conc_raw) + min_conc
+      alpha = mu * conc
+      beta  = (1-mu) * conc
+    """
+
+    def __init__(
+        self,
+        cfg: DecoderConfig,
+        latent_dim: int,
+        eps: float = 1e-8,
+        min_conc: float = 1e-4,
+    ):
+        super().__init__()
+        self.cfg = cfg
+        self.eps = float(eps)
+        self.min_conc = float(min_conc)
+
+        self.backbone = build_mlp(
+            in_dim=latent_dim,
+            hidden_dims=cfg.hidden_dims,
+            out_dim=2 * cfg.output_dim,
+            dropout=cfg.dropout,
+            batchnorm=cfg.batchnorm,
+        )
+
+    def forward(self, z: torch.Tensor) -> Dict[str, torch.Tensor]:
+        out = self.backbone(z)
+        mu_logits, log_conc_raw = out.chunk(2, dim=-1)
+
+        mu = torch.sigmoid(mu_logits).clamp(self.eps, 1.0 - self.eps)
+        conc = F.softplus(log_conc_raw) + self.min_conc
+
+        alpha = (mu * conc).clamp_min(self.eps)
+        beta = ((1.0 - mu) * conc).clamp_min(self.eps)
+
+        return {
+            "mu_logits": mu_logits,
+            "log_conc": torch.log(conc + self.eps),
+            "mu": mu,
+            "conc": conc,
+            "alpha": alpha,
+            "beta": beta,
+        }
 
 
 class PoissonDecoder(nn.Module):
@@ -172,6 +331,9 @@ class ZeroInflatedNegativeBinomialDecoder(nn.Module):
         return {"mu": mu, "log_theta": self.log_theta, "logit_pi": logit_pi}
 
 
+# ---------------------------------------------------------------------
+# Compositional / categorical decoders
+# ---------------------------------------------------------------------
 class LogisticNormalDecoder(nn.Module):
     """z -> {'logits','probs'} for compositions/toy probability vectors."""
 
@@ -212,18 +374,27 @@ class CategoricalDecoder(nn.Module):
         return {"logits": logits, "probs": probs}
 
 
+# ---------------------------------------------------------------------
+# Registry / factory
+# ---------------------------------------------------------------------
 DECODER_REGISTRY = {
     # gaussian
     "gaussian": GaussianDecoder,
     "normal": GaussianDecoder,
-
     "gaussian_diag": GaussianDiagDecoder,
 
-    # bernoulli/poisson
+    # bounded continuous (fractions)
+    "beta": BetaDecoder,
+
+    # bernoulli / proportion-count models
     "bernoulli": BernoulliDecoder,
-    "poisson": PoissonDecoder,
+    "binomial": BinomialDecoder,
+    "beta_binomial": BetaBinomialDecoder,
+    "betabinomial": BetaBinomialDecoder,
+    "bb": BetaBinomialDecoder,
 
     # count models
+    "poisson": PoissonDecoder,
     "nb": NegativeBinomialDecoder,
     "negative_binomial": NegativeBinomialDecoder,
     "zinb": ZeroInflatedNegativeBinomialDecoder,

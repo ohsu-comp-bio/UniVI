@@ -72,7 +72,6 @@ def _as_list_int(x: Any) -> Optional[List[int]]:
                 continue
             out.append(int(v))
         return out
-    # allow single int
     try:
         return [int(x)]
     except Exception:
@@ -97,65 +96,12 @@ def _parse_activation(act: Any) -> Optional[nn.Module]:
         return nn.SiLU()
     if s in ("tanh",):
         return nn.Tanh()
-    # unknown -> None (falls back to default)
     return None
 
 
 class UniVIMultiModalVAE(nn.Module):
     """
     Multi-modal β-VAE with per-modality encoders and decoders.
-
-    Defaults (backwards-compatible)
-    -------------------------------
-    - Per-modality encoders: MLP (or transformer if set on that modality)
-    - Fused posterior: MoE/PoE-style precision fusion over per-modality posteriors
-
-    Optional fused multimodal transformer posterior
-    ----------------------------------------------
-    If cfg.fused_encoder_type == "multimodal_transformer", build a fused encoder that:
-      x_dict -> concat(tokens_rna, tokens_adt, tokens_atac, ...) -> transformer -> (mu_fused, logvar_fused)
-
-    In that mode:
-      - v2/lite can use mu_fused/logvar_fused for z
-      - alignment term becomes mean_i ||mu_i - mu_fused||^2 (instead of pairwise)
-      - if required fused modalities are missing (cfg.fused_require_all_modalities=True), fall back to MoE fusion
-
-    Optional attention bias (safe no-op)
-    ------------------------------------
-    You can pass `attn_bias_cfg` into forward/encode_fused/predict_heads:
-
-      attn_bias_cfg = {
-        "atac": {"type": "distance", "lengthscale_bp": 50000, "same_chrom_only": True},
-      }
-
-    - Per-modality transformer encoders: will try to build a distance attention bias if the tokenizer
-      supports topk indices + coords and exposes build_distance_attn_bias().
-    - Fused multimodal transformer encoder: will fill within-modality blocks (e.g. ATAC slice) and
-      keep cross-modality blocks neutral (0).
-
-    Recon scaling (IMPORTANT)
-    ------------------------
-    Recon losses in _recon_loss are typically sums over features (dim=-1). In multi-modal settings
-    with very different feature dims (RNA >> ADT/ATAC-LSI), RNA can dominate gradients.
-
-    This class supports:
-      - recon_normalize_by_dim: divide per-cell recon by D**recon_dim_power
-      - per-modality weights via ModalityConfig.recon_weight (default 1.0)
-
-    Classification heads (UPDATED, backwards-compatible)
-    ----------------------------------------------------
-    cfg.class_heads can specify any number of heads. Each head may be:
-
-      - categorical (default): softmax + cross-entropy
-      - binary: sigmoid + BCEWithLogitsLoss
-
-    New optional per-head attributes (read via getattr, so old configs still work):
-      - head_type / type / task: "categorical" or "binary"
-      - hidden_dims / head_hidden / mlp_hidden / layers: e.g. [128, 64]
-      - dropout: float
-      - batchnorm: bool
-      - activation: "relu", "gelu", "silu", ...
-      - pos_weight: float (binary only; for imbalance)
     """
 
     LOGVAR_MIN = -10.0
@@ -171,14 +117,9 @@ class UniVIMultiModalVAE(nn.Module):
         v1_recon_mix: float = 0.0,
         normalize_v1_terms: bool = True,
 
-        # ---- recon scaling controls ----
-        # If left as None, defaults depend on loss_mode:
-        #   v1/paper/cross -> (False, 0.5)
-        #   v2/lite/etc    -> (True,  1.0)
         recon_normalize_by_dim: Optional[bool] = None,
-        recon_dim_power: Optional[float] = None,  # 1.0 => divide by D; 0.5 => divide by sqrt(D)
+        recon_dim_power: Optional[float] = None,
 
-        # ---- legacy single label head (kept) ----
         n_label_classes: int = 0,
         label_loss_weight: float = 1.0,
         use_label_encoder: bool = False,
@@ -198,9 +139,6 @@ class UniVIMultiModalVAE(nn.Module):
         self.v1_recon_mix = float(v1_recon_mix)
         self.normalize_v1_terms = bool(normalize_v1_terms)
 
-        # ----------------------------
-        # recon scaling: mode defaults
-        # ----------------------------
         mode = (self.loss_mode or "v2").lower()
         is_v1 = mode in ("v1", "paper", "cross")
 
@@ -219,9 +157,6 @@ class UniVIMultiModalVAE(nn.Module):
         self.modality_names: List[str] = [m.name for m in cfg.modalities]
         self.mod_cfg_by_name: Dict[str, ModalityConfig] = {m.name: m for m in cfg.modalities}
 
-        # ------------------------------------------------------------
-        # Per-modality modules
-        # ------------------------------------------------------------
         self.encoders = nn.ModuleDict()
         self.encoder_heads = nn.ModuleDict()
         self.decoders = nn.ModuleDict()
@@ -252,6 +187,18 @@ class UniVIMultiModalVAE(nn.Module):
                     init_log_theta=init_log_theta,
                     eps=self.EPS,
                 )
+            elif lk in ("beta",):
+                decoder_kwargs = dict(
+                    eps=self.EPS,
+                    min_conc=float(getattr(m, "min_conc", 1e-4)),
+                )
+            elif lk in ("beta_binomial", "betabinomial", "bb"):
+                decoder_kwargs = dict(
+                    eps=self.EPS,
+                    min_conc=float(getattr(m, "min_conc", 1e-4)),
+                )
+            elif lk in ("binomial",):
+                decoder_kwargs = {}
 
             self.decoders[m.name] = build_decoder(
                 lk,
@@ -260,13 +207,9 @@ class UniVIMultiModalVAE(nn.Module):
                 **decoder_kwargs,
             )
 
-        # Shared prior N(0, I)
         self.register_buffer("prior_mu", torch.zeros(self.latent_dim))
         self.register_buffer("prior_logvar", torch.zeros(self.latent_dim))
 
-        # ------------------------------------------------------------
-        # Optional fused multimodal encoder
-        # ------------------------------------------------------------
         self.fused_encoder_type = (getattr(cfg, "fused_encoder_type", "moe") or "moe").lower().strip()
         self.fused_require_all = bool(getattr(cfg, "fused_require_all_modalities", True))
         self.fused_modalities = list(getattr(cfg, "fused_modalities", None) or self.modality_names)
@@ -280,9 +223,6 @@ class UniVIMultiModalVAE(nn.Module):
         else:
             self.fused_encoder = None
 
-        # ------------------------------------------------------------
-        # Legacy single label head (kept)
-        # ------------------------------------------------------------
         self.n_label_classes = int(n_label_classes) if n_label_classes is not None else 0
         self.label_loss_weight = float(label_loss_weight)
         self.label_ignore_index = int(label_ignore_index)
@@ -303,7 +243,6 @@ class UniVIMultiModalVAE(nn.Module):
         self.label_names: Optional[List[str]] = None
         self.label_name_to_id: Optional[Dict[str, int]] = None
 
-        # Legacy label encoder expert (optional)
         self.use_label_encoder = bool(use_label_encoder)
         self.label_moe_weight = float(label_moe_weight)
         self.unlabeled_logvar = float(unlabeled_logvar)
@@ -321,9 +260,6 @@ class UniVIMultiModalVAE(nn.Module):
         else:
             self.label_encoder = None
 
-        # ------------------------------------------------------------
-        # Multi-head supervised decoders (incl. adversarial heads) (UPDATED)
-        # ------------------------------------------------------------
         self.class_heads = nn.ModuleDict()
         self.class_heads_cfg: Dict[str, Dict[str, Any]] = {}
         self.head_label_names: Dict[str, List[str]] = {}
@@ -335,11 +271,8 @@ class UniVIMultiModalVAE(nn.Module):
                     raise TypeError(f"cfg.class_heads must contain ClassHeadConfig, got {type(h)}")
 
                 name = str(h.name)
-
-                # Backwards-compatible defaults:
                 n_classes = int(getattr(h, "n_classes", 0))
 
-                # New: head type (binary vs categorical), with compatibility defaults
                 head_type = (
                     getattr(h, "head_type", None)
                     or getattr(h, "type", None)
@@ -348,7 +281,6 @@ class UniVIMultiModalVAE(nn.Module):
                 head_type = (str(head_type).lower().strip() if head_type is not None else None)
 
                 if head_type is None:
-                    # preserve old behavior: categorical CE always (even for n_classes==2)
                     head_type = "categorical"
 
                 if head_type in ("bin", "binary", "bce", "bernoulli", "logistic"):
@@ -356,10 +288,8 @@ class UniVIMultiModalVAE(nn.Module):
                 elif head_type in ("cat", "categorical", "softmax", "multiclass", "ce"):
                     head_type = "categorical"
                 else:
-                    # unknown -> safe default matching old behavior
                     head_type = "categorical"
 
-                # New: hidden dims / dropout / batchnorm / activation
                 hidden_dims = (
                     _as_list_int(getattr(h, "hidden_dims", None))
                     or _as_list_int(getattr(h, "head_hidden", None))
@@ -374,7 +304,6 @@ class UniVIMultiModalVAE(nn.Module):
                 h_act = _parse_activation(getattr(h, "activation", None))
 
                 if head_type == "categorical":
-                    # Keep categorical as the original path to minimize downstream differences
                     dec_cfg = DecoderConfig(
                         output_dim=n_classes,
                         hidden_dims=list(hidden_dims),
@@ -384,7 +313,6 @@ class UniVIMultiModalVAE(nn.Module):
                     self.class_heads[name] = build_decoder("categorical", cfg=dec_cfg, latent_dim=self.latent_dim)
                     out_dim = n_classes
                 else:
-                    # binary -> single logit
                     self.class_heads[name] = _LogitsMLPHead(
                         in_dim=self.latent_dim,
                         out_dim=1,
@@ -396,30 +324,21 @@ class UniVIMultiModalVAE(nn.Module):
                     out_dim = 1
 
                 self.class_heads_cfg[name] = {
-                    "type": head_type,  # NEW (but safe)
-                    "n_classes": n_classes,  # keep for meta / decoding
-                    "out_dim": out_dim,      # NEW
+                    "type": head_type,
+                    "n_classes": n_classes,
+                    "out_dim": out_dim,
                     "loss_weight": float(getattr(h, "loss_weight", 1.0)),
                     "ignore_index": int(getattr(h, "ignore_index", -1)),
                     "from_mu": bool(getattr(h, "from_mu", True)),
                     "warmup": int(getattr(h, "warmup", 0)),
                     "adversarial": bool(getattr(h, "adversarial", False)),
                     "adv_lambda": float(getattr(h, "adv_lambda", 1.0)),
-                    # binary-only optional
                     "pos_weight": float(getattr(h, "pos_weight", 1.0)),
                 }
 
-        # ------------------------------------------------------------
-        # Optional MoE gating for fusion (NEW; defaults to off)
-        # ------------------------------------------------------------
         self.use_moe_gating = bool(getattr(cfg, "use_moe_gating", False))
-
-        # How to build gate logits:
-        # - "per_modality": separate tiny MLP per modality -> scalar logit
-        # - "shared": one MLP on concatenated (mu, logvar) per modality -> scalar logit
         self.moe_gating_type = str(getattr(cfg, "moe_gating_type", "per_modality")).lower().strip()
 
-        # Gate MLP hidden dims (tiny by default)
         gate_hidden = getattr(cfg, "moe_gating_hidden", None)
         if gate_hidden is None:
             gate_hidden = [max(32, self.latent_dim // 2)]
@@ -430,18 +349,13 @@ class UniVIMultiModalVAE(nn.Module):
         self.moe_gating_dropout = float(getattr(cfg, "moe_gating_dropout", 0.0))
         self.moe_gating_batchnorm = bool(getattr(cfg, "moe_gating_batchnorm", False))
         self.moe_gating_activation = _parse_activation(getattr(cfg, "moe_gating_activation", "relu")) or nn.ReLU()
-
-        # Small epsilon to avoid exact zeros in gated precisions
         self.moe_gate_eps = float(getattr(cfg, "moe_gate_eps", 1e-6))
 
-        # Modules
         self.gate_nets = nn.ModuleDict()
         self.shared_gate_net = None
 
         if self.use_moe_gating:
             if self.moe_gating_type == "shared":
-                # shared gate net maps (mu||logvar) -> scalar logit for each modality independently
-                # we will apply it per-modality; input dim is 2*latent_dim
                 self.shared_gate_net = build_mlp(
                     in_dim=2 * self.latent_dim,
                     hidden_dims=list(self.moe_gating_hidden),
@@ -451,7 +365,6 @@ class UniVIMultiModalVAE(nn.Module):
                     batchnorm=self.moe_gating_batchnorm,
                 )
             else:
-                # default: per-modality gate nets, each maps (mu||logvar) -> scalar logit
                 for m in self.modality_names:
                     self.gate_nets[m] = build_mlp(
                         in_dim=2 * self.latent_dim,
@@ -839,21 +752,12 @@ class UniVIMultiModalVAE(nn.Module):
         return_logits: bool = False,
         modality_order: Optional[List[str]] = None,
     ):
-        """
-        Precision fusion (PoE-style) with optional MoE gating.
-
-        Returns:
-          - (mu, logvar) by default
-          - (mu, logvar, weights) if return_weights
-          - (mu, logvar, weights, logits) if return_weights and return_logits
-        """
         if len(mu_dict) == 0:
             raise ValueError("mixture_of_experts requires at least one modality posterior.")
-        
+
         if return_logits and not return_weights:
             raise ValueError("return_logits=True requires return_weights=True.")
 
-        # stable modality ordering
         if modality_order is None:
             modality_order = [m for m in self.modality_names if (m in mu_dict and m in logvar_dict)]
             if not modality_order:
@@ -862,7 +766,6 @@ class UniVIMultiModalVAE(nn.Module):
         mus = [mu_dict[m] for m in modality_order]
         logvars = [logvar_dict[m] for m in modality_order]
 
-        # If only one modality, fusion is identity
         if len(mus) == 1:
             mu_comb = mus[0]
             logvar_comb = logvars[0]
@@ -877,37 +780,33 @@ class UniVIMultiModalVAE(nn.Module):
                 return mu_comb, logvar_comb, w, logits
             return mu_comb, logvar_comb, w
 
-        # base precisions
-        precisions = [torch.exp(-lv) for lv in logvars]  # each: (B, D)
+        precisions = [torch.exp(-lv) for lv in logvars]
 
         logits_mat = None
         weights = None
 
-        # Optional gating
         if self.use_moe_gating:
             logit_list = []
             for m, mu_m, lv_m in zip(modality_order, mus, logvars):
-                feat = torch.cat([mu_m, lv_m], dim=-1)  # (B, 2D)
+                feat = torch.cat([mu_m, lv_m], dim=-1)
                 if self.shared_gate_net is not None:
-                    gl = self.shared_gate_net(feat)  # (B,1)
+                    gl = self.shared_gate_net(feat)
                 else:
                     gn = self.gate_nets[m] if (m in self.gate_nets) else None
                     if gn is None:
                         gl = torch.zeros((feat.shape[0], 1), device=feat.device, dtype=feat.dtype)
                     else:
-                        gl = gn(feat)  # (B,1)
-                logit_list.append(gl.view(-1))  # (B,)
+                        gl = gn(feat)
+                logit_list.append(gl.view(-1))
 
-            logits_mat = torch.stack(logit_list, dim=1)  # (B, M)
-            weights = F.softmax(logits_mat, dim=1)       # (B, M)
+            logits_mat = torch.stack(logit_list, dim=1)
+            weights = F.softmax(logits_mat, dim=1)
 
-            # gate precisions: p'_m = (w_m + eps) * p_m
-            w_list = [weights[:, i].unsqueeze(-1) for i in range(weights.shape[1])]  # each: (B,1)
+            w_list = [weights[:, i].unsqueeze(-1) for i in range(weights.shape[1])]
             precisions = [(w_i + self.moe_gate_eps) * p for w_i, p in zip(w_list, precisions)]
 
-        # fuse
-        precision_sum = torch.stack(precisions, dim=0).sum(dim=0).clamp_min(self.EPS)  # (B, D)
-        mu_weighted = torch.stack([m * p for m, p in zip(mus, precisions)], dim=0).sum(dim=0)  # (B, D)
+        precision_sum = torch.stack(precisions, dim=0).sum(dim=0).clamp_min(self.EPS)
+        mu_weighted = torch.stack([m * p for m, p in zip(mus, precisions)], dim=0).sum(dim=0)
         mu_comb = mu_weighted / precision_sum
         var_comb = 1.0 / precision_sum
         logvar_comb = torch.log(var_comb.clamp_min(self.EPS))
@@ -915,7 +814,6 @@ class UniVIMultiModalVAE(nn.Module):
         if not return_weights and not return_logits:
             return mu_comb, logvar_comb
 
-        # If asked for weights/logits but gating is off, return uniform/zeros
         if weights is None:
             B = int(mu_comb.shape[0])
             M = len(mus)
@@ -1055,26 +953,21 @@ class UniVIMultiModalVAE(nn.Module):
             head_type = str(cfg_h.get("type", "categorical")).lower().strip()
 
             if head_type == "binary":
-                # Expect y_h in {0,1} (int or float). Mask ignore_index.
                 yy = y_h.view(-1)
-                if yy.dtype.is_floating_point:
-                    yy_f = yy.float()
-                else:
-                    yy_f = yy.float()
-
+                yy_f = yy.float()
                 mask = (yy != ignore_index) & (yy >= 0)
                 if mask.any():
-                    # logits: (B,1) or (B,)
                     logit_1d = logits.view(-1)
                     pos_w = float(cfg_h.get("pos_weight", 1.0))
                     if pos_w != 1.0:
                         pos_weight = torch.tensor(pos_w, device=logit_1d.device, dtype=logit_1d.dtype)
-                        bce = F.binary_cross_entropy_with_logits(logit_1d[mask], yy_f[mask], reduction="none", pos_weight=pos_weight)
+                        bce = F.binary_cross_entropy_with_logits(
+                            logit_1d[mask], yy_f[mask], reduction="none", pos_weight=pos_weight
+                        )
                     else:
                         bce = F.binary_cross_entropy_with_logits(logit_1d[mask], yy_f[mask], reduction="none")
                     per_cell[mask] = bce
             else:
-                # categorical CE (old behavior)
                 yy = y_h.long().view(-1)
                 mask = (yy != ignore_index) & (yy >= 0)
                 if mask.any():
@@ -1098,13 +991,26 @@ class UniVIMultiModalVAE(nn.Module):
         epoch: int = 0,
         y: Optional[YType] = None,
         attn_bias_cfg: Optional[Mapping[str, Any]] = None,
+        recon_targets: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Dict[str, torch.Tensor]:
         mode = (self.loss_mode or "v2").lower()
         if mode in ("v1", "paper", "cross"):
-            return self._forward_v1(x_dict=x_dict, epoch=epoch, y=y, attn_bias_cfg=attn_bias_cfg)
+            return self._forward_v1(
+                x_dict=x_dict,
+                epoch=epoch,
+                y=y,
+                attn_bias_cfg=attn_bias_cfg,
+                recon_targets=recon_targets,
+            )
         if mode in ("v2", "lite", "light", "moe", "poe", "fused"):
-            return self._forward_v2(x_dict=x_dict, epoch=epoch, y=y, attn_bias_cfg=attn_bias_cfg)
+            return self._forward_v2(
+                x_dict=x_dict,
+                epoch=epoch,
+                y=y,
+                attn_bias_cfg=attn_bias_cfg,
+                recon_targets=recon_targets,
+            )
         raise ValueError(f"Unknown loss_mode={self.loss_mode!r}.")
 
     # ------------------------------ v2 / lite ------------------------------
@@ -1115,6 +1021,7 @@ class UniVIMultiModalVAE(nn.Module):
         epoch: int = 0,
         y: Optional[YType] = None,
         attn_bias_cfg: Optional[Mapping[str, Any]] = None,
+        recon_targets: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, torch.Tensor]:
         mu_dict, logvar_dict = self.encode_modalities(x_dict, attn_bias_cfg=attn_bias_cfg)
         if len(mu_dict) == 0:
@@ -1150,8 +1057,12 @@ class UniVIMultiModalVAE(nn.Module):
             if name not in x_dict or x_dict[name] is None:
                 continue
 
+            x_recon = x_dict[name]
+            if recon_targets is not None and name in recon_targets and recon_targets[name] is not None:
+                x_recon = recon_targets[name]
+
             loss_m = self._recon_loss(
-                x=x_dict[name],
+                x=x_recon,
                 raw_dec_out=xhat_dict[name],
                 likelihood=m_cfg.likelihood,
                 mod_name=name,
@@ -1248,7 +1159,6 @@ class UniVIMultiModalVAE(nn.Module):
         return out
 
     # ------------------------------ v1 ------------------------------
-    # (unchanged except it uses _apply_multihead_losses which is now richer)
 
     def _forward_v1(
         self,
@@ -1256,6 +1166,7 @@ class UniVIMultiModalVAE(nn.Module):
         epoch: int = 0,
         y: Optional[YType] = None,
         attn_bias_cfg: Optional[Mapping[str, Any]] = None,
+        recon_targets: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, torch.Tensor]:
         mu_dict, logvar_dict = self.encode_modalities(x_dict, attn_bias_cfg=attn_bias_cfg)
         if len(mu_dict) == 0:
@@ -1276,8 +1187,11 @@ class UniVIMultiModalVAE(nn.Module):
         def recon_from_z_to_target(z_src: torch.Tensor, target_mod: str) -> torch.Tensor:
             raw = self.decoders[target_mod](z_src)
             m_cfg = self.mod_cfg_by_name[target_mod]
+            x_recon = x_dict[target_mod]
+            if recon_targets is not None and target_mod in recon_targets and recon_targets[target_mod] is not None:
+                x_recon = recon_targets[target_mod]
             loss_t = self._recon_loss(
-                x=x_dict[target_mod],
+                x=x_recon,
                 raw_dec_out=raw,
                 likelihood=m_cfg.likelihood,
                 mod_name=target_mod,
@@ -1508,7 +1422,139 @@ class UniVIMultiModalVAE(nn.Module):
         log_prob = torch.where(is_zero, log_prob_zero, log_prob_pos)
         return -log_prob
 
-    def _recon_loss(self, x: torch.Tensor, raw_dec_out: Any, likelihood: str, mod_name: str) -> torch.Tensor:
+    @staticmethod
+    def _beta_nll(
+        x: torch.Tensor,
+        alpha: torch.Tensor,
+        beta: torch.Tensor,
+        eps: float = 1e-8,
+    ) -> torch.Tensor:
+        x = x.clamp(min=eps, max=1.0 - eps)
+        alpha = alpha.clamp(min=eps)
+        beta = beta.clamp(min=eps)
+
+        log_norm = torch.lgamma(alpha) + torch.lgamma(beta) - torch.lgamma(alpha + beta)
+        log_prob = (alpha - 1.0) * torch.log(x) + (beta - 1.0) * torch.log(1.0 - x) - log_norm
+        return -log_prob
+
+    @staticmethod
+    def _binomial_nll(
+        successes: torch.Tensor,
+        total_count: torch.Tensor,
+        logits: torch.Tensor,
+    ) -> torch.Tensor:
+        log_prob = -F.binary_cross_entropy_with_logits(logits, successes / total_count.clamp_min(1.0), reduction="none") * total_count
+        # The BCE-with-logits trick above gives the Bernoulli cross-entropy scaled by n,
+        # but omits the combinatorial term log(n choose k). Add it back for true Binomial NLL:
+        comb = (
+            torch.lgamma(total_count + 1.0)
+            - torch.lgamma(successes + 1.0)
+            - torch.lgamma((total_count - successes) + 1.0)
+        )
+        return -(comb + log_prob)
+
+    @staticmethod
+    def _beta_binomial_nll(
+        successes: torch.Tensor,
+        total_count: torch.Tensor,
+        alpha: torch.Tensor,
+        beta: torch.Tensor,
+        eps: float = 1e-8,
+    ) -> torch.Tensor:
+        successes = successes.clamp_min(0.0)
+        total_count = total_count.clamp_min(0.0)
+        alpha = alpha.clamp_min(eps)
+        beta = beta.clamp_min(eps)
+
+        failures = (total_count - successes).clamp_min(0.0)
+
+        log_comb = (
+            torch.lgamma(total_count + 1.0)
+            - torch.lgamma(successes + 1.0)
+            - torch.lgamma(failures + 1.0)
+        )
+
+        log_beta_term = (
+            torch.lgamma(successes + alpha)
+            + torch.lgamma(failures + beta)
+            - torch.lgamma(total_count + alpha + beta)
+            + torch.lgamma(alpha + beta)
+            - torch.lgamma(alpha)
+            - torch.lgamma(beta)
+        )
+
+        return -(log_comb + log_beta_term)
+
+    def _extract_count_target(
+        self,
+        x: Any,
+        *,
+        mod_name: str,
+        ref_device: torch.device,
+        ref_dtype: torch.dtype,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Parse count-with-coverage targets for Binomial/Beta-Binomial losses.
+
+        Accepts either:
+          - dict with aliases for successes and totals, e.g.
+              {'successes': m, 'total_count': n}
+              {'m': m, 'n': n}
+              {'counts': m, 'coverage': n}
+          - tuple/list length 2: (successes, total_count)
+
+        Returns:
+          successes, total_count, valid_mask  (all shaped [B, D], mask bool)
+        """
+        successes = None
+        total_count = None
+
+        if isinstance(x, Mapping):
+            for k in ("successes", "m", "count", "counts", "k"):
+                if k in x and x[k] is not None:
+                    successes = x[k]
+                    break
+            for k in ("total_count", "total_counts", "n", "coverage", "depth", "trials"):
+                if k in x and x[k] is not None:
+                    total_count = x[k]
+                    break
+        elif isinstance(x, (tuple, list)) and len(x) == 2:
+            successes, total_count = x[0], x[1]
+
+        if successes is None or total_count is None:
+            raise ValueError(
+                f"Modality {mod_name!r} with binomial/beta_binomial likelihood requires recon target "
+                f"with successes + total_count (e.g., {{'successes': m, 'total_count': n}})."
+            )
+
+        if not torch.is_tensor(successes):
+            successes = torch.as_tensor(successes, device=ref_device, dtype=ref_dtype)
+        else:
+            successes = successes.to(device=ref_device, dtype=ref_dtype)
+
+        if not torch.is_tensor(total_count):
+            total_count = torch.as_tensor(total_count, device=ref_device, dtype=ref_dtype)
+        else:
+            total_count = total_count.to(device=ref_device, dtype=ref_dtype)
+
+        if successes.dim() == 1:
+            successes = successes.unsqueeze(-1)
+        if total_count.dim() == 1:
+            total_count = total_count.unsqueeze(-1)
+
+        if successes.shape != total_count.shape:
+            raise ValueError(
+                f"Modality {mod_name!r}: successes shape {tuple(successes.shape)} != total_count shape {tuple(total_count.shape)}"
+            )
+
+        successes = successes.clamp_min(0.0)
+        total_count = total_count.clamp_min(0.0)
+        successes = torch.minimum(successes, total_count)
+
+        valid = total_count > 0.0
+        return successes, total_count, valid
+
+    def _recon_loss(self, x: Any, raw_dec_out: Any, likelihood: str, mod_name: str) -> torch.Tensor:
         likelihood = (likelihood or "gaussian").lower().strip()
         dec_out = self._unwrap_decoder_out(raw_dec_out)
 
@@ -1526,6 +1572,9 @@ class UniVIMultiModalVAE(nn.Module):
             return nll
 
         if likelihood in ("gaussian", "normal", "mse", "gaussian_diag"):
+            if not torch.is_tensor(x):
+                raise TypeError(f"Gaussian-like recon expects tensor target for modality {mod_name!r}; got {type(x)!r}")
+
             if isinstance(dec_out, dict) and ("mean" in dec_out) and ("logvar" in dec_out):
                 mean = dec_out["mean"]
                 logvar = dec_out["logvar"].clamp(self.LOGVAR_MIN, self.LOGVAR_MAX)
@@ -1538,17 +1587,109 @@ class UniVIMultiModalVAE(nn.Module):
                 return ((x - pred) ** 2).mean(dim=-1)
             return ((x - pred) ** 2).sum(dim=-1)
 
+        if likelihood == "beta":
+            if not torch.is_tensor(x):
+                raise TypeError(f"Beta recon expects tensor fraction target for modality {mod_name!r}; got {type(x)!r}")
+
+            if not isinstance(dec_out, dict):
+                raise ValueError("Beta recon expects dict decoder output with alpha/beta or mu/conc params.")
+
+            if ("alpha" in dec_out) and ("beta" in dec_out):
+                alpha = dec_out["alpha"]
+                beta = dec_out["beta"]
+            elif ("mu" in dec_out) and ("conc" in dec_out):
+                mu = dec_out["mu"].clamp(self.EPS, 1.0 - self.EPS)
+                conc = dec_out["conc"].clamp_min(self.EPS)
+                alpha = (mu * conc).clamp_min(self.EPS)
+                beta = ((1.0 - mu) * conc).clamp_min(self.EPS)
+            elif ("mu_logits" in dec_out) and ("log_conc" in dec_out):
+                mu = torch.sigmoid(dec_out["mu_logits"]).clamp(self.EPS, 1.0 - self.EPS)
+                conc = torch.exp(dec_out["log_conc"]).clamp_min(self.EPS)
+                alpha = (mu * conc).clamp_min(self.EPS)
+                beta = ((1.0 - mu) * conc).clamp_min(self.EPS)
+            else:
+                raise ValueError("Beta recon expects alpha/beta or (mu,conc) or (mu_logits,log_conc).")
+
+            return self._beta_nll(x, alpha, beta, eps=self.EPS).sum(dim=-1)
+
         if likelihood == "bernoulli":
+            if not torch.is_tensor(x):
+                raise TypeError(f"Bernoulli recon expects tensor target for modality {mod_name!r}; got {type(x)!r}")
             logits = dec_out["logits"] if isinstance(dec_out, dict) else dec_out
             nll = F.binary_cross_entropy_with_logits(logits, x, reduction="none")
             return nll.sum(dim=-1)
 
+        if likelihood == "binomial":
+            if not isinstance(dec_out, dict) or ("logits" not in dec_out):
+                raise ValueError("Binomial recon expects dict decoder output with key 'logits'.")
+            logits = dec_out["logits"]
+            successes, total_count, valid = self._extract_count_target(
+                x,
+                mod_name=mod_name,
+                ref_device=logits.device,
+                ref_dtype=logits.dtype,
+            )
+            if successes.shape != logits.shape:
+                raise ValueError(
+                    f"Binomial recon shape mismatch for {mod_name!r}: target {tuple(successes.shape)} vs logits {tuple(logits.shape)}"
+                )
+            nll = self._binomial_nll(successes, total_count, logits)
+            nll = torch.where(valid, nll, torch.zeros_like(nll))
+            return nll.sum(dim=-1)
+
+        if likelihood in ("beta_binomial", "betabinomial", "bb"):
+            if not isinstance(dec_out, dict):
+                raise ValueError("Beta-Binomial recon expects dict decoder output.")
+            logits_ref = None
+            for k in ("mu_logits", "alpha", "mu"):
+                if k in dec_out and torch.is_tensor(dec_out[k]):
+                    logits_ref = dec_out[k]
+                    break
+            if logits_ref is None:
+                raise ValueError("Beta-Binomial decoder output missing expected parameter tensors.")
+
+            successes, total_count, valid = self._extract_count_target(
+                x,
+                mod_name=mod_name,
+                ref_device=logits_ref.device,
+                ref_dtype=logits_ref.dtype,
+            )
+
+            if ("alpha" in dec_out) and ("beta" in dec_out):
+                alpha = dec_out["alpha"]
+                beta = dec_out["beta"]
+            elif ("mu" in dec_out) and ("conc" in dec_out):
+                mu = dec_out["mu"].clamp(self.EPS, 1.0 - self.EPS)
+                conc = dec_out["conc"].clamp_min(self.EPS)
+                alpha = (mu * conc).clamp_min(self.EPS)
+                beta = ((1.0 - mu) * conc).clamp_min(self.EPS)
+            elif ("mu_logits" in dec_out) and ("log_conc" in dec_out):
+                mu = torch.sigmoid(dec_out["mu_logits"]).clamp(self.EPS, 1.0 - self.EPS)
+                conc = torch.exp(dec_out["log_conc"]).clamp_min(self.EPS)
+                alpha = (mu * conc).clamp_min(self.EPS)
+                beta = ((1.0 - mu) * conc).clamp_min(self.EPS)
+            else:
+                raise ValueError("Beta-Binomial recon expects alpha/beta or (mu,conc) or (mu_logits,log_conc).")
+
+            if successes.shape != alpha.shape:
+                raise ValueError(
+                    f"Beta-Binomial recon shape mismatch for {mod_name!r}: target {tuple(successes.shape)} vs params {tuple(alpha.shape)}"
+                )
+
+            nll = self._beta_binomial_nll(successes, total_count, alpha, beta, eps=self.EPS)
+            nll = torch.where(valid, nll, torch.zeros_like(nll))
+            return nll.sum(dim=-1)
+
         if likelihood == "poisson":
+            if not torch.is_tensor(x):
+                raise TypeError(f"Poisson recon expects tensor target for modality {mod_name!r}; got {type(x)!r}")
             log_rate = dec_out["log_rate"] if isinstance(dec_out, dict) and "log_rate" in dec_out else dec_out
             nll = F.poisson_nll_loss(log_rate, x, log_input=True, full=False, reduction="none")
             return nll.sum(dim=-1)
 
         if likelihood in ("nb", "negative_binomial"):
+            if not torch.is_tensor(x):
+                raise TypeError(f"NB recon expects tensor target for modality {mod_name!r}; got {type(x)!r}")
             if not isinstance(dec_out, dict) or ("mu" not in dec_out) or ("log_theta" not in dec_out):
                 raise ValueError(f"NB recon expects dict with keys ('mu','log_theta'); got {type(dec_out)}")
             mu = dec_out["mu"]
@@ -1558,6 +1699,8 @@ class UniVIMultiModalVAE(nn.Module):
             return self._nb_nll(x, mu, theta, eps=self.EPS).sum(dim=-1)
 
         if likelihood in ("zinb", "zero_inflated_negative_binomial"):
+            if not torch.is_tensor(x):
+                raise TypeError(f"ZINB recon expects tensor target for modality {mod_name!r}; got {type(x)!r}")
             if (
                 not isinstance(dec_out, dict)
                 or ("mu" not in dec_out)
@@ -1574,6 +1717,8 @@ class UniVIMultiModalVAE(nn.Module):
                 logit_pi = logit_pi.unsqueeze(0).expand_as(mu)
             return self._zinb_nll(x, mu, theta, logit_pi, eps=self.EPS).sum(dim=-1)
 
+        if not torch.is_tensor(x):
+            raise TypeError(f"Fallback recon expects tensor target for modality {mod_name!r}; got {type(x)!r}")
         pred = dec_out["mean"] if isinstance(dec_out, dict) and ("mean" in dec_out) else dec_out
         return ((x - pred) ** 2).sum(dim=-1)
 
@@ -1596,6 +1741,7 @@ class UniVIMultiModalVAE(nn.Module):
     @property
     def device(self) -> torch.device:
         return next(self.parameters()).device
+
     @torch.no_grad()
     def encode_fused(
         self,
@@ -1658,7 +1804,6 @@ class UniVIMultiModalVAE(nn.Module):
         z = mu_z if use_mean else self._reparameterize(mu_z, logvar_z)
 
         if return_gates or return_gate_logits:
-            # gates/logits will be None if fused encoder is used
             return mu_z, logvar_z, z, gates, gate_logits
 
         return mu_z, logvar_z, z
@@ -1696,7 +1841,6 @@ class UniVIMultiModalVAE(nn.Module):
             z_in = mu_z if bool(cfg_h["from_mu"]) else z
             dec_out = head(z_in)
             logits = dec_out.get("logits", dec_out.get("logit", dec_out.get("scores", dec_out))) if isinstance(dec_out, dict) else dec_out
-
 
             head_type = str(cfg_h.get("type", "categorical")).lower().strip()
             if not return_probs:

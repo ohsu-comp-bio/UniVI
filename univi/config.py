@@ -1,8 +1,8 @@
 # univi/config.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Literal, Sequence, Any, Union
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Literal, Sequence, Any, Union, Mapping
 
 
 # =============================================================================
@@ -52,14 +52,36 @@ class TokenizerConfig:
 # Core UniVI configs
 # =============================================================================
 
+LikelihoodName = Literal[
+    # existing / common
+    "gaussian", "normal", "mse", "gaussian_diag",
+    "bernoulli", "poisson",
+    "nb", "negative_binomial",
+    "zinb", "zero_inflated_negative_binomial",
+    "categorical", "cat", "ce", "cross_entropy", "multinomial", "softmax",
+    "logistic_normal",
+    # likely additions (safe to configure now; model/decoder can ignore until implemented)
+    "beta",
+    "beta_binomial",
+    "zinb_with_libsize",
+    "nb_with_libsize",
+    "lognormal",
+    "gamma",
+    "student_t",
+    "hurdle_poisson",
+    "hurdle_nb",
+]
+
+
 @dataclass
 class ModalityConfig:
     """
     Configuration for a single modality.
 
-    Added:
-    - recon_weight: per-modality scalar weight applied to per-cell reconstruction loss.
-      This composes with model-level recon_dim normalization.
+    Backwards compatible with prior versions.
+
+    Added decoder/loss-related optional knobs so the model can support more
+    likelihoods without changing the config schema again.
     """
     name: str
     input_dim: int
@@ -67,22 +89,54 @@ class ModalityConfig:
     decoder_hidden: List[int]
     likelihood: str = "gaussian"
 
-    # ---- per-modality reconstruction weight ----
+    # ---- per-modality reconstruction weighting ----
     recon_weight: float = 1.0
 
-    # ---- Optional NB / ZINB decoder settings (model already checks these) ----
-    dispersion: str = "gene"
+    # ---- Count model settings (NB/ZINB and relatives) ----
+    dispersion: str = "gene"  # e.g. "global", "gene", "feature" (model decides support)
     init_log_theta: float = 0.0
 
-    # categorical modality support
+    # Optional library-size handling (for count decoders that use offsets)
+    use_library_size: bool = False
+    library_key: Optional[str] = None          # e.g. obs key if data loader uses obs-derived features
+    library_log1p: bool = True                 # whether supplied library is already log1p-transformed
+    predict_library: bool = False              # if you later add a library-size head/decoder branch
+
+    # ---- Zero-inflation / hurdle settings ----
+    use_zero_inflation: Optional[bool] = None  # None => infer from likelihood
+    hurdle: bool = False                       # for hurdle-* likelihoods if implemented
+
+    # ---- Bounded / proportion data (e.g. methylation fractions in [0,1]) ----
+    # If you preprocess methylation to fractions, beta-like decoders often want clipping.
+    clip_targets_min: Optional[float] = None
+    clip_targets_max: Optional[float] = None
+
+    # For beta/binomial-style likelihoods if you add them later
+    concentration_init: float = 0.0           # log-concentration init or analogous parameter
+    total_count_key: Optional[str] = None     # obs key / side-input key for trials if needed
+    successes_are_fraction: bool = False      # True if x is fraction instead of counts
+
+    # ---- Positive continuous data (if you add gamma/lognormal decoders) ----
+    positive_eps: float = 1e-8
+
+    # ---- Categorical modality support ----
     ignore_index: int = -1
     input_kind: Literal["matrix", "obs"] = "matrix"
     obs_key: Optional[str] = None
 
-    # encoder backend (per-modality only)
+    # ---- Optional masking / weighting hooks (future-proof) ----
+    mask_key: Optional[str] = None            # if your dataset returns feature or sample masks
+    sample_weight_key: Optional[str] = None   # if you later support weighted recon losses
+
+    # ---- Encoder backend (per-modality only) ----
     encoder_type: Literal["mlp", "transformer"] = "mlp"
     transformer: Optional[TransformerConfig] = None
     tokenizer: Optional[TokenizerConfig] = None
+
+    # ---- Arbitrary decoder/likelihood kwargs passthrough (future-proof) ----
+    # Example:
+    # decoder_kwargs={"dispersion":"gene-cell", "min_scale":1e-4}
+    decoder_kwargs: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -103,8 +157,7 @@ class ClassHeadConfig:
     adversarial: bool = False
     adv_lambda: float = 1.0
 
-    # ---- NEW (optional): allow passing what the model reads via getattr ----
-    # categorical vs binary (binary => single logit)
+    # NEW (optional): allow passing what the model reads via getattr
     head_type: Optional[Literal["categorical", "binary"]] = None
     hidden_dims: Optional[List[int]] = None
     dropout: Optional[float] = None
@@ -141,7 +194,7 @@ class UniVIConfig:
     fused_require_all_modalities: bool = True
 
     # ------------------------------------------------------------------
-    # NEW: MoE gating (learned per-cell modality weights for fusion)
+    # MoE gating (learned per-cell modality weights for fusion)
     # ------------------------------------------------------------------
     use_moe_gating: bool = False
     moe_gating_type: Literal["per_modality", "shared"] = "per_modality"
@@ -150,6 +203,19 @@ class UniVIConfig:
     moe_gating_batchnorm: bool = False
     moe_gating_activation: Literal["relu", "gelu", "elu", "leakyrelu", "silu", "tanh"] = "relu"
     moe_gate_eps: float = 1e-6
+
+    # ------------------------------------------------------------------
+    # Optional global reconstruction/likelihood defaults (future-proof)
+    # These do NOT override per-modality fields unless your model chooses to.
+    # ------------------------------------------------------------------
+    default_dispersion: Optional[str] = None
+    default_use_library_size: Optional[bool] = None
+    default_positive_eps: Optional[float] = None
+
+    # ------------------------------------------------------------------
+    # Arbitrary model kwargs passthrough (future-proof)
+    # ------------------------------------------------------------------
+    model_kwargs: Optional[Dict[str, Any]] = None
 
     def validate(self) -> None:
         if int(self.latent_dim) <= 0:
@@ -170,12 +236,60 @@ class UniVIConfig:
                 raise ValueError(f"Modality {m.name!r}: recon_weight must be >= 0, got {m.recon_weight}")
 
             lk = (m.likelihood or "").lower().strip()
+
+            # ---- categorical checks ----
             if lk in ("categorical", "cat", "ce", "cross_entropy", "multinomial", "softmax"):
                 if int(m.input_dim) < 2:
                     raise ValueError(f"Categorical modality {m.name!r}: input_dim must be n_classes >= 2.")
                 if m.input_kind == "obs" and not m.obs_key:
                     raise ValueError(f"Categorical modality {m.name!r}: input_kind='obs' requires obs_key.")
 
+            # ---- count-like checks ----
+            if lk in (
+                "nb", "negative_binomial",
+                "zinb", "zero_inflated_negative_binomial",
+                "nb_with_libsize", "zinb_with_libsize",
+                "hurdle_nb", "hurdle_poisson",
+            ):
+                disp = str(getattr(m, "dispersion", "gene")).lower().strip()
+                # keep permissive (model can support subset)
+                allowed_disp = {"global", "gene", "feature", "gene_cell", "gene-cell"}
+                if disp not in allowed_disp:
+                    raise ValueError(
+                        f"Modality {m.name!r}: unsupported dispersion={m.dispersion!r}. "
+                        f"Expected one of {sorted(allowed_disp)}."
+                    )
+
+                if float(getattr(m, "positive_eps", 1e-8)) <= 0:
+                    raise ValueError(f"Modality {m.name!r}: positive_eps must be > 0.")
+
+                if bool(getattr(m, "use_library_size", False)) and m.library_key is None:
+                    # not always required if library is computed from x on-the-fly, so only warn via ValueError? No:
+                    # keep permissive for backward compatibility.
+                    pass
+
+            # ---- bounded / proportion checks ----
+            if lk in ("beta", "beta_binomial"):
+                cmin = getattr(m, "clip_targets_min", None)
+                cmax = getattr(m, "clip_targets_max", None)
+                if cmin is not None and cmax is not None and float(cmin) >= float(cmax):
+                    raise ValueError(
+                        f"Modality {m.name!r}: clip_targets_min must be < clip_targets_max "
+                        f"(got {cmin} >= {cmax})."
+                    )
+                if float(getattr(m, "positive_eps", 1e-8)) <= 0:
+                    raise ValueError(f"Modality {m.name!r}: positive_eps must be > 0.")
+
+            # ---- positive continuous checks ----
+            if lk in ("gamma", "lognormal", "student_t"):
+                if float(getattr(m, "positive_eps", 1e-8)) <= 0:
+                    raise ValueError(f"Modality {m.name!r}: positive_eps must be > 0.")
+
+            # ---- decoder kwargs sanity ----
+            if m.decoder_kwargs is not None and not isinstance(m.decoder_kwargs, dict):
+                raise ValueError(f"Modality {m.name!r}: decoder_kwargs must be dict or None.")
+
+            # ---- encoder backend checks ----
             enc_type = (m.encoder_type or "mlp").lower().strip()
             if enc_type not in ("mlp", "transformer"):
                 raise ValueError(
@@ -219,7 +333,7 @@ class UniVIConfig:
                 _validate_tokenizer(n, tok)
 
         # -------------------------
-        # NEW: MoE gating checks
+        # MoE gating checks
         # -------------------------
         if bool(self.use_moe_gating):
             gt = (self.moe_gating_type or "per_modality").lower().strip()
@@ -228,7 +342,6 @@ class UniVIConfig:
                     f"moe_gating_type must be 'per_modality' or 'shared', got {self.moe_gating_type!r}"
                 )
 
-            # hidden dims defaulting is handled in the model, but validate if provided
             h = self.moe_gating_hidden
             if h is not None:
                 if not isinstance(h, (list, tuple)) or len(h) == 0:
@@ -258,8 +371,10 @@ class UniVIConfig:
             if len(set(hn)) != len(hn):
                 dupes = sorted({n for n in hn if hn.count(n) > 1})
                 raise ValueError(f"Duplicate class head names in cfg.class_heads: {dupes}")
+
             for h in self.class_heads:
-                if int(h.n_classes) < 2 and (h.head_type or "categorical") != "binary":
+                ht = (h.head_type or "categorical")
+                if int(h.n_classes) < 2 and ht != "binary":
                     raise ValueError(f"Class head {h.name!r}: n_classes must be >= 2 for categorical heads.")
                 if float(h.loss_weight) < 0:
                     raise ValueError(f"Class head {h.name!r}: loss_weight must be >= 0.")
@@ -270,7 +385,6 @@ class UniVIConfig:
                 if float(getattr(h, "pos_weight", 1.0)) < 0.0:
                     raise ValueError(f"Class head {h.name!r}: pos_weight must be >= 0.")
 
-                # validate new optional hidden dims if passed
                 if h.hidden_dims is not None:
                     if not isinstance(h.hidden_dims, (list, tuple)) or len(h.hidden_dims) == 0:
                         raise ValueError(f"Class head {h.name!r}: hidden_dims must be non-empty if provided.")
@@ -278,10 +392,22 @@ class UniVIConfig:
                     if bad:
                         raise ValueError(f"Class head {h.name!r}: hidden_dims must be positive ints; bad: {bad}")
 
+        # -------------------------
+        # annealing checks
+        # -------------------------
         for k in ("kl_anneal_start", "kl_anneal_end", "align_anneal_start", "align_anneal_end"):
             v = int(getattr(self, k))
             if v < 0:
                 raise ValueError(f"{k} must be >= 0, got {v}")
+
+        # -------------------------
+        # optional global defaults checks
+        # -------------------------
+        if self.default_positive_eps is not None and float(self.default_positive_eps) <= 0:
+            raise ValueError("default_positive_eps must be > 0 if provided.")
+
+        if self.model_kwargs is not None and not isinstance(self.model_kwargs, dict):
+            raise ValueError("model_kwargs must be dict or None.")
 
 
 def _validate_tokenizer(mod_name: str, tok: TokenizerConfig) -> None:

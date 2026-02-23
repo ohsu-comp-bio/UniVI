@@ -1,28 +1,28 @@
 # UniVI
 
-[![PyPI version](https://img.shields.io/pypi/v/univi?v=0.4.5)](https://pypi.org/project/univi/)
+[![PyPI version](https://img.shields.io/pypi/v/univi?v=0.4.6)](https://pypi.org/project/univi/)
 [![pypi downloads](https://img.shields.io/pepy/dt/univi?label=pypi%20downloads)](https://pepy.tech/project/univi)
 [![Conda version](https://img.shields.io/conda/vn/conda-forge/univi?cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
 [![conda-forge downloads](https://img.shields.io/conda/dn/conda-forge/univi?label=conda-forge%20downloads\&cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.4.5)](https://pypi.org/project/univi/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.4.6)](https://pypi.org/project/univi/)
 
 <picture>
   <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.5/assets/figures/univi_overview_dark.png">
+          srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.6/assets/figures/univi_overview_dark.png">
   <!-- Light mode / fallback (works on GitHub + PyPI) -->
-  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.5/assets/figures/univi_overview_light.png"
+  <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.6/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
 
-**UniVI** is a **multi-modal variational autoencoder (VAE)** framework for aligning and integrating single-cell modalities such as **RNA**, **ADT (CITE-seq)**, and **ATAC**.
+**UniVI** is a **multi-modal variational autoencoder (VAE)** framework for aligning and integrating single-cell modalities such as **RNA**, **ADT (CITE-seq)**, **ATAC**, and **coverage-based / proportion-like assays** (e.g., **single-cell methylome** features).
 
 It’s designed for experiments like:
 
 * **Joint embedding** of paired multimodal data (CITE-seq, Multiome, TEA-seq)
 * **Zero-shot projection** of external unimodal cohorts into a paired “bridge” latent
-* **Cross-modal reconstruction / imputation** (RNA→ADT, ATAC→RNA, etc.)
+* **Cross-modal reconstruction / imputation** (RNA→ADT, ATAC→RNA, RNA→methylome, etc.)
 * **Denoising** via learned generative decoders
 * **Evaluation** (FOSCTTM, Recall@k, modality mixing/entropy, label transfer, fused-space clustering)
 * **Optional supervised heads** for harmonized annotation and domain confusion
@@ -97,8 +97,37 @@ UniVI expects **per-modality AnnData** objects. For paired settings, modalities 
 You can keep multiple representations around:
 
 * `.layers["counts"]` = raw
-* `.X` = model input (e.g., log1p normalized RNA, CLR ADT, LSI ATAC, etc.)
+* `.X` = model input (e.g., log1p normalized RNA, CLR ADT, LSI ATAC, methylation fractions, etc.)
 * `.layers["denoised_*"]` / `.layers["imputed_*"]` = UniVI outputs
+
+### Coverage-based / proportion-like modalities (e.g., methylome)
+
+UniVI supports two common ways to represent methylome-like features:
+
+#### A) Fraction-valued targets (simple path)
+
+Use this when your features are bounded in **[0,1]** (e.g., methylation fraction per region/cell) and you are **not explicitly modeling coverage**.
+
+* Store fraction-like values in `.X` (or selected layer)
+* Use `likelihood="beta"` for that modality
+
+This integrates cleanly with the standard Quickstart/trainer workflow.
+
+#### B) Count + coverage targets (recommended when available)
+
+Use this when you have both:
+
+* **successes** (e.g., methylated counts), and
+* **total_count / coverage** (e.g., total reads covering each feature)
+
+For this case, use:
+
+* `likelihood="binomial"` or
+* `likelihood="beta_binomial"` (often a better default due to overdispersion)
+
+In this setup, the model input can still be a convenient representation in `.X` (e.g., fractions, transformed fractions, or embeddings), **but reconstruction targets must provide both successes and total_count** via `recon_targets` during training/evaluation.
+
+> Practical note: keep successes/coverage matrices accessible (e.g., in `.layers`, side arrays, or a custom dataset object) if you plan to use `binomial` / `beta_binomial`.
 
 ---
 
@@ -162,27 +191,36 @@ univi_cfg = UniVIConfig(
     align_anneal_start=100,
     align_anneal_end=175,
     modalities=[
-        # Modality decoder likelihood can also be: "mse", "nb", "zinb", "poisson", 
-        # "bernoulli", etc. depending on closest modality input distribution (e.g.,
-        # "bernoulli" for raw binarized ATAC peaks, "poisson" for raw ATAC peak counts, 
-        # "nb" or "zinb" for raw scRNA-seq count inputs, "gaussian" for most normalized 
-        # feature input spaces such as log-normed RNA, CLR-normed ADT, and TF-IDF/LSI 
-        # normed ATAC features; all with optional scaling).
+        # Likelihood guidance:
+        # - RNA (normalized/log1p): often "gaussian"
+        # - RNA (raw counts): "nb" or "zinb"
+        # - ADT (CLR/scaled): often "gaussian"
+        # - ATAC (binarized peaks): "bernoulli"
+        # - ATAC (peak counts): "poisson" (sometimes)
+        # - Methylome fractions in (0,1): "beta"
+        # - Methylome counts+coverage: "binomial" or "beta_binomial" (often preferred)
         #
-        # NOTE: Manuscript-esque "gaussian" input data and decoders lead to the best 
-        # aligned latent spaces on a cell-to-cell basis. Depending on experiment goals, 
-        # this could be a consideration.
+        # IMPORTANT for "binomial" / "beta_binomial":
+        #   The reconstruction target must include BOTH successes and total_count
+        #   (passed via `recon_targets` to the model/training step), e.g.:
+        #     {"successes": m, "total_count": n}
+        #
+        # NOTE:
+        # Manuscript-style "gaussian" decoders on normalized feature spaces often produce the most
+        # cell-to-cell aligned latent spaces for integration-focused use cases. For some assay types
+        # (including methylome), a more distribution-matched likelihood may be preferable depending
+        # on whether your goal is alignment vs calibrated reconstruction/generation.
         #
         ModalityConfig(
             name="rna",
-            input_dim=rna_tr.n_vars,
+            input_dim=rna.n_vars,
             encoder_hidden=[1024, 512, 256, 128],
             decoder_hidden=[128, 256, 512, 1024],
             likelihood="gaussian",
         ),
         ModalityConfig(
             name="adt",
-            input_dim=adt_tr.n_vars,
+            input_dim=adt.n_vars,
             encoder_hidden=[256, 128, 64],
             decoder_hidden=[64, 128, 256],
             likelihood="gaussian",
@@ -192,7 +230,7 @@ univi_cfg = UniVIConfig(
 
 train_cfg = TrainingConfig(
     n_epochs=5000,
-    batch_size=batch_size,
+    batch_size=256,
     lr=1e-3,
     weight_decay=1e-4,
     device=device,
@@ -224,6 +262,75 @@ trainer = UniVITrainer(
 trainer.fit()
 ```
 
+#### Example: swapping in a methylome modality
+
+If you’re using methylome-like features, the modality config typically looks like one of these patterns:
+
+**Fraction-valued features in `.X` (simple path):**
+
+```python
+ModalityConfig(
+    name="meth",
+    input_dim=meth.n_vars,
+    encoder_hidden=[512, 256, 128],
+    decoder_hidden=[128, 256, 512],
+    likelihood="beta",
+)
+```
+
+**Count + coverage reconstruction (recommended when available):**
+
+```python
+ModalityConfig(
+    name="meth",
+    input_dim=meth.n_vars,
+    encoder_hidden=[512, 256, 128],
+    decoder_hidden=[128, 256, 512],
+    likelihood="beta_binomial",   # or "binomial"
+)
+```
+
+In the count+coverage case, you must pass `recon_targets` (successes + total_count) during training/evaluation.
+
+### 3b) Coverage-based modalities (methylome): passing `recon_targets`
+
+If a modality uses `likelihood="binomial"` or `likelihood="beta_binomial"`, UniVI expects reconstruction targets that include both:
+
+* **successes** (e.g., methylated counts)
+* **total_count** (coverage / trials)
+
+These targets are passed via `recon_targets` to `model(...)`.
+
+#### Accepted target formats for a modality
+
+UniVI accepts either:
+
+* a dict (recommended), e.g. `{"successes": m, "total_count": n}`
+* a tuple/list `(successes, total_count)`
+
+It also supports common aliases such as:
+
+* successes: `successes`, `m`, `counts`, `k`
+* total count: `total_count`, `n`, `coverage`, `depth`, `trials`
+
+#### Example (direct model call)
+
+```python
+out = model(
+    x_dict=batch_x_dict,
+    epoch=epoch,
+    recon_targets={
+        "meth": {
+            "successes": meth_successes_batch,   # shape [B, D]
+            "total_count": meth_coverage_batch,  # shape [B, D]
+        }
+    },
+)
+```
+
+> **Trainer note:** If you use `UniVITrainer`, your dataset/collate path must yield these `recon_targets` and your training step must forward them into `model(..., recon_targets=...)`.
+> If you want the standard Quickstart path with no trainer changes, use fraction-valued methylome features with `likelihood="beta"` first.
+
 ### 4) Saving + loading trained models
 
 Saving the trained model:
@@ -254,6 +361,47 @@ model.load_state_dict(ckpt["model_state_dict"])
 model.eval()
 
 print("Best epoch:", ckpt.get("best_epoch"))
+```
+
+---
+
+## Quickstart variant: RNA + methylome (fraction-valued features)
+
+If you want a minimal methylome workflow without custom trainer plumbing, start with fraction-valued methylome features in `.X` and use `likelihood="beta"`.
+
+```python
+meth = sc.read_h5ad("path/to/methylome_features.h5ad")   # .X contains fractions in [0,1]
+rna  = sc.read_h5ad("path/to/rna_paired.h5ad")
+
+adata_dict = align_paired_obs_names({"rna": rna, "meth": meth})
+
+dataset = MultiModalDataset(
+    adata_dict=adata_dict,
+    X_key="X",
+    device=None,
+)
+
+univi_cfg = UniVIConfig(
+    latent_dim=30,
+    beta=1.15,
+    gamma=3.25,
+    modalities=[
+        ModalityConfig(
+            name="rna",
+            input_dim=rna.n_vars,
+            encoder_hidden=[1024, 512, 256, 128],
+            decoder_hidden=[128, 256, 512, 1024],
+            likelihood="gaussian",
+        ),
+        ModalityConfig(
+            name="meth",
+            input_dim=meth.n_vars,
+            encoder_hidden=[512, 256, 128],
+            decoder_hidden=[128, 256, 512],
+            likelihood="beta",
+        ),
+    ],
+)
 ```
 
 ---
@@ -313,7 +461,7 @@ def to_dense(X):
 
 ## 1) Encode a modality into latent space (`.obsm["X_univi"]`)
 
-Use this when you have **one observed modality at a time** (RNA-only, ADT-only, ATAC-only, etc.):
+Use this when you have **one observed modality at a time** (RNA-only, ADT-only, ATAC-only, methylome-only, etc.):
 
 ```python
 Z_rna = encode_adata(
@@ -399,7 +547,7 @@ umap_by_modality(
 
 ## 3) Cross-modal prediction (imputation): encode source → decode target
 
-Example: **RNA → ADT**. UniVI will automatically handle decoder output types internally (e.g. Gaussian returns tensor; NB returns `{"mu","log_theta"}`; ZINB returns `{"mu","log_theta","logit_pi"}`; Poisson returns `{"rate","log_rate"}`, etc.) and return the appropriate **mean-like** prediction.
+Example: **RNA → ADT** (same pattern applies to RNA→methylome, methylome→RNA, etc.). UniVI will automatically handle decoder output types internally (e.g. Gaussian returns tensor; NB returns `{"mu","log_theta"}`; ZINB returns `{"mu","log_theta","logit_pi"}`; Poisson returns `{"rate","log_rate"}`; Beta/Beta-Binomial return parameter dicts) and return an appropriate **mean-like** prediction for downstream evaluation/plotting.
 
 ```python
 adt_hat_from_rna = cross_modal_predict(
@@ -472,7 +620,7 @@ compare_raw_vs_denoised_umap_features(
 
 You can compute **featurewise + summary** errors between:
 
-* **cross-reconstructed** (RNA→ADT, ATAC→RNA, …)
+* **cross-reconstructed** (RNA→ADT, ATAC→RNA, methylome→RNA, …)
 * **denoised** outputs (self or fused)
 * and the **true observed** data
 
@@ -571,7 +719,7 @@ plot_confusion_matrix(
 
 ## 7) Generate new data from latent space (sampling / “in silico cells”)
 
-UniVI decoders define a likelihood per modality (Gaussian, NB, ZINB, Poisson, Bernoulli, etc.). Generation is done as:
+UniVI decoders define a likelihood per modality (Gaussian, NB, ZINB, Poisson, Bernoulli, Beta, Binomial/Beta-Binomial, etc.). Generation is done as:
 
 1. pick latent samples `z ~ p(z)` (or a conditional latent distribution)
 2. decode with the modality decoder(s)
@@ -636,11 +784,10 @@ UniVI can report per-cell modality **contribution weights** for the **analytic f
 
 There are two related notions of “who contributed how much” to the fused latent:
 
-- **Precision-only (always available):** derived from each modality’s posterior uncertainty in latent space.
-- **Router × precision (optional):** if your trained model exposes **router logits**, UniVI can combine
-  router probabilities with precision to produce contribution weights.
+* **Precision-only (always available):** derived from each modality’s posterior uncertainty in latent space.
+* **Router × precision (optional):** if your trained model exposes **router logits**, UniVI can combine router probabilities with precision to produce contribution weights.
 
-> Note: This section applies to **analytic fusion** (Gaussian experts in latent space).  
+> Note: This section applies to **analytic fusion** (Gaussian experts in latent space).
 > If you use a **fused transformer posterior**, there may be no analytic precision/router attribution
 > and gates can be unavailable or not meaningful.
 
@@ -667,7 +814,7 @@ print("Requested kind:", gate.get("requested_kind"))
 print("Effective kind:", gate.get("kind"))
 print("Per-modality mean:", gate.get("per_modality_mean"))
 print("Has logits:", gate.get("logits") is not None)
-````
+```
 
 If you want **precision-only** weights (no router influence), set `kind="effective_precision"`.
 
@@ -730,9 +877,11 @@ metrics["moe_gates"] = {
 Decoders can return either:
 
 * a tensor (e.g. GaussianDecoder → `X_hat`)
-* or a dict (e.g. NB → `{"mu","log_theta"}`, ZINB → `{"mu","log_theta","logit_pi"}`, Poisson → `{"rate","log_rate"}`, Bernoulli/Categorical → `{"logits", "probs"}`)
+* or a dict (e.g. NB → `{"mu","log_theta"}`, ZINB → `{"mu","log_theta","logit_pi"}`, Poisson → `{"rate","log_rate"}`, Bernoulli/Categorical → `{"logits", "probs"}`, Beta / Beta-Binomial → parameter dicts such as `{"alpha","beta",...}` or `{"mu_logits","log_conc","alpha","beta",...}`)
 
 All post-training utilities above (`cross_modal_predict`, `denoise_*`, `generate_from_latent`, and reconstruction-eval helpers) are designed to **unwrap decoder outputs safely** and consistently return a sensible **mean-like** matrix for evaluation/plotting.
+
+> For count-with-coverage modalities (`binomial` / `beta_binomial`), training/evaluation still requires the correct reconstruction targets (`successes` + `total_count`) when computing likelihood-based losses.
 
 ---
 
@@ -753,30 +902,34 @@ This section covers the “advanced” knobs in `univi/models/univi.py` and when
 
 ### 1) Fused multimodal transformer posterior (optional)
 
-**What it is:**  
+**What it is:**
 A *single* fused encoder that tokenizes each observed modality, concatenates tokens, runs a multimodal transformer, and outputs a fused posterior `(mu_fused, logvar_fused)`.
 
-**Why you’d use it:**  
-- You want the posterior to be learned jointly across modalities (rather than fused analytically via PoE/MoE precision fusion).
-- You want token-level interpretability hooks (e.g., ATAC top-k peak indices; optional attention maps if enabled in the encoder stack).
-- You want a learnable “cross-modality mixing” mechanism beyond precision fusion.
+**Why you’d use it:**
+
+* You want the posterior to be learned jointly across modalities (rather than fused analytically via PoE/MoE precision fusion).
+* You want token-level interpretability hooks (e.g., ATAC top-k peak indices; optional attention maps if enabled in the encoder stack).
+* You want a learnable “cross-modality mixing” mechanism beyond precision fusion.
 
 **How to enable (config):**
-- Set `cfg.fused_encoder_type = "multimodal_transformer"`.
-- Optionally set:
-  - `cfg.fused_modalities = ["rna","adt","atac"]` (defaults to all)
-  - `cfg.fused_require_all_modalities = True` (default): only use fused posterior when all required modalities are present; otherwise falls back to `mixture_of_experts()`.
+
+* Set `cfg.fused_encoder_type = "multimodal_transformer"`.
+* Optionally set:
+
+  * `cfg.fused_modalities = ["rna","adt","atac"]` (defaults to all)
+  * `cfg.fused_require_all_modalities = True` (default): only use fused posterior when all required modalities are present; otherwise falls back to `mixture_of_experts()`.
 
 **Key API points:**
-- Training: the model will automatically decide whether to use fused encoder or fallback based on presence and `fused_require_all_modalities`.
-- Encoding: use `model.encode_fused(...)` to get the fused latent and optionally gates from fallback fusion.
+
+* Training: the model will automatically decide whether to use fused encoder or fallback based on presence and `fused_require_all_modalities`.
+* Encoding: use `model.encode_fused(...)` to get the fused latent and optionally gates from fallback fusion.
 
 ```python
 mu, logvar, z = model.encode_fused(
     {"rna": X_rna, "adt": X_adt, "atac": X_atac},
     use_mean=True,
 )
-````
+```
 
 ---
 
@@ -819,7 +972,7 @@ A learnable gate that produces per-cell modality weights and uses them to scale 
 
 **Why you’d use it:**
 
-* Modalities have variable quality per cell (e.g., low ADT counts, sparse ATAC, stressed RNA).
+* Modalities have variable quality per cell (e.g., low ADT counts, sparse ATAC, stressed RNA, low methylome coverage).
 * You want a *data-driven* “trust score” per modality per cell.
 * You want interpretable per-cell reliance weights (gate weights) to diagnose integration behavior.
 
@@ -965,7 +1118,7 @@ Per-modality reconstruction losses are typically summed across features; large m
 
 **Why you’d use it:**
 
-* Stabilize training when RNA has 2k–20k dims but ADT has 30–200 dims and ATAC-LSI has ~50–500 dims.
+* Stabilize training when RNA has 2k–20k dims but ADT has 30–200 dims and ATAC-LSI has ~50–500 dims (and methylome features may vary widely too).
 * Tune modality balance without hand-waving.
 
 **How to tune:**
@@ -1049,7 +1202,7 @@ UniVI/
 │       └── Multiome_NB-RNA-counts_Poisson_or_Bernoulli-ATAC_peak-counts_Peak_perturbation_to_RNA_expression_cross-generation_experiment.ipynb
 ├── parameter_files/                       # JSON configs for model + training + data selectors
 │   ├── defaults_*.json                    # Default configs (per experiment)
-│   └── params_*.json                      # Example “named” configs (RNA, ADT, ATAC, etc.)
+│   └── params_*.json                      # Example “named” configs (RNA, ADT, ATAC, methylome, etc.)
 ├── scripts/                               # Reproducible entry points (revision-friendly)
 │   ├── train_univi.py                     # Train UniVI from a parameter JSON
 │   ├── evaluate_univi.py                  # Evaluate trained models (FOSCTTM, label transfer, etc.)
@@ -1079,7 +1232,7 @@ UniVI/
     │   ├── __init__.py
     │   ├── mlp.py                         # Shared MLP building blocks
     │   ├── encoders.py                    # Modality encoders (MLP + transformer + fused transformer)
-    │   ├── decoders.py                    # Likelihood-specific decoders (NB, ZINB, Gaussian, etc.)
+    │   ├── decoders.py                    # Likelihood-specific decoders (NB, ZINB, Gaussian, Beta, Binomial/Beta-Binomial, etc.)
     │   ├── transformer.py                 # Transformer blocks + encoder (+ optional attn bias support)
     │   ├── tokenizer.py                   # Tokenization configs/helpers (top-k / patch)
     │   └── univi.py                       # Core UniVI multi-modal VAE
@@ -1118,4 +1271,3 @@ MIT License — see `LICENSE`.
   * UniVI version: `python -c "import univi; print(univi.__version__)"`
   * a minimal notebook/code snippet
   * stack trace + OS/CUDA/PyTorch versions
-
