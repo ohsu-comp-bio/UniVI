@@ -848,27 +848,6 @@ metrics["moe_gates"] = {
 
 ### Training objectives (v1 vs v2/lite)
 
-* **v1 (“paper”)**: per-modality posteriors + reconstruction scheme (cross/self/avg) + posterior alignment
-* **v2/lite**: fused posterior (MoE/PoE by default; optional fused transformer) + per-modality recon + β·KL + γ·alignment
-
-Choose via `loss_mode` at construction time (Python) or config JSON (scripts).
-
-### Decoder output types (what UniVI handles for you)
-
-Decoders can return either:
-
-* a tensor (e.g. Gaussian)
-* or a dict (e.g. NB/ZINB/Poisson/Beta/Beta-Binomial parameter dicts)
-
-UniVI evaluation utilities unwrap these and return mean-like matrices for plotting/evaluation.
-
-
----
-
-## Advanced topics
-
-### Training objectives (v1 vs v2/lite)
-
 * **v1 (“paper”)**: per-modality posteriors + reconstruction scheme (cross/self/avg) + posterior alignment across modalities
 * **v2/lite**: fused posterior (MoE/PoE-style by default; optional fused transformer) + per-modality recon + β·KL + γ·alignment (L2 on latent means)
 
