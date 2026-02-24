@@ -163,18 +163,41 @@ n = rna.n_obs
 idx = np.arange(n)
 rng = np.random.default_rng(0)
 rng.shuffle(idx)
-split = int(0.8 * n)
-train_idx, val_idx = idx[:split], idx[split:]
 
+n_train = int(0.8 * n)
+n_val   = int(0.1 * n)
+
+train_idx = idx[:n_train]
+val_idx   = idx[n_train:n_train + n_val]
+test_idx  = idx[n_train + n_val:]
+
+# For reproducibility later, can save indices used for splits
+np.savez(
+    "splits_rna_adt_seed0.npz",
+    train_idx=train_idx,
+    val_idx=val_idx,
+    test_idx=test_idx,
+)
+
+# Build train/val/test loaders
 train_loader = DataLoader(
     Subset(dataset, train_idx),
     batch_size=256,
     shuffle=True,
     num_workers=0,
-    collate_fn=collate_multimodal_xy_recon,  # safe even if recon_targets are absent
+    collate_fn=collate_multimodal_xy_recon,
 )
+
 val_loader = DataLoader(
     Subset(dataset, val_idx),
+    batch_size=256,
+    shuffle=False,
+    num_workers=0,
+    collate_fn=collate_multimodal_xy_recon,
+)
+
+test_loader = DataLoader(
+    Subset(dataset, test_idx),
     batch_size=256,
     shuffle=False,
     num_workers=0,
@@ -393,6 +416,20 @@ def to_dense(X):
 ```
 
 ---
+
+## 0) 
+
+Loading the test set indices for evaluations (if desired, can also just use transductive method (all cells) depending on goals):
+
+```python
+# NOTE: Use the same test_idx for both modalities
+rna = rna[test_idx].copy()
+adt = adt[test_idx].copy()
+
+# Optional sanity checks
+assert rna_test.n_obs == adt_test.n_obs
+assert np.array_equal(rna_test.obs_names, adt_test.obs_names)
+```
 
 ## 1) Encode a modality into latent space (`.obsm["X_univi"]`)
 
