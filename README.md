@@ -370,7 +370,7 @@ UniVI models are **generative** (decoders + likelihoods) and **alignment-oriente
 * `univi.evaluation`: encoding, denoising, cross-modal prediction (imputation), generation, and metrics
 * `univi.plotting`: Scanpy/Matplotlib helpers for UMAPs, legends, confusion matrices, MoE gate plots, and reconstruction-error plots
 
-### 0) Imports + plotting defaults
+### 0a) Imports + plotting defaults
 
 ```python
 import numpy as np
@@ -415,9 +415,7 @@ def to_dense(X):
     return X.toarray() if sp.issparse(X) else np.asarray(X)
 ```
 
----
-
-## 0) 
+### 0b) Explicitly subset the test set indices from the splits prior to training step 
 
 Loading the test set indices for evaluations (if desired, can also just use transductive method (all cells) depending on goals):
 
@@ -430,6 +428,8 @@ adt = adt[test_idx].copy()
 assert rna_test.n_obs == adt_test.n_obs
 assert np.array_equal(rna_test.obs_names, adt_test.obs_names)
 ```
+
+---
 
 ## 1) Encode a modality into latent space (`.obsm["X_univi"]`)
 
