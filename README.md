@@ -212,6 +212,14 @@ univi_cfg = UniVIConfig(
     latent_dim=30,
     beta=1.15,
     gamma=3.25,
+    encoder_dropout=0.10,
+    decoder_dropout=0.05,
+    encoder_batchnorm=True,
+    decoder_batchnorm=False,
+    kl_anneal_start=50,
+    kl_anneal_end=100,
+    align_anneal_start=75,
+    align_anneal_end=125,
     modalities=[
         # Likelihood guidance:
         # - RNA (normalized/log1p): often "gaussian"
@@ -252,7 +260,7 @@ univi_cfg = UniVIConfig(
 )
 
 train_cfg = TrainingConfig(
-    n_epochs=2000,
+    n_epochs=3000,
     batch_size=256,
     lr=1e-3,
     weight_decay=1e-4,
