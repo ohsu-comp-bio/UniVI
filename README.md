@@ -315,7 +315,8 @@ train_cfg = TrainingConfig(n_epochs=2000, batch_size=256, lr=1e-3, weight_decay=
 
 model = UniVIMultiModalVAE(univi_cfg, loss_mode="v1", v1_recon="avg", normalize_v1_terms=True).to(device)
 trainer = UniVITrainer(model=model, train_loader=train_loader, val_loader=None, train_cfg=train_cfg, device=device)
-trainer.fit()
+history = trainer.fit()
+print("Best epoch:", getattr(trainer, "best_epoch", None))
 ```
 
 > When `recon_targets` are present in the batch, `UniVITrainer` forwards them into `model(..., recon_targets=...)` automatically.
