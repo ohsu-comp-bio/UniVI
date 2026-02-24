@@ -19,13 +19,18 @@ from .utils.io import restore_checkpoint, save_checkpoint
 from .utils.logging import get_logger
 
 YType = Union[torch.Tensor, Dict[str, torch.Tensor]]
-ReconTargetsType = Dict[str, Dict[str, torch.Tensor]]
 
-# Supported batch forms:
+# Batch can be:
 #   x_dict
 #   (x_dict, y)
-#   (x_dict, recon_targets)                          # convenience
-#   (x_dict, y, recon_targets)                       # full
+#   (x_dict, recon_targets)
+#   (x_dict, y, recon_targets)
+#
+# recon_targets is typically:
+#   Dict[modality -> {"successes": Tensor(B,D), "total_count": Tensor(B,D)}]
+# but trainer also supports generic nested target mappings for forward compatibility.
+ReconTargetsType = Dict[str, Dict[str, torch.Tensor]]
+
 BatchType = Union[
     Dict[str, torch.Tensor],
     Tuple[Dict[str, torch.Tensor], YType],
@@ -42,6 +47,7 @@ class UniVITrainer:
       - mixed precision (AMP) via use_amp + amp_dtype
       - optional coordinate metadata and attention-bias configuration for tokenized ATAC
         (passed through to model forward when supported)
+      - optional recon_targets (successes + total_count) for binomial / beta-binomial losses
       - checkpoint save/load via utils.io helpers
 
     Behavior notes:
@@ -165,7 +171,6 @@ class UniVITrainer:
                         % (self.best_epoch, self.best_val_loss)
                     )
             else:
-                # No best tracked (possible if best_epoch_warmup > n_epochs or training stopped early)
                 self.logger.info("No best checkpoint was tracked (best_epoch_warmup may exceed training).")
 
         return self.history
@@ -239,6 +244,24 @@ class UniVITrainer:
 
     # ------------------------------ batch handling ------------------------------
 
+    @staticmethod
+    def _looks_like_recon_targets(obj: Any) -> bool:
+        """
+        Heuristic used only to disambiguate (x_dict, y) vs (x_dict, recon_targets)
+        when batch is a 2-tuple.
+
+        Accepts the common shape:
+          {mod: {"successes": ..., "total_count": ...}}
+        """
+        if not isinstance(obj, Mapping) or len(obj) == 0:
+            return False
+        for v in obj.values():
+            if not isinstance(v, Mapping):
+                return False
+            if ("successes" not in v) or ("total_count" not in v):
+                return False
+        return True
+
     def _split_batch(
         self, batch: BatchType
     ) -> Tuple[Dict[str, torch.Tensor], Optional[YType], Optional[ReconTargetsType]]:
@@ -271,8 +294,12 @@ class UniVITrainer:
             if len(batch) == 2:
                 a0, a1 = batch
                 x_dict = a0
-                # Heuristic: if second item looks like recon_targets (nested mapping), treat as such
-                if isinstance(a1, Mapping):
+
+                # Prefer explicit helper for common recon-target shape.
+                if self._looks_like_recon_targets(a1):
+                    recon_targets = a1  # type: ignore[assignment]
+                # Fallback heuristic: any nested mapping is likely recon_targets.
+                elif isinstance(a1, Mapping):
                     is_nested_mapping = any(isinstance(v, Mapping) for v in a1.values()) if len(a1) > 0 else False
                     if is_nested_mapping:
                         recon_targets = a1  # type: ignore[assignment]
@@ -296,7 +323,7 @@ class UniVITrainer:
             x_dict = batch
 
         if not isinstance(x_dict, dict):
-            raise TypeError(f"Expected x_dict to be dict. Got {type(x_dict)!r}")
+            raise TypeError(f"Expected batch to be dict or (dict, ...). Got {type(x_dict)!r}")
 
         # ---------- x_dict ----------
         x_out: Dict[str, torch.Tensor] = {}
@@ -372,15 +399,15 @@ class UniVITrainer:
         """
         Best-effort forward dispatch for multiple model signatures.
 
-        Tries newest first:
-          model(x, epoch=..., y=..., recon_targets=..., feature_coords=..., attn_bias_cfg=...)
+        Preferred signature (newest):
+          model(x_dict, epoch=..., y=..., feature_coords=..., attn_bias_cfg=..., recon_targets=...)
 
-        Then falls back progressively to older signatures.
+        Then gracefully degrades to older signatures.
         """
         fc = self.feature_coords if self.feature_coords else None
         ab = self.attn_bias_cfg if self.attn_bias_cfg else None
 
-        # Newest / richest signature
+        # Most specific / newest
         try:
             return self.model(
                 x_dict,
@@ -404,7 +431,7 @@ class UniVITrainer:
         except TypeError:
             pass
 
-        # Without y
+        # Without y (but with recon targets)
         try:
             return self.model(
                 x_dict,
@@ -425,14 +452,33 @@ class UniVITrainer:
         except TypeError:
             pass
 
+        # Epoch-only
+        try:
+            return self.model(x_dict, epoch=epoch, recon_targets=recon_targets)
+        except TypeError:
+            pass
+
         try:
             return self.model(x_dict, epoch=epoch)
         except TypeError:
             pass
 
+        # y-only
         if y is not None:
             try:
+                return self.model(x_dict, y=y, recon_targets=recon_targets)
+            except TypeError:
+                pass
+
+            try:
                 return self.model(x_dict, y=y)
+            except TypeError:
+                pass
+
+        # recon_targets-only
+        if recon_targets is not None:
+            try:
+                return self.model(x_dict, recon_targets=recon_targets)
             except TypeError:
                 pass
 
@@ -488,6 +534,8 @@ class UniVITrainer:
                         y=y,
                         recon_targets=recon_targets,
                     )
+
+                    # Back-compat: prefer loss_fixed for eval if present, else loss.
                     loss = out["loss"] if train else out.get("loss_fixed", out["loss"])
 
                 if train:
@@ -546,7 +594,6 @@ class UniVITrainer:
         warmup = self._best_warmup()
 
         if int(epoch) < int(warmup):
-            # Still compute/record val_loss elsewhere; just don't track best/patience yet.
             if epoch == warmup - 1:
                 self.logger.info(
                     "[Epoch %03d] Best tracking warmup ends next epoch (best_epoch_warmup=%d)."
@@ -554,10 +601,8 @@ class UniVITrainer:
                 )
             return False, False
 
-        # Past warmup: now this epoch should count for patience.
         counted = True
 
-        # First tracked epoch initializes best
         if self.best_state_dict is None or self.best_epoch is None:
             self.best_val_loss = val_loss_f
             self.best_state_dict = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
@@ -576,10 +621,6 @@ class UniVITrainer:
         return False, counted
 
     def _update_patience(self, improved: bool) -> None:
-        """
-        Update epochs_no_improve counter given whether validation improved.
-        Only called when cfg.early_stopping is True AND the epoch is counted.
-        """
         if improved:
             self.epochs_no_improve = 0
         else:
@@ -669,4 +710,3 @@ class UniVITrainer:
         self.logger.info("TrainingConfig:")
         for k, v in cfg_dict.items():
             self.logger.info("  %s: %r" % (k, v))
-

@@ -16,6 +16,9 @@ from torch.utils.data import Dataset
 
 from .config import ModalityConfig
 
+# -----------------------------------------------------------------------------
+# Types
+# -----------------------------------------------------------------------------
 LayerSpec = Union[None, str, Mapping[str, Optional[str]]]
 XKeySpec = Union[str, Mapping[str, str]]
 LabelSpec = Union[
@@ -25,7 +28,16 @@ LabelSpec = Union[
     Mapping[str, Union[np.ndarray, torch.Tensor, Sequence[int]]],
 ]
 
+# For binomial / beta-binomial recon targets (e.g., methylome):
+# recon_targets_spec = {
+#   "meth": {"successes_layer": "meth_successes", "total_count_layer": "meth_total_count"}
+# }
+ReconTargetSpec = Mapping[str, Mapping[str, str]]
 
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
 def _is_categorical_likelihood(lk: Optional[str]) -> bool:
     lk = (lk or "").lower().strip()
     return lk in ("categorical", "cat", "ce", "cross_entropy", "multinomial", "softmax")
@@ -102,15 +114,27 @@ def _as_modality_map(
     return out
 
 
+# -----------------------------------------------------------------------------
+# Dataset
+# -----------------------------------------------------------------------------
 class MultiModalDataset(Dataset):
     """
     Multi-modal AnnData-backed torch Dataset.
 
-    Returns:
-      - x_dict: Dict[modality -> FloatTensor]
-      - (x_dict, y) if labels are provided, where y is:
+    Returns (depending on what you provide):
+      - x_dict
+      - (x_dict, y)
+      - (x_dict, recon_targets)
+      - (x_dict, y, recon_targets)
+
+    Where:
+      - x_dict: Dict[modality -> FloatTensor] (1D per item; collate stacks to (B, D))
+      - y:
           * LongTensor scalar (back-compat), OR
           * dict[str -> LongTensor scalar] (multi-head)
+      - recon_targets:
+          * Dict[modality -> {"successes": FloatTensor(1D), "total_count": FloatTensor(1D)}]
+        (collate stacks to (B, D) per target)
 
     Categorical modality support:
       - If modality_cfgs marks a modality as categorical with input_kind="obs",
@@ -127,6 +151,7 @@ class MultiModalDataset(Dataset):
         labels: Optional[LabelSpec] = None,
         dtype: torch.dtype = torch.float32,
         modality_cfgs: Optional[List[ModalityConfig]] = None,
+        recon_targets_spec: Optional[ReconTargetSpec] = None,
     ):
         if not adata_dict:
             raise ValueError("adata_dict is empty")
@@ -171,7 +196,9 @@ class MultiModalDataset(Dataset):
                     if t.ndim != 1:
                         t = t.reshape(-1)
                     if int(t.shape[0]) != self._n_cells:
-                        raise ValueError(f"labels[{hk!r}] length ({int(t.shape[0])}) must equal n_cells ({self._n_cells})")
+                        raise ValueError(
+                            f"labels[{hk!r}] length ({int(t.shape[0])}) must equal n_cells ({self._n_cells})"
+                        )
                     t = t.long()
                     if self.device is not None:
                         t = t.to(self.device)
@@ -188,6 +215,42 @@ class MultiModalDataset(Dataset):
                     y = y.to(self.device)
                 self.labels = y
 
+        # Reconstruction targets (optional): for (beta_)binomial etc.
+        # spec is per-modality:
+        #   {"successes_layer": "...", "total_count_layer": "..."}
+        self.recon_targets_spec: Optional[Dict[str, Dict[str, str]]] = None
+        if recon_targets_spec is not None:
+            rts: Dict[str, Dict[str, str]] = {}
+            for mod, spec in recon_targets_spec.items():
+                if mod not in self.adata_dict:
+                    raise KeyError(
+                        f"recon_targets_spec contains mod={mod!r} not in adata_dict keys {list(self.adata_dict.keys())}"
+                    )
+                if not isinstance(spec, Mapping):
+                    raise TypeError(f"recon_targets_spec[{mod!r}] must be a mapping, got {type(spec)}")
+
+                s_layer = spec.get("successes_layer", None)
+                n_layer = spec.get("total_count_layer", None)
+                if not s_layer or not n_layer:
+                    raise ValueError(
+                        f"recon_targets_spec[{mod!r}] must define both "
+                        f"'successes_layer' and 'total_count_layer'. Got keys={list(spec.keys())}"
+                    )
+
+                a = self.adata_dict[mod]
+                if s_layer not in a.layers:
+                    raise KeyError(
+                        f"recon_targets_spec[{mod!r}] successes_layer={s_layer!r} not in adata.layers keys={list(a.layers.keys())}"
+                    )
+                if n_layer not in a.layers:
+                    raise KeyError(
+                        f"recon_targets_spec[{mod!r}] total_count_layer={n_layer!r} not in adata.layers keys={list(a.layers.keys())}"
+                    )
+
+                rts[str(mod)] = {"successes_layer": str(s_layer), "total_count_layer": str(n_layer)}
+
+            self.recon_targets_spec = rts
+
     @property
     def n_cells(self) -> int:
         return self._n_cells
@@ -202,6 +265,14 @@ class MultiModalDataset(Dataset):
     def _get_X_row(self, adata_obj: AnnData, idx: int, layer: Optional[str], X_key: str) -> np.ndarray:
         X = _get_matrix(adata_obj, layer=layer, X_key=X_key)
         row = X[idx]
+        if sp.issparse(row):
+            row = row.toarray()
+        return np.asarray(row).reshape(-1).astype(np.float32, copy=False)
+
+    def _get_layer_row(self, adata_obj: AnnData, idx: int, layer: str) -> np.ndarray:
+        if layer not in adata_obj.layers:
+            raise KeyError(f"layer={layer!r} not found in adata.layers. Keys={list(adata_obj.layers.keys())}")
+        row = adata_obj.layers[layer][idx]
         if sp.issparse(row):
             row = row.toarray()
         return np.asarray(row).reshape(-1).astype(np.float32, copy=False)
@@ -251,16 +322,50 @@ class MultiModalDataset(Dataset):
                 x = x.to(self.device)
             x_dict[name] = x
 
-        if self.labels is None:
+        recon_targets = None
+        if self.recon_targets_spec is not None:
+            rt: Dict[str, Dict[str, torch.Tensor]] = {}
+            for mod, spec in self.recon_targets_spec.items():
+                a = self.adata_dict[mod]
+                k_np = self._get_layer_row(a, idx, layer=spec["successes_layer"])
+                n_np = self._get_layer_row(a, idx, layer=spec["total_count_layer"])
+
+                k = torch.from_numpy(k_np).to(dtype=self.dtype)
+                n = torch.from_numpy(n_np).to(dtype=self.dtype)
+                if self.device is not None:
+                    k = k.to(self.device)
+                    n = n.to(self.device)
+
+                rt[mod] = {"successes": k, "total_count": n}
+            recon_targets = rt
+
+        # Return patterns:
+        #   - x_dict
+        #   - (x_dict, y)
+        #   - (x_dict, recon_targets)
+        #   - (x_dict, y, recon_targets)
+        if self.labels is None and recon_targets is None:
             return x_dict
 
+        if self.labels is None and recon_targets is not None:
+            return x_dict, recon_targets
+
+        # labels exist
         if isinstance(self.labels, dict):
             y_out: Dict[str, torch.Tensor] = {k: v[idx] for k, v in self.labels.items()}
-            return x_dict, y_out
+            if recon_targets is None:
+                return x_dict, y_out
+            return x_dict, y_out, recon_targets
 
-        return x_dict, self.labels[idx]
+        # single-label
+        if recon_targets is None:
+            return x_dict, self.labels[idx]
+        return x_dict, self.labels[idx], recon_targets
 
 
+# -----------------------------------------------------------------------------
+# Factory helpers
+# -----------------------------------------------------------------------------
 def dataset_from_anndata_dict(
     adata_dict: Dict[str, AnnData],
     layer: LayerSpec = None,
@@ -272,6 +377,7 @@ def dataset_from_anndata_dict(
     dtype: torch.dtype = torch.float32,
     copy_aligned: bool = True,
     modality_cfgs: Optional[List[ModalityConfig]] = None,
+    recon_targets_spec: Optional[ReconTargetSpec] = None,
 ) -> Tuple[MultiModalDataset, Dict[str, AnnData]]:
     if align_obs and paired:
         adata_dict = align_paired_obs_names(adata_dict, how="intersection", copy=copy_aligned)
@@ -285,6 +391,7 @@ def dataset_from_anndata_dict(
         labels=labels,
         dtype=dtype,
         modality_cfgs=modality_cfgs,
+        recon_targets_spec=recon_targets_spec,
     )
     return ds, adata_dict
 
@@ -312,9 +419,12 @@ def load_anndata_dict_from_config(
     return out
 
 
+# -----------------------------------------------------------------------------
+# Collate functions
+# -----------------------------------------------------------------------------
 def collate_multimodal_xy(batch):
     """
-    Collate:
+    Back-compat collate:
       - works for [x_dict, ...] or [(x_dict, y), ...]
       - stacks per-modality tensors into (B, D)
       - supports y as:
@@ -329,9 +439,7 @@ def collate_multimodal_xy(batch):
             y_out: Dict[str, torch.Tensor] = {}
             keys = list(y0.keys())
             for k in keys:
-                y_out[str(k)] = torch.stack(
-                    [torch.as_tensor(yy[k], dtype=torch.long) for yy in ys], dim=0
-                )
+                y_out[str(k)] = torch.stack([torch.as_tensor(yy[k], dtype=torch.long) for yy in ys], dim=0)
             y = y_out
         else:
             y = torch.stack([torch.as_tensor(yy, dtype=torch.long) for yy in ys], dim=0)
@@ -343,3 +451,103 @@ def collate_multimodal_xy(batch):
     return x if y is None else (x, y)
 
 
+def collate_multimodal_xy_recon(batch):
+    """
+    Collate that supports recon_targets.
+
+    Accepts batch items in any of these shapes:
+      - x_dict
+      - (x_dict, y)
+      - (x_dict, recon_targets)
+      - (x_dict, y, recon_targets)
+
+    Returns:
+      - x
+      - (x, y)
+      - (x, recon_targets)
+      - (x, y, recon_targets)
+
+    recon_targets is:
+      Dict[mod -> Dict["successes"->(B,D), "total_count"->(B,D)]]
+    """
+    x_items: List[Dict[str, torch.Tensor]] = []
+    y_items: List[Optional[Union[torch.Tensor, Mapping[str, Any]]]] = []
+    rt_items: List[Optional[Mapping[str, Mapping[str, Any]]]] = []
+
+    def _looks_like_recon_targets(obj: Any) -> bool:
+        if not isinstance(obj, Mapping) or len(obj) == 0:
+            return False
+        # expected: {mod: {"successes": ..., "total_count": ...}}
+        for v in obj.values():
+            if not isinstance(v, Mapping):
+                return False
+            if ("successes" not in v) or ("total_count" not in v):
+                return False
+        return True
+
+    for item in batch:
+        if isinstance(item, (tuple, list)):
+            if len(item) == 2:
+                a, b = item
+                if _looks_like_recon_targets(b):
+                    x_items.append(a)
+                    y_items.append(None)
+                    rt_items.append(b)
+                else:
+                    x_items.append(a)
+                    y_items.append(b)
+                    rt_items.append(None)
+            elif len(item) == 3:
+                a, b, c = item
+                x_items.append(a)
+                y_items.append(b)
+                rt_items.append(c)
+            else:
+                raise ValueError(f"Unsupported batch item tuple length={len(item)}")
+        else:
+            x_items.append(item)
+            y_items.append(None)
+            rt_items.append(None)
+
+    # Stack X
+    keys = x_items[0].keys()
+    x = {k: torch.stack([d[k] for d in x_items], dim=0) for k in keys}
+
+    # Stack y if present
+    y_present = any(v is not None for v in y_items)
+    y_out = None
+    if y_present:
+        ys = [v for v in y_items if v is not None]
+        y0 = ys[0]
+        if isinstance(y0, Mapping):
+            y_out = {
+                str(k): torch.stack([torch.as_tensor(yy[k], dtype=torch.long) for yy in ys], dim=0)
+                for k in y0.keys()
+            }
+        else:
+            y_out = torch.stack([torch.as_tensor(yy, dtype=torch.long) for yy in ys], dim=0)
+
+    # Stack recon_targets if present
+    rt_present = any(v is not None for v in rt_items)
+    rt_out = None
+    if rt_present:
+        rts = [v for v in rt_items if v is not None]
+        rt_out = {}
+        for mod in rts[0].keys():
+            rt_out[mod] = {
+                "successes": torch.stack(
+                    [torch.as_tensor(rr[mod]["successes"], dtype=torch.float32) for rr in rts], dim=0
+                ),
+                "total_count": torch.stack(
+                    [torch.as_tensor(rr[mod]["total_count"], dtype=torch.float32) for rr in rts], dim=0
+                ),
+            }
+
+    # Return in a stable order
+    if (y_out is None) and (rt_out is None):
+        return x
+    if (y_out is None) and (rt_out is not None):
+        return x, rt_out
+    if (y_out is not None) and (rt_out is None):
+        return x, y_out
+    return x, y_out, rt_out

@@ -3,31 +3,27 @@
 [![PyPI version](https://img.shields.io/pypi/v/univi?v=0.4.7)](https://pypi.org/project/univi/)
 [![pypi downloads](https://img.shields.io/pepy/dt/univi?label=pypi%20downloads)](https://pepy.tech/project/univi)
 [![Conda version](https://img.shields.io/conda/vn/conda-forge/univi?cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
-[![conda-forge downloads](https://img.shields.io/conda/dn/conda-forge/univi?label=conda-forge%20downloads\&cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
+[![conda-forge downloads](https://img.shields.io/conda/dn/conda-forge/univi?label=conda-forge%20downloads&cacheSeconds=300)](https://anaconda.org/conda-forge/univi)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/univi.svg?v=0.4.7)](https://pypi.org/project/univi/)
 
 <picture>
-  <!-- Dark mode (GitHub supports this; PyPI may ignore <source>) -->
   <source media="(prefers-color-scheme: dark)"
           srcset="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.7/assets/figures/univi_overview_dark.png">
-  <!-- Light mode / fallback (works on GitHub + PyPI) -->
   <img src="https://raw.githubusercontent.com/Ashford-A/UniVI/v0.4.7/assets/figures/univi_overview_light.png"
        alt="UniVI overview and evaluation roadmap"
        width="100%">
 </picture>
 
-**UniVI** is a **multi-modal variational autoencoder (VAE)** framework for aligning and integrating single-cell modalities such as **RNA**, **ADT (CITE-seq)**, **ATAC**, and **coverage-based / proportion-like assays** (e.g., **single-cell methylome** features).
+**UniVI** is a **multi-modal variational autoencoder (VAE)** toolkit for aligning and integrating single-cell modalities such as **RNA**, **ADT (CITE-seq)**, **ATAC**, and **coverage-aware / proportion-like assays** (e.g., **single-cell methylome** features).
 
-It’s designed for experiments like:
+Common use cases:
 
-* **Joint embedding** of paired multimodal data (CITE-seq, Multiome, TEA-seq)
-* **Zero-shot projection** of external unimodal cohorts into a paired “bridge” latent
-* **Cross-modal reconstruction / imputation** (RNA→ADT, ATAC→RNA, RNA→methylome, etc.)
-* **Denoising** via learned generative decoders
-* **Evaluation** (FOSCTTM, Recall@k, modality mixing/entropy, label transfer, fused-space clustering)
-* **Optional supervised heads** for harmonized annotation and domain confusion
-* **Optional transformer encoders** (per-modality and/or fused multimodal transformer posterior)
-* **Token-level hooks** for interpretability (top-k indices; optional attention maps if enabled)
+- **Joint embedding** of paired multimodal data (CITE-seq, Multiome, TEA-seq)
+- **Bridge mapping / projection** of unimodal cohorts into a paired latent
+- **Cross-modal imputation** (RNA→ADT, ATAC→RNA, RNA→methylome, …)
+- **Denoising / reconstruction** with likelihood-aware decoders
+- **Evaluation** (FOSCTTM, Recall@k, mixing/entropy, label transfer, clustering)
+- Optional **supervised heads**, **MoE gating diagnostics**, and **transformer encoders**
 
 ---
 
@@ -61,7 +57,7 @@ If you use UniVI in your work, please cite:
 pip install univi
 ```
 
-> **Note:** UniVI requires PyTorch. If `import torch` fails, install PyTorch for your platform/CUDA from PyTorch’s official install instructions.
+> UniVI requires PyTorch. If `import torch` fails, install PyTorch for your platform/CUDA from PyTorch’s official install instructions.
 
 ### Conda / mamba
 
@@ -70,13 +66,6 @@ conda install -c conda-forge univi
 # or
 mamba install -c conda-forge univi
 ```
-
-> Optional (cleaner env setup):
->
-> ```bash
-> mamba create -n univi python=3.10 univi -c conda-forge
-> mamba activate univi
-> ```
 
 ### Development install (from source)
 
@@ -94,55 +83,50 @@ pip install -e .
 
 ## Data expectations
 
-UniVI expects **per-modality AnnData** objects. For paired settings, modalities should share the same cells:
+UniVI expects **per-modality AnnData** objects.
 
 * Each modality is an `AnnData`
-* Paired modalities have the same `obs_names` (same cells, same order)
+* For paired settings, modalities share the same cells (`obs_names`, same order)
 * Raw counts often live in `.layers["counts"]`
-* A model-ready representation lives in `.X` (or `.obsm["X_*"]` for ATAC LSI)
+* Model inputs typically live in `.X` (or `.obsm["X_*"]` for ATAC LSI)
 
-You can keep multiple representations around:
+Recommended convention:
 
-* `.layers["counts"]` = raw
-* `.X` = model input (e.g., log1p normalized RNA, CLR ADT, LSI ATAC, methylation fractions, etc.)
+* `.layers["counts"]` = raw counts / raw signal
+* `.X` / `.obsm["X_*"]` = model input space (log1p RNA, CLR ADT, LSI ATAC, methyl fractions, etc.)
 * `.layers["denoised_*"]` / `.layers["imputed_*"]` = UniVI outputs
 
-### Coverage-based / proportion-like modalities (e.g., methylome)
+---
 
-UniVI supports two common ways to represent methylome-like features:
+## Methylome / coverage-aware modalities
 
-#### A) Fraction-valued targets (simple path)
+Two common patterns:
 
-Use this when your features are bounded in **[0,1]** (e.g., methylation fraction per region/cell) and you are **not explicitly modeling coverage**.
+### A) Fraction-valued features (simple path)
 
-* Store fraction-like values in `.X` (or selected layer)
-* Use `likelihood="beta"` for that modality
+If `.X` contains values in **[0, 1]** (fraction methylated) and you don’t need coverage-aware likelihoods:
 
-This integrates cleanly with the standard Quickstart/trainer workflow.
+* store fractions in `.X`
+* use `likelihood="beta"`
 
-#### B) Count + coverage targets (recommended when available)
+### B) Counts + coverage (recommended when available)
 
-Use this when you have both:
+If you have both:
 
-* **successes** (e.g., methylated counts), and
-* **total_count / coverage** (e.g., total reads covering each feature)
+* **successes** (e.g., methylated counts) and
+* **total_count** (coverage / trials)
 
-For this case, use:
+Use:
 
-* `likelihood="binomial"` or
-* `likelihood="beta_binomial"` (often a better default due to overdispersion)
+* `likelihood="binomial"` or **`likelihood="beta_binomial"`** (often preferred)
 
-In this setup, the model input can still be a convenient representation in `.X` (e.g., fractions, transformed fractions, or embeddings), **but reconstruction targets must provide both successes and total_count** via `recon_targets` during training/evaluation.
-
-> Practical note: keep successes/coverage matrices accessible (e.g., in `.layers`, side arrays, or a custom dataset object) if you plan to use `binomial` / `beta_binomial`.
->
-> For `binomial` / `beta_binomial`, the model input (`x_dict[mod]`, usually from `.X`) can be fractions or embeddings, while the reconstruction loss is computed against `recon_targets[mod]` (successes + total_count).
+In this setup the model input can still be fractions/embeddings in `.X`, but the reconstruction loss is computed against **`recon_targets`** (successes + total_count) supplied by the dataset/collate path.
 
 ---
 
 ## Quickstart (Python / Jupyter)
 
-This is the “notebook path”: load paired AnnData → train → encode → evaluate/plot.
+Minimal “notebook path”: load paired AnnData → train → encode/evaluate.
 
 ```python
 import numpy as np
@@ -151,7 +135,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from univi import UniVIMultiModalVAE, ModalityConfig, UniVIConfig, TrainingConfig
-from univi.data import MultiModalDataset, align_paired_obs_names
+from univi.data import MultiModalDataset, align_paired_obs_names, collate_multimodal_xy_recon
 from univi.trainer import UniVITrainer
 ```
 
@@ -164,7 +148,7 @@ adt = sc.read_h5ad("path/to/adt_citeseq.h5ad")
 adata_dict = align_paired_obs_names({"rna": rna, "adt": adt})
 ```
 
-### 2) Dataset + dataloaders
+### 2) Dataset + dataloaders (MultiModalDataset option)
 
 ```python
 device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
@@ -182,8 +166,20 @@ rng.shuffle(idx)
 split = int(0.8 * n)
 train_idx, val_idx = idx[:split], idx[split:]
 
-train_loader = DataLoader(Subset(dataset, train_idx), batch_size=256, shuffle=True,  num_workers=0)
-val_loader   = DataLoader(Subset(dataset, val_idx),   batch_size=256, shuffle=False, num_workers=0)
+train_loader = DataLoader(
+    Subset(dataset, train_idx),
+    batch_size=256,
+    shuffle=True,
+    num_workers=0,
+    collate_fn=collate_multimodal_xy_recon,  # safe even if recon_targets are absent
+)
+val_loader = DataLoader(
+    Subset(dataset, val_idx),
+    batch_size=256,
+    shuffle=False,
+    num_workers=0,
+    collate_fn=collate_multimodal_xy_recon,
+)
 ```
 
 ### 3) Model config + train
@@ -193,12 +189,6 @@ univi_cfg = UniVIConfig(
     latent_dim=30,
     beta=1.15,
     gamma=3.25,
-    encoder_dropout=0.10,
-    decoder_dropout=0.05,
-    kl_anneal_start=75,
-    kl_anneal_end=150,
-    align_anneal_start=100,
-    align_anneal_end=175,
     modalities=[
         # Likelihood guidance:
         # - RNA (normalized/log1p): often "gaussian"
@@ -239,24 +229,19 @@ univi_cfg = UniVIConfig(
 )
 
 train_cfg = TrainingConfig(
-    n_epochs=5000,
+    n_epochs=2000,
     batch_size=256,
     lr=1e-3,
     weight_decay=1e-4,
     device=device,
-    log_every=25,
-    grad_clip=5.0,
-    num_workers=0,
-    seed=42,
     early_stopping=True,
-    best_epoch_warmup=75,         # in UniVI v0.4.1+
+    best_epoch_warmup=50,
     patience=50,
-    min_delta=0.0,
 )
 
 model = UniVIMultiModalVAE(
     univi_cfg,
-    loss_mode="v1",               # or "v2" - "v1" recommended (used in the manuscript)
+    loss_mode="v1",       # "v1" recommended (used in the manuscript)
     v1_recon="avg",
     normalize_v1_terms=True,
 ).to(device)
@@ -272,131 +257,42 @@ trainer = UniVITrainer(
 trainer.fit()
 ```
 
-#### Example: swapping in a methylome modality
-
-If you’re using methylome-like features, the modality config typically looks like one of these patterns:
-
-**Fraction-valued features in `.X` (simple path):**
-
-```python
-ModalityConfig(
-    name="meth",
-    input_dim=meth.n_vars,
-    encoder_hidden=[512, 256, 128],
-    decoder_hidden=[128, 256, 512],
-    likelihood="beta",
-)
-```
-
-**Count + coverage reconstruction (recommended when available):**
-
-```python
-ModalityConfig(
-    name="meth",
-    input_dim=meth.n_vars,
-    encoder_hidden=[512, 256, 128],
-    decoder_hidden=[128, 256, 512],
-    likelihood="beta_binomial",   # or "binomial"
-)
-```
-
-In the count+coverage case, you must pass `recon_targets` (successes + total_count) during training/evaluation.
-
-### 3b) Coverage-based modalities (methylome): passing `recon_targets`
-
-If a modality uses `likelihood="binomial"` or `likelihood="beta_binomial"`, UniVI expects reconstruction targets that include both:
-
-* **successes** (e.g., methylated counts)
-* **total_count** (coverage / trials)
-
-These targets are passed via `recon_targets` to `model(...)`.
-
-#### Accepted target formats for a modality
-
-UniVI accepts either:
-
-* a dict (recommended), e.g. `{"successes": m, "total_count": n}`
-* a tuple/list `(successes, total_count)`
-
-It also supports common aliases such as:
-
-* successes: `successes`, `m`, `counts`, `k`
-* total count: `total_count`, `n`, `coverage`, `depth`, `trials`
-
-#### Example (direct model call; keyword args recommended)
-
-```python
-out = model(
-    x_dict=batch_x_dict,
-    epoch=epoch,
-    recon_targets={
-        "meth": {
-            "successes": meth_successes_batch,   # shape [B, D]
-            "total_count": meth_coverage_batch,  # shape [B, D]
-        }
-    },
-)
-```
-
-> **Important:** pass `recon_targets=` as a **keyword argument** (not a positional argument), since `forward(...)` expects positional arguments in the order `(x_dict, epoch, y, attn_bias_cfg, recon_targets)`.
->
-> **Trainer note:** If you use `UniVITrainer`, your dataset/collate path must yield these `recon_targets` and your training step must forward them into `model(..., recon_targets=...)`.
-> If you want the standard Quickstart path with no trainer changes, use fraction-valued methylome features with `likelihood="beta"` first.
-
-### 4) Saving + loading trained models
-
-Saving the trained model:
-
-```python
-ckpt = {
-    "model_state_dict": model.state_dict(),
-    "model_config": univi_cfg,
-    "train_cfg": train_cfg,  # optional
-    "history": getattr(trainer, "history", None),
-    # optional fields if trainer exposes them:
-    "best_epoch": getattr(trainer, "best_epoch", None),
-    "best_metric": getattr(trainer, "best_metric", None),
-}
-torch.save(ckpt, "./saved_models/univi_model_state.pt")
-```
-
-Loading the saved model and additional model info:
-
-```python
-import torch
-from univi import UniVIMultiModalVAE
-
-# For broad compatibility across PyTorch versions:
-ckpt = torch.load("./saved_models/univi_model_state.pt", map_location=device)
-
-# (If you're on newer PyTorch and prefer explicit behavior, you can use:
-# ckpt = torch.load("./saved_models/univi_model_state.pt", weights_only=False, map_location=device))
-
-model = UniVIMultiModalVAE(ckpt["model_config"]).to(device)
-model.load_state_dict(ckpt["model_state_dict"])
-model.eval()
-
-print("Best epoch:", ckpt.get("best_epoch"))
-```
-
-> **Portability note:** Saving the config dataclass object is convenient, but checkpoint unpickling can be version-sensitive if config classes move/change. For long-term portability, also consider saving a JSON-serializable config alongside the checkpoint.
-
 ---
 
-## Quickstart variant: RNA + methylome (fraction-valued features)
+## Quickstart: RNA + methylome (beta-binomial with recon_targets)
 
-If you want a minimal methylome workflow without custom trainer plumbing, start with fraction-valued methylome features in `.X` and use `likelihood="beta"`.
+Assumes:
+
+* `meth.X` is a convenient model input (fractions or embeddings)
+* `meth.layers["meth_successes"]` stores methylated counts
+* `meth.layers["meth_total_count"]` stores coverage / trials
 
 ```python
-meth = sc.read_h5ad("path/to/methylome_features.h5ad")   # .X contains fractions in [0,1]
-rna  = sc.read_h5ad("path/to/rna_paired.h5ad")
+rna  = sc.read_h5ad("path/to/rna.h5ad")
+meth = sc.read_h5ad("path/to/meth.h5ad")
 
 adata_dict = align_paired_obs_names({"rna": rna, "meth": meth})
+
+recon_targets_spec = {
+    "meth": {
+        "successes_layer": "meth_successes",
+        "total_count_layer": "meth_total_count",
+    }
+}
 
 dataset = MultiModalDataset(
     adata_dict=adata_dict,
     X_key="X",
     device=None,
+    recon_targets_spec=recon_targets_spec,
+)
+
+train_loader = DataLoader(
+    dataset,
+    batch_size=256,
+    shuffle=True,
+    num_workers=0,
+    collate_fn=collate_multimodal_xy_recon,
 )
 
 univi_cfg = UniVIConfig(
@@ -404,22 +300,42 @@ univi_cfg = UniVIConfig(
     beta=1.15,
     gamma=3.25,
     modalities=[
-        ModalityConfig(
-            name="rna",
-            input_dim=rna.n_vars,
-            encoder_hidden=[1024, 512, 256, 128],
-            decoder_hidden=[128, 256, 512, 1024],
-            likelihood="gaussian",
-        ),
-        ModalityConfig(
-            name="meth",
-            input_dim=meth.n_vars,
-            encoder_hidden=[512, 256, 128],
-            decoder_hidden=[128, 256, 512],
-            likelihood="beta",
-        ),
+        ModalityConfig("rna",  rna.n_vars,  [1024, 512, 256, 128], [128, 256, 512, 1024], likelihood="gaussian"),
+        ModalityConfig("meth", meth.n_vars, [512, 256, 128],       [128, 256, 512],       likelihood="beta_binomial"),
     ],
 )
+
+train_cfg = TrainingConfig(n_epochs=2000, batch_size=256, lr=1e-3, weight_decay=1e-4, device=device)
+
+model = UniVIMultiModalVAE(univi_cfg, loss_mode="v1", v1_recon="avg", normalize_v1_terms=True).to(device)
+trainer = UniVITrainer(model=model, train_loader=train_loader, val_loader=None, train_cfg=train_cfg, device=device)
+trainer.fit()
+```
+
+> When `recon_targets` are present in the batch, `UniVITrainer` forwards them into `model(..., recon_targets=...)` automatically.
+
+---
+
+## Saving + loading
+
+```python
+import torch
+from univi import UniVIMultiModalVAE
+
+ckpt = {
+    "model_state_dict": model.state_dict(),
+    "model_config": univi_cfg,
+    "train_cfg": train_cfg,
+    "history": getattr(trainer, "history", None),
+    "best_epoch": getattr(trainer, "best_epoch", None),
+}
+torch.save(ckpt, "./saved_models/univi_model_state.pt")
+
+ckpt = torch.load("./saved_models/univi_model_state.pt", map_location=device)
+model = UniVIMultiModalVAE(ckpt["model_config"]).to(device)
+model.load_state_dict(ckpt["model_state_dict"])
+model.eval()
+print("Best epoch:", ckpt.get("best_epoch"))
 ```
 
 ---
@@ -891,16 +807,24 @@ metrics["moe_gates"] = {
 
 ---
 
+## Advanced topics
+
+### Training objectives (v1 vs v2/lite)
+
+* **v1 (“paper”)**: per-modality posteriors + reconstruction scheme (cross/self/avg) + posterior alignment
+* **v2/lite**: fused posterior (MoE/PoE by default; optional fused transformer) + per-modality recon + β·KL + γ·alignment
+
+Choose via `loss_mode` at construction time (Python) or config JSON (scripts).
+
 ### Decoder output types (what UniVI handles for you)
 
 Decoders can return either:
 
-* a tensor (e.g. GaussianDecoder → `X_hat`)
-* or a dict (e.g. NB → `{"mu","log_theta"}`, ZINB → `{"mu","log_theta","logit_pi"}`, Poisson → `{"rate","log_rate"}`, Bernoulli/Categorical → `{"logits", "probs"}`, Beta / Beta-Binomial → parameter dicts such as `{"alpha","beta",...}` or `{"mu_logits","log_conc","alpha","beta",...}`)
+* a tensor (e.g. Gaussian)
+* or a dict (e.g. NB/ZINB/Poisson/Beta/Beta-Binomial parameter dicts)
 
-All post-training utilities above (`cross_modal_predict`, `denoise_*`, `generate_from_latent`, and reconstruction-eval helpers) are designed to **unwrap decoder outputs safely** and consistently return a sensible **mean-like** matrix for evaluation/plotting.
+UniVI evaluation utilities unwrap these and return mean-like matrices for plotting/evaluation.
 
-> For count-with-coverage modalities (`binomial` / `beta_binomial`), training/evaluation still requires the correct reconstruction targets (`successes` + `total_count`) when computing likelihood-based losses.
 
 ---
 
@@ -912,6 +836,15 @@ All post-training utilities above (`cross_modal_predict`, `denoise_*`, `generate
 * **v2/lite**: fused posterior (MoE/PoE-style by default; optional fused transformer) + per-modality recon + β·KL + γ·alignment (L2 on latent means)
 
 Choose via `loss_mode` at construction time (Python) or config JSON (scripts).
+
+### Decoder output types (what UniVI handles for you)
+
+Decoders can return either:
+
+* a tensor (e.g. Gaussian)
+* or a dict (e.g. NB/ZINB/Poisson/Beta/Beta-Binomial parameter dicts)
+
+UniVI evaluation utilities unwrap these and return mean-like matrices for plotting/evaluation.
 
 ## Advanced model features
 
@@ -1148,7 +1081,7 @@ Per-modality reconstruction losses are typically summed across features; large m
 
 ---
 
-### 7) Convenience APIs you’ll actually call
+### 7) Convenience APIs
 
 #### `encode_fused(...)`
 
@@ -1283,9 +1216,9 @@ MIT License — see `LICENSE`.
 
 ## Contact, questions, and bug reports
 
-* **Questions / comments:** open a GitHub Issue with the `question` label (or use Discussions)
-* **Bug reports:** include:
+* Questions / comments: open a GitHub Issue with the `question` label (or use Discussions)
+* Bug reports: include:
 
   * UniVI version: `python -c "import univi; print(univi.__version__)"`
-  * a minimal notebook/code snippet
+  * minimal notebook/code snippet
   * stack trace + OS/CUDA/PyTorch versions
