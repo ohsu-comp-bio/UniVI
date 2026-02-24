@@ -242,6 +242,7 @@ train_cfg = TrainingConfig(
     early_stopping=True,
     best_epoch_warmup=50,
     patience=50,
+    log_every=25,
 )
 
 model = UniVIMultiModalVAE(
@@ -311,7 +312,7 @@ univi_cfg = UniVIConfig(
     ],
 )
 
-train_cfg = TrainingConfig(n_epochs=2000, batch_size=256, lr=1e-3, weight_decay=1e-4, device=device)
+train_cfg = TrainingConfig(n_epochs=2000, batch_size=256, lr=1e-3, weight_decay=1e-4, device=device, log_every=25,)
 
 model = UniVIMultiModalVAE(univi_cfg, loss_mode="v1", v1_recon="avg", normalize_v1_terms=True).to(device)
 trainer = UniVITrainer(model=model, train_loader=train_loader, val_loader=None, train_cfg=train_cfg, device=device)
