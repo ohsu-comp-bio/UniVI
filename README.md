@@ -98,32 +98,6 @@ Recommended convention:
 
 ---
 
-## Methylome / coverage-aware modalities
-
-Two common patterns:
-
-### A) Fraction-valued features (simple path)
-
-If `.X` contains values in **[0, 1]** (fraction methylated) and you don’t need coverage-aware likelihoods:
-
-* store fractions in `.X`
-* use `likelihood="beta"`
-
-### B) Counts + coverage (recommended when available)
-
-If you have both:
-
-* **successes** (e.g., methylated counts) and
-* **total_count** (coverage / trials)
-
-Use:
-
-* `likelihood="binomial"` or **`likelihood="beta_binomial"`** (often preferred)
-
-In this setup the model input can still be fractions/embeddings in `.X`, but the reconstruction loss is computed against **`recon_targets`** (successes + total_count) supplied by the dataset/collate path.
-
----
-
 ## Quickstart (Python / Jupyter)
 
 Minimal “notebook path”: load paired AnnData → train → encode/evaluate.
