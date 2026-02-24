@@ -259,7 +259,8 @@ trainer = UniVITrainer(
     device=device,
 )
 
-trainer.fit()
+history = trainer.fit()
+print("Best epoch:", getattr(trainer, "best_epoch", None))
 ```
 
 ---
