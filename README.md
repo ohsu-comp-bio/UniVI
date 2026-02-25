@@ -102,8 +102,6 @@ Recommended convention:
 
 Minimal “notebook path”: load paired AnnData → train → encode/evaluate.
 
-> See notebooks/ folder for end-to-end examples of using our workflow with different data types and for data preprocessing examples. notebooks/GR_manuscript_reproducibility/ contains code to reproduce all the figures in our manuscript and notebooks/UniVI_additional_examples/ contains examples of training UniVI models with less standard data types and preprocessing techniques + additional cool things you can do using our method.
-
 ```python
 import numpy as np
 import scanpy as sc
@@ -347,6 +345,8 @@ model.load_state_dict(ckpt["model_state_dict"])
 model.eval()
 print("Best epoch:", ckpt.get("best_epoch"))
 ```
+
+> For additional examples, refer to notebooks/ in this repository for end-to-end UniVI examples across different data types and for data preprocessing examples. Specifically, notebooks/GR_manuscript_reproducibility/ contains code to reproduce all the figures in our revised manuscript, while notebooks/UniVI_additional_examples/ contains examples of training UniVI models with less standard data types (e.g. scNMT-seq tri-modal RNA/CpG/GpC data) and preprocessing techniques used + additional cool things you can do using our method.
 
 ---
 
