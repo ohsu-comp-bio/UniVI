@@ -102,6 +102,8 @@ Recommended convention:
 
 Minimal “notebook path”: load paired AnnData → train → encode/evaluate.
 
+> See notebooks/ folder for end-to-end examples of using our workflow with different data types and for data preprocessing examples. notebooks/GR_manuscript_reproducibility/ contains code to reproduce all the figures in our manuscript and notebooks/UniVI_additional_examples/ contains examples of training UniVI models with less standard data types and preprocessing techniques + additional cool things you can do using our method.
+
 ```python
 import numpy as np
 import scanpy as sc
