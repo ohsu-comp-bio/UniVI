@@ -1152,7 +1152,9 @@ UniVI/
 │   │   ├── UniVI_manuscript_GR-Supple_____grid-sweep.ipynb
 │   │   └── UniVI_manuscript_GR-Supple_____grid-sweep_compile_plots_from_results_df.ipynb
 │   └── UniVI_additional_examples/         # Additional examples of UniVI workflow functionality
-│       └── Multiome_NB-RNA-counts_Poisson_or_Bernoulli-ATAC_peak-counts_Peak_perturbation_to_RNA_expression_cross-generation_experiment.ipynb
+│       ├── Multiome_NB-RNA-counts_Poisson_or_Bernoulli-ATAC_peak-counts_Peak_perturbation_to_RNA_expression_cross-generation_experiment.ipynb
+│       ├── scNMT-seq_mouse_gastrulation_feature-level_integration_example.ipynb
+│       └── scNMT-seq_mouse_gastrulation_nucleotide-level_integration_example.ipynb
 ├── parameter_files/                       # JSON configs for model + training + data selectors
 │   ├── defaults_*.json                    # Default configs (per experiment)
 │   └── params_*.json                      # Example “named” configs (RNA, ADT, ATAC, methylome, etc.)
