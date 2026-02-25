@@ -346,7 +346,7 @@ model.eval()
 print("Best epoch:", ckpt.get("best_epoch"))
 ```
 
-> For additional UniVI examples and preprocessing steps, refer to UniVI/notebooks/ for end-to-end experiments across different data types. Specifically, notebooks/GR_manuscript_reproducibility/ contains code to reproduce all the figures in our revised manuscript, while notebooks/UniVI_additional_examples/ contains examples of training UniVI models with less standard data types (e.g. scNMT-seq tri-modal RNA/CpG/GpC data) + additional cool things you can do using our method. The latter folder will be updated with new use-cases as they come up.
+> For additional UniVI examples and preprocessing steps, refer to UniVI/notebooks/ for end-to-end experiments across different data types. Specifically, notebooks/GR_manuscript_reproducibility/ contains code to reproduce all the figures in our revised manuscript, while notebooks/UniVI_additional_examples/ contains examples of training and evaluating UniVI models with less standard data types (e.g. scNMT-seq tri-modal RNA/CpG/GpC data) + additional cool things you can do using our method. The latter folder will be updated with new use-cases as they come up.
 
 ---
 
