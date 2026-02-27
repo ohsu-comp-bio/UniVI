@@ -317,7 +317,7 @@ univi_cfg = UniVIConfig(
     align_anneal_end=125,
     modalities=[
         #
-        # NOTE:
+        # Note:
         # Manuscript-style "gaussian" decoders on normalized feature spaces often produce the most
         # cell-to-cell aligned latent spaces for integration-focused use cases. For some assay types
         # (including methylome), a more distribution-matched likelihood may be preferable depending
@@ -560,7 +560,7 @@ def to_dense(X):
 Loading the test set indices for evaluations (if desired, can also just use transductive method (all cells) depending on goals):
 
 ```python
-# NOTE: Use the same test_idx for both modalities
+# Note: Use the same test_idx for both modalities
 rna = rna[test_idx].copy()
 adt = adt[test_idx].copy()
 
