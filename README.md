@@ -473,14 +473,16 @@ model = UniVIMultiModalVAE(univi_cfg, loss_mode="v1", v1_recon="avg", normalize_
 trainer = UniVITrainer(model=model, train_loader=train_loader, val_loader=None, train_cfg=train_cfg, device=device)
 history = trainer.fit()
 print("Best epoch:", getattr(trainer, "best_epoch", None))
+
+
+# When `recon_targets` are present in the batch, `UniVITrainer` forwards them into `model(..., recon_targets=...)` automatically.
 ```
 
-> When `recon_targets` are present in the batch, `UniVITrainer` forwards them into `model(..., recon_targets=...)` automatically.
+> Note: For additional UniVI examples and preprocessing steps, refer to UniVI/notebooks/ for end-to-end experiments across different data types. Specifically, notebooks/GR_manuscript_reproducibility/ contains code to reproduce all the figures in our revised manuscript, while notebooks/UniVI_additional_examples/ contains examples of training and evaluating UniVI models with less standard data types (e.g. scNMT-seq tri-modal RNA/CpG/GpC data) + additional cool things you can do using our method. The latter folder will be updated with new use-cases as they come up.
 
----
+### 5) Saving + loading trained models
 
-## Saving + loading
-
+Save model
 ```python
 import torch
 from univi import UniVIMultiModalVAE
@@ -493,15 +495,16 @@ ckpt = {
     "best_epoch": getattr(trainer, "best_epoch", None),
 }
 torch.save(ckpt, "./saved_models/univi_model_state.pt")
+```
 
-ckpt = torch.load("./saved_models/univi_model_state.pt", map_location=device)
+Load saved model
+```
+ckpt = torch.load("./saved_models/univi_model_state.pt", map_location=device, weights_only=False)
 model = UniVIMultiModalVAE(ckpt["model_config"]).to(device)
 model.load_state_dict(ckpt["model_state_dict"])
 model.eval()
 print("Best epoch:", ckpt.get("best_epoch"))
 ```
-
-> For additional UniVI examples and preprocessing steps, refer to UniVI/notebooks/ for end-to-end experiments across different data types. Specifically, notebooks/GR_manuscript_reproducibility/ contains code to reproduce all the figures in our revised manuscript, while notebooks/UniVI_additional_examples/ contains examples of training and evaluating UniVI models with less standard data types (e.g. scNMT-seq tri-modal RNA/CpG/GpC data) + additional cool things you can do using our method. The latter folder will be updated with new use-cases as they come up.
 
 ---
 
