@@ -181,6 +181,7 @@ assert rna.n_obs == adt.n_obs and np.all(rna.obs_names == adt.obs_names)
 * **ATAC (common patterns)**
 
   * `.X = binarized peaks` → `likelihood="bernoulli"`
+  * `.X = raw peak counts` → `likelihood="poisson"`
   * `.X = LSI / reduced features` → `likelihood="gaussian"`
 
 > Note: If you want to use UniVI inductively and avoid data leakage, apply feature selection, scaling,
