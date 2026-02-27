@@ -164,6 +164,40 @@ sc.pp.scale(adt, zero_center=True, max_value=10)
 ```
 
 ```python
+# ATAC example: TF-IDF -> LSI (store counts in .layers["counts"], put LSI in .obsm["X_lsi"])
+atac = adata_dict["atac"]
+atac.layers["counts"] = atac.X.copy()
+
+def tfidf(X):
+    # X: cells x peaks (counts; sparse ok)
+    X = X.tocsr() if hasattr(X, "tocsr") else X
+
+    # TF: normalize each cell by its total counts
+    cell_sum = np.asarray(X.sum(axis=1)).ravel()
+    cell_sum[cell_sum == 0] = 1.0
+    tf = X.multiply(1.0 / cell_sum[:, None])
+
+    # IDF: log(1 + n_cells / (1 + df))
+    df = np.asarray((X > 0).sum(axis=0)).ravel()
+    idf = np.log1p(X.shape[0] / (1.0 + df))
+
+    return tf.multiply(idf)
+
+X_tfidf = tfidf(atac.layers["counts"])
+
+# LSI via truncated SVD
+from sklearn.decomposition import TruncatedSVD  # (keep import local if you want)
+svd = TruncatedSVD(n_components=50, random_state=0)
+X_lsi = svd.fit_transform(X_tfidf)
+
+# Common convention: drop the first LSI component (often correlates with depth)
+atac.obsm["X_lsi"] = X_lsi[:, 1:]
+
+# (optional) you can use this as the model input via X_key="obsm:X_lsi" (depending on your dataset wrapper)
+# or keep .X as counts and point UniVI to the obsm key for ATAC inputs.
+```
+
+```python
 # (optional alignment sanity check)
 assert rna.n_obs == adt.n_obs and np.all(rna.obs_names == adt.obs_names)
 ```
