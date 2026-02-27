@@ -89,7 +89,7 @@ UniVI expects **per-modality AnnData** objects.
 * For paired settings, modalities share the same cells (`obs_names`, same order)
 * Raw counts often live in `.layers["counts"]`
 * Model inputs typically live in `.X` (or `.obsm["X_*"]` for ATAC LSI)
-* Model input is a dictionary of these `AnnData` objects with the dictionary key specifying the modality (e.g. `rna`, `adt`, `atac`).
+* Model input is a dictionary of these `AnnData` objects with the dictionary key specifying the modality (e.g. `rna`, `adt`, `atac`). These keys are used later for evaluation functions (cross-reconstruction etc.).
 
 Recommended convention:
 
