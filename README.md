@@ -116,11 +116,12 @@ from univi.trainer import UniVITrainer
 
 ### 1a) Load paired AnnData
 
+For CITE-seq data
 ```python
 rna = sc.read_h5ad("path/to/rna_citeseq.h5ad")
 adt = sc.read_h5ad("path/to/adt_citeseq.h5ad")
 ```
-or
+or for Multiome data (etc.)
 ```python
 rna = sc.read_h5ad("path/to/rna_multiome.h5ad")
 atac = sc.read_h5ad("path/to/atac_multiome.h5ad")
@@ -131,6 +132,7 @@ atac = sc.read_h5ad("path/to/atac_multiome.h5ad")
 > Note: Make sure to use the appropriate modality decoder distribution (`likelihood` variable) in step 3 
 > for your specific data preprocessing steps. See the bottom of this section and Step 3 notes for more details.
 
+RNA
 ```python
 # Conventions:
 # - keep raw counts in .layers["counts"]
@@ -150,7 +152,7 @@ rna.raw = rna  # snapshot log-space for plotting/DE
 sc.pp.highly_variable_genes(rna, flavor="seurat_v3", n_top_genes=2000, subset=True)
 sc.pp.scale(rna, max_value=10)
 ```
-
+ADT
 ```python
 # ADT example: CLR (per-cell) + scale (per-protein)
 adt.layers["counts"] = adt.X.copy()  # if raw counts stored in .X, otherwise can try adt.raw.X or similar
@@ -163,7 +165,7 @@ def clr_per_cell(X):
 adt.X = clr_per_cell(adt.layers["counts"])
 sc.pp.scale(adt, zero_center=True, max_value=10)
 ```
-
+ATAC
 ```python
 # ATAC example: TF-IDF -> LSI (store counts in .layers["counts"], put LSI in .obsm["X_lsi"])
 atac.layers["counts"] = atac.X.copy()  # if raw counts stored in .X, otherwise can try atac.raw.X or similar
@@ -209,15 +211,15 @@ or for Multiome data:
 # Put data into `adata_dict` for downstream workflow
 adata_dict = align_paired_obs_names({"rna": rna, "atac": atac})
 ```
-or for tri-modal data modality covering RNA+protein+ATAC(e.g. TEA-seq, DOGMA-seq, ASAP-seq):
+or for tri-modal data covering RNA+ADT+ATAC(e.g. TEA-seq, DOGMA-seq, ASAP-seq):
 ```python
 # Put data into `adata_dict` for downstream workflow
 adata_dict = align_paired_obs_names({"rna": rna, "adt": adt, "atac": atac})
 ```
-or if unimodal VAE use-case (etc..):
+or if unimodal VAE use-case (etc.):
 ```python
 # Put data into `adata_dict` for downstream workflow
-adata_dict = align_paired_obs_names({"rna": rna})
+adata_dict = align_paired_obs_names({"atac": atac})
 ```
 
 > Note: If you want to use UniVI inductively and avoid data leakage, apply feature selection, scaling,
