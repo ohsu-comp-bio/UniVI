@@ -101,7 +101,7 @@ Recommended convention:
 
 ## Quickstart (Python / Jupyter)
 
-Minimal “notebook path”: load paired AnnData → train → encode/evaluate.
+Minimal “notebook path”: load paired AnnData → preprocess → train → encode/evaluate → plot.
 
 ```python
 import numpy as np
