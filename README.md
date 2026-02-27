@@ -199,7 +199,7 @@ atac.obsm["X_lsi"] = X_lsi[:, 1:]
 # or keep .X as counts and point UniVI to the obsm key for ATAC inputs.
 ```
 
-# Post data preprocessing, get data ready for model input
+#### Post data preprocessing, get data ready for model input
 
 (optional alignment sanity check step)
 ```python
