@@ -499,7 +499,7 @@ torch.save(ckpt, "./saved_models/univi_model_state.pt")
 ```
 
 Load saved model
-```
+```python
 ckpt = torch.load("./saved_models/univi_model_state.pt", map_location=device, weights_only=False)
 model = UniVIMultiModalVAE(ckpt["model_config"]).to(device)
 model.load_state_dict(ckpt["model_state_dict"])
