@@ -129,8 +129,8 @@ atac = sc.read_h5ad("path/to/atac_multiome.h5ad")
 
 ### 1b) Preprocess each data type as desired
 
-> Note: Make sure to use the appropriate modality decoder distribution (`likelihood` variable) in step 3 
-> for your specific data preprocessing steps. See the bottom of this section and Step 3 notes for more details.
+> Note: Make sure to use the appropriate modality decoder distribution in step 3 for your specific data 
+> preprocessing steps. See Step 3 `ModalityConfig` `likeliehood` input notes for more details.
 
 RNA
 ```python
