@@ -57,7 +57,7 @@ If you use UniVI in your work, please cite:
 pip install univi
 ```
 
-> UniVI requires PyTorch. If `import torch` fails, install PyTorch for your platform/CUDA from PyTorch’s official install instructions.
+> UniVI requires PyTorch. If `import torch` fails, install PyTorch for your platform/CUDA from [PyTorch's official install instructions](https://pytorch.org/get-started/locally/).
 
 ### Conda / mamba
 
