@@ -485,9 +485,6 @@ For additional UniVI examples and preprocessing steps, refer to `UniVI/notebooks
 
 Save model
 ```python
-import torch
-from univi import UniVIMultiModalVAE
-
 ckpt = {
     "model_state_dict": model.state_dict(),
     "model_config": univi_cfg,
@@ -500,6 +497,9 @@ torch.save(ckpt, "./saved_models/univi_model_state.pt")
 
 Load saved model
 ```python
+import torch
+from univi import UniVIMultiModalVAE
+
 ckpt = torch.load("./saved_models/univi_model_state.pt", map_location=device, weights_only=False)
 model = UniVIMultiModalVAE(ckpt["model_config"]).to(device)
 model.load_state_dict(ckpt["model_state_dict"])
