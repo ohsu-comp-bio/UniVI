@@ -226,7 +226,7 @@ or for Multiome data
 adata_dict = {"rna": rna, "atac": atac}
 align_paired_obs_names(adata_dict)
 ```
-or for tri-modal data covering RNA+ADT+ATAC(e.g. TEA-seq, DOGMA-seq, ASAP-seq)
+or for tri-modal data covering RNA+ADT+ATAC (e.g. TEA-seq, DOGMA-seq, ASAP-seq)
 ```python
 # Put data into `adata_dict` for downstream workflow
 adata_dict = {"rna": rna, "adt": adt, "atac": atac}
