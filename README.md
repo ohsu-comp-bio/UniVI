@@ -351,7 +351,7 @@ univi_cfg = UniVIConfig(
 )
 ```
 
-### `ModalityConfig` per-modality `likelihood` guidance (pick to match your `.X`/model input preprocessing)
+#### `ModalityConfig` per-modality `likelihood` guidance (pick to match your `.X`/model input preprocessing)
 
 * **RNA**
 
