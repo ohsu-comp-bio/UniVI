@@ -168,7 +168,7 @@ sc.pp.scale(adt, zero_center=True, max_value=10)
 ```
 ATAC
 ```python
-# ATAC example: TF-IDF -> LSI (store counts in .layers["counts"], put LSI in .obsm["X_lsi"])
+# ATAC example: TF-IDF → LSI (store counts in .layers["counts"], put LSI in .obsm["X_lsi"])
 atac.layers["counts"] = atac.X.copy()  # if raw counts stored in .X, otherwise can try atac.raw.X or similar
 
 def tfidf(X):
@@ -479,7 +479,7 @@ print("Best epoch:", getattr(trainer, "best_epoch", None))
 # When `recon_targets` are present in the batch, `UniVITrainer` forwards them into `model(..., recon_targets=...)` automatically.
 ```
 
-For additional UniVI examples and preprocessing steps, refer to `UniVI/notebooks/` for end-to-end experiments across different data types. Specifically, `./notebooks/GR_manuscript_reproducibility/` contains code to reproduce all the figures in our revised manuscript, while `./notebooks/UniVI_additional_examples/` contains examples of training and evaluating UniVI models with less standard data types (e.g. scNMT-seq tri-modal RNA/CpG/GpC data) + additional cool things you can do using our method. The latter folder will be updated with new use-cases as they come up.
+For additional UniVI examples and preprocessing steps, refer to [`UniVI/notebooks/`](https://github.com/Ashford-A/UniVI/tree/main/notebooks) for end-to-end experiments across different data types. Specifically, [`./notebooks/GR_manuscript_reproducibility/`](https://github.com/Ashford-A/UniVI/tree/main/notebooks/GR_manuscript_reproducibility) contains code to reproduce all the figures in our revised manuscript, while [`./notebooks/UniVI_additional_examples/`](https://github.com/Ashford-A/UniVI/tree/main/notebooks/UniVI_additional_examples) contains examples of training and evaluating UniVI models with less standard data types (e.g. scNMT-seq tri-modal RNA/CpG/GpC data) + additional cool things you can do using our method (like perturbing targeted ATAC peaks in promoters and cross-reconstructing from ATAC → RNA to see the predicted gene expression effect of the ATAC perturbation). The latter folder will be updated with new use-cases as they come up.
 
 ### 5) Saving + loading trained models
 
@@ -625,8 +625,8 @@ fused = encode_fused_adata_pair(
     gate_prefix="gate",
 )
 
-# fused["Z_fused"] -> (n_cells, latent_dim)
-# fused["gates"]  -> (n_cells, n_modalities) or None (if fused transformer posterior is used)
+# fused["Z_fused"] → (n_cells, latent_dim)
+# fused["gates"]  → (n_cells, n_modalities) or None (if fused transformer posterior is used)
 ```
 
 Plot fused
@@ -702,7 +702,7 @@ denoise_adata(
     overwrite_X=False,
     batch_size=512,
     adata_by_mod={"rna": rna, "adt": adt},
-    layer_by_mod={"rna": None, "adt": None},  # None -> use .X
+    layer_by_mod={"rna": None, "adt": None},  # None → use .X
     X_key_by_mod={"rna": "X", "adt": "X"},
     use_mean=True,
 )
@@ -1239,7 +1239,7 @@ mu, logvar, z, gates, gate_logits = model.encode_fused(
 **Purpose:** Encode fused latent, then emit probabilities/logits for the legacy head + all multi-head configs.
 ```python
 pred = model.predict_heads(x_dict, return_probs=True)
-# pred[head] -> probs (softmax/sigmoid)
+# pred[head] → probs (softmax/sigmoid)
 ```
 
 ---
