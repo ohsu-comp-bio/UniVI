@@ -89,6 +89,7 @@ UniVI expects **per-modality AnnData** objects.
 * For paired settings, modalities share the same cells (`obs_names`, same order)
 * Raw counts often live in `.layers["counts"]`
 * Model inputs typically live in `.X` (or `.obsm["X_*"]` for ATAC LSI)
+* Model input is a dictionary of these `AnnData` objects with the dictionary key specifying the modality (e.g. `rna`, `adt`, `atac`).
 
 Recommended convention:
 
@@ -125,8 +126,7 @@ adata_dict = align_paired_obs_names({"rna": rna, "adt": adt})
 ### 1b) Preprocess each data type as desired
 
 > Note: Make sure to use the appropriate modality decoder distribution (`likelihood` variable) in step 3 
-> for your specific data preprocessing steps. For example, scRNA normalized/log1p is often roughly "gaussian"
-> whereas scRNA raw counts are roughly either "nb" or "zinb".
+> for your specific data preprocessing steps. See the bottom of this section and Step 3 notes for more details.
 
 ```python
 # Conventions:
@@ -164,16 +164,7 @@ sc.pp.scale(adt, zero_center=True, max_value=10)
 ```
 
 ```python
-# (optional alignment safety and sanity check)
-from univi.data import align_paired_obs_names
-
-adata_dict = {'rna': rna, 'adt': adt}
-
-align_paired_obs_names(adata_dict)
-
-rna = adata_dict['rna'].copy()
-adt = adata_dict['adt'].copy()
-
+# (optional alignment sanity check)
 assert rna.n_obs == adt.n_obs and np.all(rna.obs_names == adt.obs_names)
 ```
 
