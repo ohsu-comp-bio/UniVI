@@ -103,6 +103,7 @@ Recommended convention:
 
 Minimal “notebook path”: load paired AnnData → preprocess data → train → encode/evaluate → plot.
 
+### 0) Imports
 ```python
 import numpy as np
 import scanpy as sc
@@ -114,7 +115,7 @@ from univi.data import MultiModalDataset, align_paired_obs_names, collate_multim
 from univi.trainer import UniVITrainer
 ```
 
-### 1a) Load paired AnnData
+### 1) Load paired AnnData
 
 For CITE-seq data
 ```python
@@ -127,9 +128,9 @@ rna = sc.read_h5ad("path/to/rna_multiome.h5ad")
 atac = sc.read_h5ad("path/to/atac_multiome.h5ad")
 ```
 
-### 1b) Preprocess each data type as desired
+### 2) Preprocess each data type as desired
 
-> Note: Make sure to use the appropriate modality decoder distribution in step 3 for your specific data preprocessing steps. See Step 3 `ModalityConfig(likeliehood=..)` input notes for more details.
+> Note: Make sure to use the appropriate modality decoder distribution in step 4 (Model config + train) for your specific data preprocessing steps. See Step 4 `ModalityConfig(likeliehood=..)` section notes for more details.
 
 RNA
 ```python
@@ -225,7 +226,7 @@ adata_dict = align_paired_obs_names({"atac": atac})
 > and any "learned" transforms (e.g. PCA, LSI) to the training set only, then apply the results elucidated 
 > from the training set to the validation and test sets.
 
-### 2) Dataset + dataloaders (MultiModalDataset option)
+### 3) Dataset + dataloaders (MultiModalDataset option)
 
 ```python
 device = (
@@ -291,7 +292,7 @@ test_loader = DataLoader(
 )
 ```
 
-### 3) Model config + train
+### 4) Model config + train
 
 ```python
 univi_cfg = UniVIConfig(
