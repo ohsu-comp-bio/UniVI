@@ -113,7 +113,7 @@ from univi.data import MultiModalDataset, align_paired_obs_names, collate_multim
 from univi.trainer import UniVITrainer
 ```
 
-### 1) Load paired AnnData
+### 1a) Load paired AnnData
 
 ```python
 rna = sc.read_h5ad("path/to/rna_citeseq.h5ad")
@@ -121,6 +121,80 @@ adt = sc.read_h5ad("path/to/adt_citeseq.h5ad")
 
 adata_dict = align_paired_obs_names({"rna": rna, "adt": adt})
 ```
+
+### 1b) Preprocess each data type as desired
+
+> Note: Make sure to use the appropriate modality decoder distribution (`likelihood` variable) in step 3 
+> for your specific data preprocessing steps. For example, scRNA normalized/log1p is often roughly "gaussian"
+> whereas scRNA raw counts are roughly either "nb" or "zinb".
+
+```python
+# Conventions:
+# - keep raw counts in .layers["counts"]
+# - set .X to the model input space (e.g., RNA log1p; ADT CLR(+scaled))
+
+# RNA example: log-normalized + HVGs + scale
+rna = adata_dict["rna"]
+rna.layers["counts"] = rna.X.copy()
+
+# (optional QC metrics)
+rna.var["mt"] = rna.var_names.str.upper().str.startswith("MT-")
+sc.pp.calculate_qc_metrics(rna, qc_vars=["mt"], percent_top=None, log1p=False, inplace=True)
+
+sc.pp.normalize_total(rna, target_sum=1e4)
+sc.pp.log1p(rna)
+rna.raw = rna  # snapshot log-space for plotting/DE
+
+sc.pp.highly_variable_genes(rna, flavor="seurat_v3", n_top_genes=2000, subset=True)
+sc.pp.scale(rna, max_value=10)
+```
+
+```python
+# ADT example: CLR (per-cell) + scale (per-protein)
+adt = adata_dict["adt"]
+adt.layers["counts"] = adt.X.copy()
+
+def clr_per_cell(X):
+    X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)
+    logX = np.log1p(X)
+    return logX - logX.mean(axis=1, keepdims=True)
+
+adt.X = clr_per_cell(adt.layers["counts"])
+sc.pp.scale(adt, zero_center=True, max_value=10)
+```
+
+```python
+# (optional alignment safety and sanity check)
+from univi.data import align_paired_obs_names
+
+adata_dict = {'rna': rna, 'adt': adt}
+
+align_paired_obs_names(adata_dict)
+
+rna = adata_dict['rna'].copy()
+adt = adata_dict['adt'].copy()
+
+assert rna.n_obs == adt.n_obs and np.all(rna.obs_names == adt.obs_names)
+```
+
+### Likelihood guidance (pick to match your `.X` preprocessing)
+
+* **RNA**
+
+  * `.X = raw counts` → `likelihood="nb"` (or `"zinb"` if lots of zeros beyond NB)
+  * `.X = normalize_total + log1p (+ scale)` → `likelihood="gaussian"`
+* **ADT**
+
+  * `.X = CLR (+ scale)` → `likelihood="gaussian"`
+  * `.X = raw counts` → usually still better behaved as `"gaussian"` *after* CLR; if you insist on counts-space, consider `"nb"` but it’s often fussier
+* **ATAC (common patterns)**
+
+  * `.X = binarized peaks` → `likelihood="bernoulli"`
+  * `.X = LSI / reduced features` → `likelihood="gaussian"`
+
+> Note: If you want to use UniVI inductively and avoid data leakage, apply feature selection, scaling,
+> and any "learned" transforms (e.g. PCA, LSI) to the training set only, then apply the results elucidated 
+> from the training set to the validation and test sets.
 
 ### 2) Dataset + dataloaders (MultiModalDataset option)
 
