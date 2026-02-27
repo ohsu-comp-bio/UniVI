@@ -189,7 +189,7 @@ X_tfidf = tfidf(atac.layers["counts"])
 
 # LSI via truncated SVD
 from sklearn.decomposition import TruncatedSVD  # (keep import local if you want)
-svd = TruncatedSVD(n_components=50, random_state=0)
+svd = TruncatedSVD(n_components=101, random_state=0)
 X_lsi = svd.fit_transform(X_tfidf)
 
 # Common convention: drop the first LSI component (often correlates with depth)
