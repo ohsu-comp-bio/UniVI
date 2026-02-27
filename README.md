@@ -22,6 +22,7 @@ Common use cases:
 - **Bridge mapping / projection** of unimodal cohorts into a paired latent
 - **Cross-modal imputation** (RNA→ADT, ATAC→RNA, RNA→methylome, …)
 - **Denoising / reconstruction** with likelihood-aware decoders
+- **Generating biologically-relevant samples** due to the generative nature of VAEs
 - **Evaluation** (FOSCTTM, Recall@k, mixing/entropy, label transfer, clustering, basic MoE gating diagnostics)
 
 Advanced/experimental use cases (all optional, model can be run entirely without these):
