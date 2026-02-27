@@ -318,10 +318,11 @@ univi_cfg = UniVIConfig(
     modalities=[
         #
         # Note:
-        # Manuscript-style "gaussian" decoders on normalized feature spaces often produce the most
-        # cell-to-cell aligned latent spaces for integration-focused use cases. For some assay types
-        # (including methylome), a more distribution-matched likelihood may be preferable depending
-        # on whether your goal is alignment vs calibrated reconstruction/generation.
+        # Manuscript-style "gaussian" decoders on normalized feature spaces often produce
+        # the most cell-to-cell aligned latent spaces for integration-focused use cases. 
+        # For some assay types (including methylome), a more distribution-matched 
+        # likelihood may be preferable depending on whether your goal is alignment vs 
+        # calibrated reconstruction/generation.
         #
         ModalityConfig(
             name="rna",
@@ -392,11 +393,12 @@ model = UniVIMultiModalVAE(
     univi_cfg,
     #
     # Note: 
-    # loss_mode="v1" is recommended (used in the manuscript), can also try "v2" (aka "lite"), although 
-    # they are less fleshed-out/robust. "v2" is good if you want a fused latent space (required more 
-    # experimental advanced workflows like the transformer fused latent architecture, which is discussed 
-    # further in the advanced section below) and no cross-decoder reconstruction term in the loss function
-    # (focuses less on paired cross-reconstruction for more experimental unpaired regimes).
+    # loss_mode="v1" is recommended (used in the manuscript), can also try "v2" (aka "lite"), 
+    # although they are less fleshed-out/robust. "v2" is good if you want a fused latent space 
+    # (required for more experimental advanced workflows like the transformer fused latent 
+    # architecture, which is discussed further in the advanced section below) and no 
+    # cross-decoder reconstruction term in the loss function (focuses less on paired 
+    # cross-reconstruction for more experimental unpaired regimes).
     #
     loss_mode="v1",
     v1_recon="avg",
