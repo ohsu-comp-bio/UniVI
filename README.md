@@ -237,11 +237,11 @@ device = (
 
 dataset = MultiModalDataset(
     adata_dict=adata_dict,
-    device=None,              # dataset yields CPU tensors; model moves to GPU
+    device=None,               # dataset yields CPU tensors; model moves to GPU
     X_key_by_mod={
-        "rna" : "X",          # uses rna.X as model input
-        "adt" : "X",          # uses adt.X as model input
-        "atac": "obsm:X_lsi"  # uses atac.obsm["X_lsi"] as model input, can replace with "X" if desired features stored there
+        "rna" : "X",           # uses rna.X as model input
+        "adt" : "X",           # uses adt.X as model input
+        #"atac": "obsm:X_lsi"  # uses atac.obsm["X_lsi"] as model input, can replace with "X" if desired features stored there
     },
 )
 
