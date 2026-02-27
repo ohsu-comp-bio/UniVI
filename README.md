@@ -209,22 +209,25 @@ assert rna.n_obs == adt.n_obs and np.all(rna.obs_names == adt.obs_names)
 Put preprocessed per-modality AnnData(s) into dictionary for model (CITE-seq data):
 ```python
 # Put data into `adata_dict` for downstream workflow
-adata_dict = align_paired_obs_names({"rna": rna, "adt": adt})
+adata_dict = {"rna": rna, "adt": adt}
+align_paired_obs_names(adata_dict)
 ```
 or for Multiome data:
 ```python
 # Put data into `adata_dict` for downstream workflow
-adata_dict = align_paired_obs_names({"rna": rna, "atac": atac})
+adata_dict = {"rna": rna, "atac": atac}
+align_paired_obs_names(adata_dict)
 ```
 or for tri-modal data covering RNA+ADT+ATAC(e.g. TEA-seq, DOGMA-seq, ASAP-seq):
 ```python
 # Put data into `adata_dict` for downstream workflow
-adata_dict = align_paired_obs_names({"rna": rna, "adt": adt, "atac": atac})
+adata_dict = {"rna": rna, "adt": adt, "atac": atac}
+align_paired_obs_names(adata_dict)
 ```
 or if unimodal VAE use-case (etc.):
 ```python
 # Put data into `adata_dict` for downstream workflow
-adata_dict = align_paired_obs_names({"atac": atac})
+adata_dict = align_paired_obs_names{"atac": atac}
 ```
 
 > Note: If you want to use UniVI inductively and avoid data leakage, apply feature selection, scaling,
