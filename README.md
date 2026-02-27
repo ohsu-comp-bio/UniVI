@@ -197,8 +197,9 @@ atac.obsm["X_lsi"] = X_lsi[:, 1:]
 
 # (optional) you can use this as the model input via X_key="obsm:X_lsi" (depending on your dataset wrapper)
 # or keep .X as counts and point UniVI to the obsm key for ATAC inputs.
-
-# (optional alignment sanity check)
+```
+```python
+# (optional alignment sanity check - swap variable names for whatever modalities you used)
 assert rna.n_obs == adt.n_obs and np.all(rna.obs_names == adt.obs_names)
 ```
 Put preprocessed per-modality AnnData(s) into dictionary for model (CITE-seq data):
