@@ -104,6 +104,7 @@ Recommended convention:
 Minimal “notebook path”: load paired AnnData → preprocess data → train → encode/evaluate → plot.
 
 ### 0) Imports
+
 ```python
 import numpy as np
 import scanpy as sc
@@ -206,25 +207,25 @@ atac.obsm["X_lsi"] = X_lsi[:, 1:]
 # Swap variable names for whatever modalities you used
 assert rna.n_obs == adt.n_obs and np.all(rna.obs_names == adt.obs_names)
 ```
-Put preprocessed per-modality AnnData(s) into dictionary for model (CITE-seq data):
+Put preprocessed per-modality AnnData(s) into dictionary for model (CITE-seq data)
 ```python
 # Put data into `adata_dict` for downstream workflow
 adata_dict = {"rna": rna, "adt": adt}
 align_paired_obs_names(adata_dict)
 ```
-or for Multiome data:
+or for Multiome data
 ```python
 # Put data into `adata_dict` for downstream workflow
 adata_dict = {"rna": rna, "atac": atac}
 align_paired_obs_names(adata_dict)
 ```
-or for tri-modal data covering RNA+ADT+ATAC(e.g. TEA-seq, DOGMA-seq, ASAP-seq):
+or for tri-modal data covering RNA+ADT+ATAC(e.g. TEA-seq, DOGMA-seq, ASAP-seq)
 ```python
 # Put data into `adata_dict` for downstream workflow
 adata_dict = {"rna": rna, "adt": adt, "atac": atac}
 align_paired_obs_names(adata_dict)
 ```
-or if unimodal VAE use-case (etc.):
+or if unimodal VAE use-case (etc.)
 ```python
 # Put data into `adata_dict` for downstream workflow
 adata_dict = align_paired_obs_names{"atac": atac}
@@ -375,7 +376,7 @@ univi_cfg = UniVIConfig(
   * `.X = reduced/embedded features` (e.g., PCA/LSI/other continuous reps) → `likelihood="gaussian"` (often best for alignment-focused workflows)
   * `.X = methylated counts only` (no coverage) → `likelihood="nb"` / `"zinb"` (supported, but usually not preferred vs coverage-aware modeling)
 
-Model training configuration and loss mode setup:
+Model training configuration and loss mode setup
 ```python
 train_cfg = TrainingConfig(
     n_epochs=3000,
@@ -405,7 +406,7 @@ model = UniVIMultiModalVAE(
     normalize_v1_terms=True,
 ).to(device)
 ```
-Finally, train the model:
+Train the model
 ```python
 trainer = UniVITrainer(
     model=model,
@@ -553,8 +554,7 @@ set_style(font_scale=1.2, dpi=150)
 device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
 ```
 
-Helper for sparse matrices:
-
+Helper for sparse matrices
 ```python
 def to_dense(X):
     return X.toarray() if sp.issparse(X) else np.asarray(X)
@@ -562,8 +562,7 @@ def to_dense(X):
 
 ### 0b) Explicitly subset the test set indices from the splits prior to training step 
 
-Loading the test set indices for evaluations (if desired, can also just use transductive method (all cells) depending on goals):
-
+Loading the test set indices for evaluations (if desired, can also just use transductive method (all cells) depending on goals)
 ```python
 # Note: Use the same test_idx for both modalities
 rna = rna[test_idx].copy()
@@ -578,8 +577,7 @@ assert np.array_equal(rna_test.obs_names, adt_test.obs_names)
 
 ## 1) Encode a modality into latent space (`.obsm["X_univi"]`)
 
-Use this when you have **one observed modality at a time** (RNA-only, ADT-only, ATAC-only, methylome-only, etc.):
-
+Use this when you have **one observed modality at a time** (RNA-only, ADT-only, ATAC-only, methylome-only, etc.)
 ```python
 Z_rna = encode_adata(
     model,
@@ -595,8 +593,7 @@ Z_rna = encode_adata(
 rna.obsm["X_univi"] = Z_rna
 ```
 
-Then plot:
-
+Then plot
 ```python
 umap(
     rna,
@@ -613,8 +610,7 @@ umap(
 
 ## 2) Encode a *fused* multimodal latent (true paired/multi-observed cells)
 
-When you have multiple observed modalities for the **same cells**, you can encode the *fused* posterior (and optionally MoE router gates/logits):
-
+When you have multiple observed modalities for the **same cells**, you can encode the *fused* posterior (and optionally MoE router gates/logits)
 ```python
 fused = encode_fused_adata_pair(
     model,
@@ -633,8 +629,7 @@ fused = encode_fused_adata_pair(
 # fused["gates"]  -> (n_cells, n_modalities) or None (if fused transformer posterior is used)
 ```
 
-Plot fused:
-
+Plot fused
 ```python
 umap(
     rna,
@@ -646,8 +641,7 @@ umap(
 )
 ```
 
-Plot fused both modalities by modality and celltype:
-
+Plot fused both modalities by modality and celltype
 ```python
 umap_by_modality(
     {"rna": rna, "adt": adt},
@@ -665,7 +659,6 @@ umap_by_modality(
 ## 3) Cross-modal prediction (imputation): encode source → decode target
 
 Example: **RNA → ADT** (same pattern applies to RNA→methylome, methylome→RNA, etc.). UniVI will automatically handle decoder output types internally (e.g. Gaussian returns tensor; NB returns `{"mu","log_theta"}`; ZINB returns `{"mu","log_theta","logit_pi"}`; Poisson returns `{"rate","log_rate"}`; Beta/Beta-Binomial return parameter dicts) and return an appropriate **mean-like** prediction for downstream evaluation/plotting.
-
 ```python
 adt_hat_from_rna = cross_modal_predict(
     model,
@@ -686,7 +679,6 @@ adt.layers["imputed_from_rna"] = adt_hat_from_rna
 ## 4) Denoising (self-reconstruction or true fused denoising)
 
 ### Option A — self-denoise a single modality (same as “reconstruct”)
-
 ```python
 denoise_adata(
     model,
@@ -700,7 +692,6 @@ denoise_adata(
 ```
 
 ### Option B — true multimodal denoising via fused latent
-
 ```python
 denoise_adata(
     model,
@@ -717,8 +708,7 @@ denoise_adata(
 )
 ```
 
-Compare raw vs denoised marker overlays:
-
+Compare raw vs denoised marker overlays
 ```python
 compare_raw_vs_denoised_umap_features(
     rna,
@@ -742,7 +732,6 @@ You can compute **featurewise + summary** errors between:
 * and the **true observed** data
 
 ### A) Basic metrics on two matrices
-
 ```python
 true = to_dense(adt.X)
 pred = adt.layers["imputed_from_rna"]
@@ -759,7 +748,6 @@ This will:
 1. generate predictions via UniVI (handling decoder output types correctly),
 2. align to the requested truth matrix (layer/X_key), and
 3. return metrics + optional per-feature vectors.
-
 ```python
 rep = evaluate_cross_reconstruction(
     model,
@@ -777,8 +765,7 @@ rep = evaluate_cross_reconstruction(
 print(rep["summary"])   # mse_mean/median, pearson_mean/median, etc.
 ```
 
-Plot reconstruction-error summaries:
-
+Plot reconstruction-error summaries
 ```python
 plot_reconstruction_error_summary(
     rep,
@@ -788,8 +775,7 @@ plot_reconstruction_error_summary(
 )
 ```
 
-And featurewise scatter (true vs predicted) for selected features:
-
+And featurewise scatter (true vs predicted) for selected features
 ```python
 plot_featurewise_reconstruction_scatter(
     rep,
@@ -802,7 +788,6 @@ plot_featurewise_reconstruction_scatter(
 ---
 
 ## 6) Alignment evaluation (FOSCTTM, Recall@k, mixing/entropy, label transfer, gates)
-
 ```python
 metrics = evaluate_alignment(
     Z1=rna.obsm["X_univi"],
@@ -819,8 +804,7 @@ metrics = evaluate_alignment(
 )
 ```
 
-Confusion matrix:
-
+Confusion matrix
 ```python
 plot_confusion_matrix(
     np.asarray(metrics["label_transfer_cm"]),
@@ -843,7 +827,6 @@ UniVI decoders define a likelihood per modality (Gaussian, NB, ZINB, Poisson, Be
 3. return **mean-like reconstructions** or (optionally) sample from the likelihood
 
 ### A) Unconditional generation (standard normal prior)
-
 ```python
 Xgen = generate_from_latent(
     model,
@@ -864,7 +847,6 @@ This is the “no classifier head needed” option:
 1. encode a reference cohort
 2. pick cells with a given label
 3. sample around their latent distribution (Gaussian fit, or jitter)
-
 ```python
 Z = rna.obsm["X_univi"]
 labels = rna.obs["celltype.l2"].to_numpy()
@@ -909,7 +891,6 @@ There are two related notions of “who contributed how much” to the fused lat
 > and gates can be unavailable or not meaningful.
 
 ### A) Compute per-cell contribution weights (recommended)
-
 ```python
 from univi.evaluation import to_dense, encode_moe_gates_from_tensors
 from univi.plotting import write_gates_to_obs, plot_moe_gate_summary
@@ -936,7 +917,6 @@ print("Has logits:", gate.get("logits") is not None)
 If you want **precision-only** weights (no router influence), set `kind="effective_precision"`.
 
 ### B) Write weights to `.obs` (for plotting / grouping)
-
 ```python
 write_gates_to_obs(
     rna,
@@ -948,7 +928,6 @@ write_gates_to_obs(
 ```
 
 ### C) Plot contribution usage (overall + grouped)
-
 ```python
 plot_moe_gate_summary(
     rna,
@@ -963,8 +942,7 @@ plot_moe_gate_summary(
 ### D) Optional: log gates alongside alignment metrics
 
 `evaluate_alignment(...)` evaluates geometric alignment (FOSCTTM, Recall@k, mixing/entropy, label transfer).
-If you want to save gate summaries alongside those metrics, just merge dictionaries:
-
+If you want to save gate summaries alongside those metrics, just merge dictionaries
 ```python
 from univi.evaluation import evaluate_alignment
 
@@ -1036,7 +1014,6 @@ A *single* fused encoder that tokenizes each observed modality, concatenates tok
 
 * Training: the model will automatically decide whether to use fused encoder or fallback based on presence and `fused_require_all_modalities`.
 * Encoding: use `model.encode_fused(...)` to get the fused latent and optionally gates from fallback fusion.
-
 ```python
 mu, logvar, z = model.encode_fused(
     {"rna": X_rna, "adt": X_adt, "atac": X_atac},
@@ -1061,7 +1038,6 @@ A safe, optional attention bias that can encourage local genomic context for tok
 
 **How to use (forward / encode / predict):**
 Pass `attn_bias_cfg` into `forward(...)`, `encode_fused(...)`, or `predict_heads(...)`.
-
 ```python
 attn_bias_cfg = {
   "atac": {"type": "distance", "lengthscale_bp": 50_000, "same_chrom_only": True}
@@ -1100,7 +1076,6 @@ A learnable gate that produces per-cell modality weights and uses them to scale 
 
 **How to retrieve gates:**
 Use `encode_fused(..., return_gates=True)` (works when not using fused transformer posterior; if fused posterior is used, gates are `None`).
-
 ```python
 mu, logvar, z, gates, gate_logits = model.encode_fused(
     x_dict,
@@ -1131,8 +1106,7 @@ A single categorical head via `label_decoder` controlled by init args:
 **When to use it:**
 If you already rely on the legacy label head in notebooks/scripts and want a stable API.
 
-**Label names helpers:**
-
+**Label names helpers**
 ```python
 model.set_label_names(["B", "T", "NK", ...])
 ```
@@ -1154,8 +1128,7 @@ Heads can also be **adversarial**: they apply a gradient reversal layer (GRL) to
 * Semi-supervised setups where only some labels exist per head.
 
 **How labels are passed at training time:**
-`y` should be a dict keyed by head name:
-
+`y` should be a dict keyed by head name
 ```python
 y = {
   "celltype": celltype_ids,   # categorical (shape [B] or one-hot [B,C])
@@ -1167,20 +1140,17 @@ out = model(x_dict=x_dict, epoch=ep, y=y)
 
 **How to predict heads after training:**
 Use `predict_heads(...)` to run encoding + head prediction in one call.
-
 ```python
 pred = model.predict_heads(x_dict, return_probs=True)
 # pred[head] returns probabilities (softmax for categorical, sigmoid for binary)
 ```
 
-**Head label name helpers (categorical):**
-
+**Head label name helpers (categorical)**
 ```python
 model.set_head_label_names("celltype", ["B", "T", "NK", ...])
 ```
 
-**Inspect head configuration (useful for logging):**
-
+**Inspect head configuration (useful for logging)**
 ```python
 meta = model.get_classification_meta()
 ```
@@ -1202,7 +1172,7 @@ Optionally treats labels as an additional expert by encoding the label into a Ga
 * Semi-supervised alignment: labels can stabilize the latent when paired signals are weak.
 * Controlled injection after warmup to avoid early collapse.
 
-**How to use in encoding:**
+**How to use in encoding**
 `encode_fused(..., inject_label_expert=True, y=...)`
 
 ```python
@@ -1247,7 +1217,6 @@ Per-modality reconstruction losses are typically summed across features; large m
 #### `encode_fused(...)`
 
 **Purpose:** Encode any subset of modalities into a fused posterior, with optional gate outputs.
-
 ```python
 mu, logvar, z = model.encode_fused(
     x_dict,
@@ -1268,7 +1237,6 @@ mu, logvar, z, gates, gate_logits = model.encode_fused(
 #### `predict_heads(...)`
 
 **Purpose:** Encode fused latent, then emit probabilities/logits for the legacy head + all multi-head configs.
-
 ```python
 pred = model.predict_heads(x_dict, return_probs=True)
 # pred[head] -> probs (softmax/sigmoid)
