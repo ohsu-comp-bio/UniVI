@@ -119,8 +119,11 @@ from univi.trainer import UniVITrainer
 ```python
 rna = sc.read_h5ad("path/to/rna_citeseq.h5ad")
 adt = sc.read_h5ad("path/to/adt_citeseq.h5ad")
-
-adata_dict = align_paired_obs_names({"rna": rna, "adt": adt})
+```
+or
+```python
+rna = sc.read_h5ad("path/to/rna_multiome.h5ad")
+atac = sc.read_h5ad("path/to/atac_multiome.h5ad")
 ```
 
 ### 1b) Preprocess each data type as desired
@@ -134,8 +137,7 @@ adata_dict = align_paired_obs_names({"rna": rna, "adt": adt})
 # - set .X to the model input space (e.g., RNA log1p; ADT CLR(+scaled))
 
 # RNA example: log-normalized + HVGs + scale
-rna = adata_dict["rna"]
-rna.layers["counts"] = rna.X.copy()
+rna.layers["counts"] = rna.X.copy()  # if raw counts stored in .X, otherwise can try rna.raw.X or similar
 
 # (optional QC metrics)
 rna.var["mt"] = rna.var_names.str.upper().str.startswith("MT-")
@@ -151,8 +153,7 @@ sc.pp.scale(rna, max_value=10)
 
 ```python
 # ADT example: CLR (per-cell) + scale (per-protein)
-adt = adata_dict["adt"]
-adt.layers["counts"] = adt.X.copy()
+adt.layers["counts"] = adt.X.copy()  # if raw counts stored in .X, otherwise can try adt.raw.X or similar
 
 def clr_per_cell(X):
     X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)
@@ -165,8 +166,7 @@ sc.pp.scale(adt, zero_center=True, max_value=10)
 
 ```python
 # ATAC example: TF-IDF -> LSI (store counts in .layers["counts"], put LSI in .obsm["X_lsi"])
-atac = adata_dict["atac"]
-atac.layers["counts"] = atac.X.copy()
+atac.layers["counts"] = atac.X.copy()  # if raw counts stored in .X, otherwise can try atac.raw.X or similar
 
 def tfidf(X):
     # X: cells x peaks (counts; sparse ok)
@@ -195,37 +195,30 @@ atac.obsm["X_lsi"] = X_lsi[:, 1:]
 
 # (optional) you can use this as the model input via X_key="obsm:X_lsi" (depending on your dataset wrapper)
 # or keep .X as counts and point UniVI to the obsm key for ATAC inputs.
-```
 
-```python
 # (optional alignment sanity check)
 assert rna.n_obs == adt.n_obs and np.all(rna.obs_names == adt.obs_names)
 ```
-
-### Likelihood guidance (pick to match your `.X` preprocessing)
-
-* **RNA**
-
-  * `.X = raw counts` → `likelihood="nb"` (or `"zinb"` if lots of zeros beyond NB)
-  * `.X = normalize_total + log1p (+ scale)` → `likelihood="gaussian"`
-* **ADT**
-
-  * `.X = CLR (+ scale)` → `likelihood="gaussian"`
-  * `.X = raw counts` → usually still better behaved as `"gaussian"` *after* CLR; if you insist on counts-space, consider `"nb"` but it’s often fussier
-* **ATAC (common patterns)**
-
-  * `.X = binarized peaks` → `likelihood="bernoulli"`
-  * `.X = raw peak counts` → `likelihood="poisson"`
-  * `.X = LSI / reduced features` → `likelihood="gaussian"`
-* **Methylation**
-
-  * `.X = fractions / beta values (0–1)` → `likelihood="beta"` (common for fraction-like inputs)
-  * **Coverage-aware (recommended when you have trials):**
-
-    * `successes + total_count` via `recon_targets` → `likelihood="beta_binomial"` (or `"binomial"` if you don’t need overdispersion)
-    * See **Quickstart: RNA + methylome (beta-binomial with recon_targets)** below for the exact setup.
-  * `.X = reduced/embedded features` (e.g., PCA/LSI/other continuous reps) → `likelihood="gaussian"` (often best for alignment-focused workflows)
-  * `.X = methylated counts only` (no coverage) → `likelihood="nb"` / `"zinb"` (supported, but usually not preferred vs coverage-aware modeling)
+Put preprocessed per-modality AnnData(s) into dictionary for model (CITE-seq data):
+```python
+# Put data into `adata_dict` for downstream workflow
+adata_dict = align_paired_obs_names({"rna": rna, "adt": adt})
+```
+or for Multiome data:
+```python
+# Put data into `adata_dict` for downstream workflow
+adata_dict = align_paired_obs_names({"rna": rna, "atac": atac})
+```
+or for tri-modal data modality covering RNA+protein+ATAC(e.g. TEA-seq, DOGMA-seq, ASAP-seq):
+```python
+# Put data into `adata_dict` for downstream workflow
+adata_dict = align_paired_obs_names({"rna": rna, "adt": adt, "atac": atac})
+```
+or if unimodal VAE use-case (etc..):
+```python
+# Put data into `adata_dict` for downstream workflow
+adata_dict = align_paired_obs_names({"rna": rna})
+```
 
 > Note: If you want to use UniVI inductively and avoid data leakage, apply feature selection, scaling,
 > and any "learned" transforms (e.g. PCA, LSI) to the training set only, then apply the results elucidated 
@@ -234,12 +227,21 @@ assert rna.n_obs == adt.n_obs and np.all(rna.obs_names == adt.obs_names)
 ### 2) Dataset + dataloaders (MultiModalDataset option)
 
 ```python
-device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+device = (
+    "cuda" if torch.cuda.is_available() else
+    ("mps" if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available() else
+     ("xpu" if hasattr(torch, "xpu") and torch.xpu.is_available() else
+      "cpu"))
+)
 
 dataset = MultiModalDataset(
     adata_dict=adata_dict,
-    X_key="X",     # uses .X as model input
-    device=None,   # dataset yields CPU tensors; model moves to GPU
+    device=None,              # dataset yields CPU tensors; model moves to GPU
+    X_key_by_mod={
+        "rna" : "X",          # uses rna.X as model input
+        "adt" : "X",          # uses adt.X as model input
+        "atac": "obsm:X_lsi"  # uses atac.obsm["X_lsi"] as model input, can replace with "X" if desired features stored there
+    },
 )
 
 n = rna.n_obs
@@ -304,20 +306,6 @@ univi_cfg = UniVIConfig(
     align_anneal_start=75,
     align_anneal_end=125,
     modalities=[
-        # Likelihood guidance:
-        # - RNA (normalized/log1p): often "gaussian"
-        # - RNA (raw counts): "nb" or "zinb"
-        # - ADT (CLR/scaled): often "gaussian"
-        # - ATAC (binarized peaks): "bernoulli"
-        # - ATAC (peak counts): "poisson" (sometimes; often too restrictive if overdispersed)
-        # - ATAC (LSI / reduced features): often "gaussian" for integration-focused workflows
-        # - Methylome fractions in (0,1): "beta"
-        # - Methylome counts+coverage: "binomial" or "beta_binomial" (often preferred)
-        #
-        # IMPORTANT for "binomial" / "beta_binomial":
-        #   The reconstruction target must include BOTH successes and total_count
-        #   (passed via `recon_targets` as a keyword argument to the model/training step), e.g.:
-        #     {"successes": m, "total_count": n}
         #
         # NOTE:
         # Manuscript-style "gaussian" decoders on normalized feature spaces often produce the most
@@ -339,9 +327,45 @@ univi_cfg = UniVIConfig(
             decoder_hidden=[64, 128, 256],
             likelihood="gaussian",
         ),
+        # or
+        #ModalityConfig(
+        #    name="atac",
+        #    input_dim=atac.obsm["X_lsi"].shape[1],
+        #    encoder_hidden=[256, 128, 64],
+        #    decoder_hidden=[64, 128, 256],
+        #    likelihood="gaussian",
+        #),
     ],
 )
+```
 
+### `ModalityConfig` per-modality `likelihood` guidance (pick to match your `.X`/model input preprocessing)
+
+* **RNA**
+
+  * `.X = raw counts` → `likelihood="nb"` (or `"zinb"` if lots of zeros beyond NB)
+  * `.X = normalize_total + log1p (+ scale)` → `likelihood="gaussian"`
+* **ADT**
+
+  * `.X = CLR (+ scale)` → `likelihood="gaussian"`
+  * `.X = raw counts` → usually still better behaved as `"gaussian"` *after* CLR; if you insist on counts-space, consider `"nb"` but it’s often fussier
+* **ATAC (common patterns)**
+
+  * `.X = binarized peaks` → `likelihood="bernoulli"`
+  * `.X = raw peak counts` → `likelihood="poisson"`
+  * `.X = LSI / reduced features` → `likelihood="gaussian"`
+* **Methylation**
+
+  * `.X = fractions / beta values (0–1)` → `likelihood="beta"` (common for fraction-like inputs)
+  * **Coverage-aware (recommended when you have trials):**
+
+    * `successes + total_count` via `recon_targets` → `likelihood="beta_binomial"` (or `"binomial"` if you don’t need overdispersion)
+    * See **Quickstart: RNA + methylome (beta-binomial with recon_targets)** below for the exact setup.
+  * `.X = reduced/embedded features` (e.g., PCA/LSI/other continuous reps) → `likelihood="gaussian"` (often best for alignment-focused workflows)
+  * `.X = methylated counts only` (no coverage) → `likelihood="nb"` / `"zinb"` (supported, but usually not preferred vs coverage-aware modeling)
+
+Model training configuration and loss mode setup:
+```python
 train_cfg = TrainingConfig(
     n_epochs=3000,
     batch_size=256,
@@ -356,11 +380,21 @@ train_cfg = TrainingConfig(
 
 model = UniVIMultiModalVAE(
     univi_cfg,
-    loss_mode="v1",       # "v1" recommended (used in the manuscript)
+    #
+    # Note: 
+    # loss_mode="v1" is recommended (used in the manuscript), can also try "v2" (aka "lite"), although 
+    # they are less fleshed-out/robust. "v2" is good if you want a fused latent space (required more 
+    # experimental advanced workflows like the transformer fused latent architecture, which is discussed 
+    # further in the advanced section below) and no cross-decoder reconstruction term in the loss function
+    # (focuses less on paired cross-reconstruction for more experimental unpaired regimes).
+    #
+    loss_mode="v1",
     v1_recon="avg",
     normalize_v1_terms=True,
 ).to(device)
-
+```
+Finally, train the model:
+```python
 trainer = UniVITrainer(
     model=model,
     train_loader=train_loader,
