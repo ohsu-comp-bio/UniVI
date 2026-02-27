@@ -183,6 +183,15 @@ assert rna.n_obs == adt.n_obs and np.all(rna.obs_names == adt.obs_names)
   * `.X = binarized peaks` → `likelihood="bernoulli"`
   * `.X = raw peak counts` → `likelihood="poisson"`
   * `.X = LSI / reduced features` → `likelihood="gaussian"`
+* **Methylation**
+
+  * `.X = fractions / beta values (0–1)` → `likelihood="beta"` (common for fraction-like inputs)
+  * **Coverage-aware (recommended when you have trials):**
+
+    * `successes + total_count` via `recon_targets` → `likelihood="beta_binomial"` (or `"binomial"` if you don’t need overdispersion)
+    * See **Quickstart: RNA + methylome (beta-binomial with recon_targets)** below for the exact setup.
+  * `.X = reduced/embedded features` (e.g., PCA/LSI/other continuous reps) → `likelihood="gaussian"` (often best for alignment-focused workflows)
+  * `.X = methylated counts only` (no coverage) → `likelihood="nb"` / `"zinb"` (supported, but usually not preferred vs coverage-aware modeling)
 
 > Note: If you want to use UniVI inductively and avoid data leakage, apply feature selection, scaling,
 > and any "learned" transforms (e.g. PCA, LSI) to the training set only, then apply the results elucidated 
