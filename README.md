@@ -22,8 +22,14 @@ Common use cases:
 - **Bridge mapping / projection** of unimodal cohorts into a paired latent
 - **Cross-modal imputation** (RNA→ADT, ATAC→RNA, RNA→methylome, …)
 - **Denoising / reconstruction** with likelihood-aware decoders
-- **Evaluation** (FOSCTTM, Recall@k, mixing/entropy, label transfer, clustering)
-- Optional **supervised heads**, **MoE gating diagnostics**, and **transformer encoders**
+- **Evaluation** (FOSCTTM, Recall@k, mixing/entropy, label transfer, clustering, basic MoE gating diagnostics)
+
+Advanced/experimental use cases (all optional, model can be run entirely without these):
+
+- **Supervised heads** (either a decoder classification head or a whole categorical encoder/decoder model VAE, treated as a modality)
+- **Expanded MoE gating diagnostics** (setting a simple gating network during training)
+- **Transformer encoders** (experimental, added for exploratory analysis)
+- **Fused transformer latent space** (even more experimental, added for exploratory analysis/future model expansion)
 
 ---
 
