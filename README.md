@@ -198,6 +198,9 @@ atac.obsm["X_lsi"] = X_lsi[:, 1:]
 # (optional) you can use this as the model input via X_key="obsm:X_lsi" (depending on your dataset wrapper)
 # or keep .X as counts and point UniVI to the obsm key for ATAC inputs.
 ```
+
+# Post data preprocessing, get data ready for model input
+
 (optional alignment sanity check step)
 ```python
 # Swap variable names for whatever modalities you used
