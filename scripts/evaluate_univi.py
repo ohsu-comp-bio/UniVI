@@ -248,9 +248,9 @@ def main():
              savepath=str(plot_dir/f"umap_{ref}_univi.png"), show=False)
         if "X_univi_fused" in adatas[ref].obsm:
             umap_by_modality(adatas, obsm_key="X_univi_fused",
-                     color=["modality"] + colors,
-                     legend="outside", size=8,
-                     savepath=str(plot_dir/"umap_fused_by_modality.png"), show=False)
+                             color=["univi_modality"] + colors,
+                             legend="outside",
+                             savepath=str(plot_dir/"umap_fused_by_modality.png"), show=False)
 
     # 8. Export embeddings
     embed_dir = outdir / "embeddings"; embed_dir.mkdir(exist_ok=True)
