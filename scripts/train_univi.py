@@ -317,7 +317,7 @@ def main():
     dataset = MultiModalDataset(
         adata_dict=adata_dict,
         device=None,
-        X_key_by_mod=X_key_by_mod,
+        X_key=X_key_by_mod,
     )
     bs = train_cfg_dict.get("batch_size", 256)
     train_loader = DataLoader(Subset(dataset, train_idx), batch_size=bs, shuffle=True,
