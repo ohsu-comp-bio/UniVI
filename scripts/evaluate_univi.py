@@ -188,7 +188,13 @@ def main():
                 np.asarray(aln["label_transfer_cm"]),
                 labels=np.asarray(aln["label_transfer_label_order"]),
                 title=f"Label transfer ({m1}→{m2})", normalize="true",
-                savepath=str(plot_dir/"label_transfer_confusion.png"), show=False)
+                savepath=str(plot_dir/f"label_transfer_confusion_{m1}_to_{m2}.png"), show=False)
+            if f"label_transfer_cm_{m2}_to_{m1}" in aln:
+                plot_confusion_matrix(
+                    np.asarray(aln[f"label_transfer_cm_{m2}_to_{m1}"]),
+                    labels=np.asarray(aln[f"label_transfer_label_order_{m2}_to_{m1}"]),
+                    title=f"Label transfer ({m2}→{m1})", normalize="true",
+                    savepath=str(plot_dir/f"label_transfer_confusion_{m2}_to_{m1}.png"), show=False)
 
     # 4. Cross-modal imputation + error
     if len(modalities) >= 2:
@@ -241,11 +247,10 @@ def main():
              legend="outside", legend_subset_topk=25,
              savepath=str(plot_dir/f"umap_{ref}_univi.png"), show=False)
         if "X_univi_fused" in adatas[ref].obsm:
-            umap(adatas[ref], obsm_key="X_univi_fused", color=colors or [adatas[ref].obs.columns[0]],
-                 legend="outside", savepath=str(plot_dir/"umap_fused.png"), show=False)
             umap_by_modality(adatas, obsm_key="X_univi_fused",
-                             color=["univi_modality"]+colors, legend="outside", size=8,
-                             savepath=str(plot_dir/"umap_fused_all_modalities.png"), show=False)
+                     color=["modality"] + colors,
+                     legend="outside", size=8,
+                     savepath=str(plot_dir/"umap_fused_by_modality.png"), show=False)
 
     # 8. Export embeddings
     embed_dir = outdir / "embeddings"; embed_dir.mkdir(exist_ok=True)
