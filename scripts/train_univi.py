@@ -374,7 +374,10 @@ def main():
     # Save history CSV
     if history:
         history_path = log_dir / "history.csv"
-        rows = history if isinstance(history[0], dict) else [{"epoch": i, "loss": v} for i, v in enumerate(history)]
+        if isinstance(history, dict):
+            rows = [{"epoch": k, **v} if isinstance(v, dict) else {"epoch": k, "loss": v} for k, v in history.items()]
+        else:
+            rows = history if isinstance(history[0], dict) else [{"epoch": i, "loss": v} for i, v in enumerate(history)]
         with open(history_path, "w", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
             writer.writeheader()
