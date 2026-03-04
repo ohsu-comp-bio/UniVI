@@ -399,7 +399,7 @@ model = UniVIMultiModalVAE(
 
 > **`loss_mode` note:**
 > - `"v1"` (recommended): per-modality posteriors + cross/self/avg reconstruction + posterior alignment. Used in the manuscript.
-> - `"v2"` ("lite"): fused posterior (MoE/PoE or fused transformer) + per-modality recon + β·KL + γ·L2 alignment. Useful for 3+ modalities or loosely-paired settings.
+> - `"v2"` ("lite"): fused posterior (MoE/PoE or fused transformer) + per-modality recon + β·KL + γ·L2 alignment. Useful for more loosely-paired/"pseudopaired" settings, but weaker overall cell-to-cell correspondence.
 
 **Train:**
 
