@@ -177,8 +177,11 @@ def main():
             compute_bidirectional_transfer=True, k_transfer=15, json_safe=True,
         )
         metrics["alignment"] = aln
-        logger.info(f"FOSCTTM={aln.get('foscttm_mean','N/A'):.4f}  "
-                    f"Recall@10={aln.get('recall_sym_10','N/A'):.4f}")
+        foscttm = aln.get('foscttm_mean', 'N/A')
+        recall10 = aln.get('recall_sym_10', 'N/A')
+        foscttm_str  = f"{foscttm:.4f}"  if isinstance(foscttm,  float) else str(foscttm)
+        recall10_str = f"{recall10:.4f}" if isinstance(recall10, float) else str(recall10)
+        logger.info(f"FOSCTTM={foscttm_str}  Recall@10={recall10_str}")
 
         if lbl_col and not args.skip_plots:
             plot_confusion_matrix(
