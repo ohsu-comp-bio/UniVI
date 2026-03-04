@@ -1397,11 +1397,12 @@ UniVI/
 │   └── figures/                           # Schematic figure(s) for repository front page
 ├── conda.recipe/                          # Conda build recipe (for conda-build)
 │   └── meta.yaml
-├── envs/                                  # Example conda environments
+├── envs/                                  # Conda/mamba environment examples you can use
 │   ├── UniVI_working_environment.yml
 │   ├── UniVI_working_environment_v2_full.yml
 │   ├── UniVI_working_environment_v2_minimal.yml
-│   └── univi_env.yml                      # Recommended env (CUDA-friendly)
+│   ├── univi_env.yml                      
+│   └── univi_v0.4.7.yml                   # Most recent working environment (v0.4.7) - recommended
 ├── data/                                  # Small example data notes (datasets are typically external)
 │   └── README.md                          # Notes on data sources / formats
 ├── notebooks/                             # End-to-end Jupyter Notebook analyses and examples
