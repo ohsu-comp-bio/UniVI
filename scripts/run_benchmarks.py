@@ -1,166 +1,149 @@
-#!/usr/bin/env python
-"""Unified benchmarking wrapper (revision helper).
-
-This script provides a consistent CLI to run:
-- UniVI (paired cross-modality metrics: FOSCTTM + label transfer)
-- Harmony baseline (within-modality *batch correction* on RNA PCs)
-
-Note:
-Harmony is not a cross-modality method. For transparency, the Harmony baseline
-here corresponds to the common use case: batch correction inside one modality.
-
-Outputs a metrics.json + metrics.csv in the output directory.
+#!/usr/bin/env python3
 """
+run_benchmarks.py
+-----------------
+Wrapper that trains UniVI under the benchmark config and exports results
+in a format suitable for comparison against other methods (Table S6).
 
-from __future__ import annotations
+Runs multi-seed training, evaluates on the held-out test set, and writes
+a consolidated results.csv + results plots.
+
+Usage
+-----
+python scripts/run_benchmarks.py \
+    --config  parameter_files/params_multiome_benchmark_GR_fig8.json \
+    --outdir  runs/benchmark_fig8 \
+    --data-root /path/to/data \
+    [--seeds 0 1 2] [--device cuda]
+"""
 
 import argparse
 import json
-import os
-from typing import Any, Dict, Optional
+import subprocess
+import sys
+import csv
+from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
-from univi.pipeline import load_model_and_data, encode_latents_paired
-from univi.evaluation import compute_foscttm, label_transfer_knn, compute_modality_mixing
+from univi.utils.logging import get_logger
 
-
-def run_univi(args) -> Dict[str, Any]:
-    cfg, adata_dict, model, layer_by, xkey_by = load_model_and_data(
-        args.config,
-        checkpoint_path=args.checkpoint,
-        data_root=args.data_root,
-        device=args.device,
-        align_obs=True,
-    )
-    m1, m2 = args.m1, args.m2
-    Z = encode_latents_paired(
-        model,
-        {m1: adata_dict[m1], m2: adata_dict[m2]},
-        layer_by={m1: layer_by.get(m1), m2: layer_by.get(m2)},
-        xkey_by={m1: xkey_by.get(m1, "X"), m2: xkey_by.get(m2, "X")},
-        batch_size=args.batch_size,
-        device=args.device,
-        fused=True,
-    )
-    Z1, Z2 = Z[m1], Z[m2]
-    fos = compute_foscttm(Z1, Z2, metric=args.metric)
-
-    # label transfer
-    if args.label_key not in adata_dict[m1].obs:
-        raise KeyError(f"label_key={args.label_key!r} missing from {m1}.obs")
-    y1 = np.asarray(adata_dict[m1].obs[args.label_key].values)
-    y2 = np.asarray(adata_dict[m2].obs[args.label_key].values) if args.label_key in adata_dict[m2].obs else y1
-
-    _, acc12, _ = label_transfer_knn(Z1, y1, Z2, y2, k=args.k, metric=args.metric)
-    _, acc21, _ = label_transfer_knn(Z2, y2, Z1, y1, k=args.k, metric=args.metric)
-
-    # modality mixing on fused latent
-    fused = Z.get("fused", None)
-    mix = np.nan
-    if fused is not None:
-        modality_labels = np.array([m1] * fused.shape[0] + [m2] * fused.shape[0])
-        Zmix = np.vstack([fused, fused])  # same coords, used only for API convenience
-        mix = compute_modality_mixing(Zmix, modality_labels, k=min(20, fused.shape[0]-1 if fused.shape[0]>1 else 1), metric=args.metric)
-
-    return {
-        "method": "univi",
-        "foscttm": float(fos),
-        f"label_transfer_acc_{m1}_to_{m2}": float(acc12) if acc12 is not None else np.nan,
-        f"label_transfer_acc_{m2}_to_{m1}": float(acc21) if acc21 is not None else np.nan,
-        "modality_mixing_proxy": float(mix),
-        "n_cells": int(Z1.shape[0]),
-        "latent_dim": int(Z1.shape[1]),
-    }
+logger = get_logger(__name__)
 
 
-def run_harmony(args) -> Dict[str, Any]:
-    try:
-        import harmonypy as hm
-    except Exception as e:
-        raise SystemExit("Harmony baseline requested but 'harmonypy' is not installed. Try: pip install harmonypy") from e
+def parse_args():
+    p = argparse.ArgumentParser(description="UniVI benchmark runner (multi-seed).")
+    p.add_argument("--config",    required=True)
+    p.add_argument("--outdir",    required=True)
+    p.add_argument("--data-root", default=".")
+    p.add_argument("--seeds",     nargs="+", type=int, default=None,
+                   help="Seeds to run (overrides config). Default: uses config data.multi_seed seeds or [0].")
+    p.add_argument("--device",    default=None)
+    return p.parse_args()
 
-    import scanpy as sc
 
-    cfg, adata_dict, model, layer_by, xkey_by = load_model_and_data(
-        args.config,
-        checkpoint_path=None,
-        data_root=args.data_root,
-        device="cpu",
-        align_obs=False,
-    )
-    if args.batch_key is None:
-        raise SystemExit("--batch-key is required for --method harmony")
+def run_seed(config_path, outdir_seed, data_root, device, seed):
+    cmd = [
+        sys.executable, "scripts/train_univi.py",
+        "--config",    str(config_path),
+        "--outdir",    str(outdir_seed),
+        "--data-root", str(data_root),
+        "--seed",      str(seed),
+    ]
+    if device:
+        cmd += ["--device", device]
+    logger.info(f"Running seed {seed}: {' '.join(cmd)}")
+    result = subprocess.run(cmd, check=True)
+    return result.returncode
 
-    # Use RNA only
-    adata = adata_dict[args.m1].copy()
-    if args.batch_key not in adata.obs:
-        raise SystemExit(f"batch_key {args.batch_key!r} not found in adata.obs")
 
-    # Basic preprocessing: PCA on X (or layer) described in config
-    layer = None
-    xkey = "X"
-    for m in cfg["data"]["modalities"]:
-        if m["name"] == args.m1:
-            layer = m.get("layer", None)
-            xkey = m.get("X_key", "X")
-            break
+def eval_seed(config_path, outdir_seed, data_root, device):
+    cmd = [
+        sys.executable, "scripts/evaluate_univi.py",
+        "--config",     str(config_path),
+        "--checkpoint", str(outdir_seed / "checkpoints" / "univi_checkpoint.pt"),
+        "--splits",     str(outdir_seed / "splits.npz"),
+        "--outdir",     str(outdir_seed / "eval"),
+        "--data-root",  str(data_root),
+        "--skip-plots",
+    ]
+    if device:
+        cmd += ["--device", device]
+    logger.info(f"Evaluating seed: {outdir_seed}")
+    subprocess.run(cmd, check=True)
 
-    # ensure PCA basis exists
-    sc.pp.pca(adata, n_comps=args.n_pcs, use_highly_variable=False, svd_solver="arpack", layer=layer if xkey=="X" else None)
-    pcs = adata.obsm["X_pca"]
-    meta = adata.obs.copy()
 
-    ho = hm.run_harmony(pcs, meta_data=meta, vars_use=[args.batch_key])
-    Zcorr = ho.Z_corr.T  # (cells, pcs)
-
-    mixing = compute_modality_mixing(Zcorr, np.asarray(meta[args.batch_key].values), k=min(20, Zcorr.shape[0]-1 if Zcorr.shape[0]>1 else 1), metric=args.metric)
-
-    return {
-        "method": "harmony",
-        "task": "batch_correction_rna",
-        "batch_key": args.batch_key,
-        "batch_mixing_score": float(mixing),
-        "n_cells": int(Zcorr.shape[0]),
-        "n_pcs": int(Zcorr.shape[1]),
-    }
+def collect_results(outdir, seeds):
+    """Aggregate metrics.csv across seeds into a summary table."""
+    rows = []
+    for seed in seeds:
+        metrics_csv = outdir / f"seed_{seed}" / "eval" / "metrics.csv"
+        if not metrics_csv.exists():
+            logger.warning(f"Missing: {metrics_csv}")
+            continue
+        with open(metrics_csv) as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                row["seed"] = seed
+                rows.append(row)
+    return rows
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--method", choices=["univi", "harmony"], default="univi")
-    ap.add_argument("--config", required=True)
-    ap.add_argument("--checkpoint", default=None, help="Required for method=univi")
-    ap.add_argument("--outdir", required=True)
-    ap.add_argument("--data-root", default=None)
+    args = parse_args()
 
-    ap.add_argument("--m1", default="rna")
-    ap.add_argument("--m2", default="adt")
-    ap.add_argument("--label-key", default="cell_type")
-    ap.add_argument("--batch-key", default=None, help="For harmony baseline only (within-modality batch correction).")
-    ap.add_argument("--n-pcs", type=int, default=50)
+    with open(args.config) as f:
+        full_cfg = json.load(f)
+    data_cfg = full_cfg.get("data", {})
 
-    ap.add_argument("--device", default="cpu")
-    ap.add_argument("--batch-size", type=int, default=512)
-    ap.add_argument("--k", type=int, default=15)
-    ap.add_argument("--metric", default="euclidean")
-    args = ap.parse_args()
-
-    os.makedirs(args.outdir, exist_ok=True)
-
-    if args.method == "univi":
-        if not args.checkpoint:
-            raise SystemExit("--checkpoint is required for --method univi")
-        metrics = run_univi(args)
+    # Resolve seeds
+    if args.seeds is not None:
+        seeds = args.seeds
+    elif data_cfg.get("multi_seed") and data_cfg.get("seeds"):
+        seeds = data_cfg["seeds"]
     else:
-        metrics = run_harmony(args)
+        seeds = [0]
 
-    with open(os.path.join(args.outdir, "metrics.json"), "w") as f:
-        json.dump(metrics, f, indent=2, sort_keys=True)
-    pd.DataFrame([metrics]).to_csv(os.path.join(args.outdir, "metrics.csv"), index=False)
+    outdir    = Path(args.outdir)
+    data_root = Path(args.data_root)
+    outdir.mkdir(parents=True, exist_ok=True)
 
-    print(json.dumps(metrics, indent=2))
+    # Train + eval each seed
+    for seed in seeds:
+        seed_dir = outdir / f"seed_{seed}"
+        run_seed(args.config, seed_dir, data_root, args.device, seed)
+        eval_seed(args.config, seed_dir, data_root, args.device)
+
+    # Aggregate
+    all_rows = collect_results(outdir, seeds)
+    if all_rows:
+        agg_path = outdir / "results.csv"
+        with open(agg_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(all_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(all_rows)
+        logger.info(f"Aggregated results -> {agg_path}")
+
+        # Summary statistics across seeds
+        import collections
+        by_metric = collections.defaultdict(list)
+        for row in all_rows:
+            try:
+                by_metric[f"{row['section']}/{row['metric']}"].append(float(row["value"]))
+            except (ValueError, KeyError):
+                pass
+        summary_path = outdir / "results_summary.csv"
+        with open(summary_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["metric", "mean", "std", "n_seeds"])
+            for metric_key, vals in sorted(by_metric.items()):
+                writer.writerow([metric_key,
+                                  f"{np.mean(vals):.4f}",
+                                  f"{np.std(vals):.4f}",
+                                  len(vals)])
+        logger.info(f"Summary stats -> {summary_path}")
+
+    logger.info("Benchmark run complete.")
 
 
 if __name__ == "__main__":
